@@ -1,0 +1,26 @@
+{
+  "name": "@calan-co/pi-extensions",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Calan & Co Pi extensions monorepo.",
+  "type": "module",
+  "scripts": {
+    "test": "node --import tsx --test test/*.test.mjs",
+    "check": "node --check extensions/pi-sandcastle/backlog-planner.mjs && node --check extensions/pi-sandcastle/backlog.mjs && node --check extensions/pi-sandcastle/run-management.mjs"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "^11.10.0",
+      "onFail": "download"
+    }
+  },
+  "dependencies": {
+    "@ai-hero/sandcastle": "^0.12.0",
+    "@sinclair/typebox": "^0.34.49",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.0"
+  }
+}

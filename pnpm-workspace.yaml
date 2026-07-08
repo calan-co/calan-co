@@ -1,0 +1,8 @@
+packages:
+  - extensions/*
+
+allowBuilds:
+  esbuild: true
+
+confirmModulesPurge: false
+blockExoticSubdeps: false
