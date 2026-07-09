@@ -35,7 +35,7 @@ Pipelines are extension-level orchestration over Sandcastle primitives. They sho
 
 ## Tasks
 
-- [x] Register /sc:pipeline in extensions/pi-sandcastle/index.ts and parse <pipeline> plus optional prompt text.
+- [x] Register /backlog:pipeline in extensions/pi-sandcastle/index.ts and parse <pipeline> plus optional prompt text.
 - [x] Extend config loading to expose fixed pipeline definitions with ordered agent steps, branch strategy, and sandbox options.
 - [x] Use injected Sandcastle createWorktree/worktree.run capability to create or reuse the configured branch/worktree.
 - [x] Execute each configured pipeline step in order, passing role-specific prompts and preserving per-step logs.
@@ -44,14 +44,14 @@ Pipelines are extension-level orchestration over Sandcastle primitives. They sho
 
 ## Deliverables
 
-- [x] /sc:pipeline command.
+- [x] /backlog:pipeline command.
 - [x] Pipeline run records with per-step details.
 - [x] Tests for success, failure, and unknown pipeline cases.
 
 ## Acceptance Criteria
 
-- [x] After reload, /sc:pipeline is registered by the dev extension.
-- [x] /sc:pipeline validates the requested pipeline against repo config and rejects unknown names with available options.
+- [x] After reload, /backlog:pipeline is registered by the dev extension.
+- [x] /backlog:pipeline validates the requested pipeline against repo config and rejects unknown names with available options.
 - [x] Pipeline execution uses the injected Sandcastle worktree capability and creates/reuses the expected branch strategy.
 - [x] Each pipeline step records status, agent role, log path, commits, and errors.
 - [x] Arbitrary inline pipeline definitions are not accepted from the command line.

@@ -44,7 +44,7 @@ The stable, reusable, overrideable objects are:
 
 6. `agents`
    - Reusable named execution identities.
-   - Agents are globally scoped by default because they are reused across pipelines and surfaced in `/sc:run`.
+   - Agents are globally scoped by default because they are reused across pipelines and surfaced in `/backlog:run`.
    - Pipelines may override agent settings per step without mutating the shared agent.
 
 7. `prompts`
@@ -53,7 +53,7 @@ The stable, reusable, overrideable objects are:
 
 8. `pipelines`
    - User-facing workflows composed from prompt+agent execution steps and deterministic control steps.
-   - Pipelines are the primary command targets for `/sc:pipeline` and `/backlog:process`.
+   - Pipelines are the primary command targets for `/backlog:pipeline` and `/backlog:process`.
 
 9. `policies`
    - Reusable named policies for branches, images, concurrency, retry, completion, and post-processing.

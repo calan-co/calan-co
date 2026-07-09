@@ -26,21 +26,21 @@ function fakePi() {
   };
 }
 
-test('registerRunManagementCommands registers the /sc:* run management surface', () => {
+test('registerRunManagementCommands registers the /backlog:* run management surface', () => {
   const pi = fakePi();
 
   registerRunManagementCommands(pi);
 
   assert.deepEqual([...pi.commands.keys()].sort(), [
-    'sc:cancel',
-    'sc:logs',
-    'sc:resume',
-    'sc:runs',
-    'sc:status',
+    'backlog:cancel',
+    'backlog:logs',
+    'backlog:resume',
+    'backlog:runs',
+    'backlog:status',
   ]);
 });
 
-test('piSandcastle registers only the updated /sc:* and /backlog:* slash-command surface on reload', () => {
+test('piSandcastle registers only the updated /backlog:* and /backlog:* slash-command surface on reload', () => {
   const repoRoot = fileURLToPath(new URL('..', import.meta.url));
   const output = execFileSync(
     process.execPath,
@@ -69,29 +69,24 @@ test('piSandcastle registers only the updated /sc:* and /backlog:* slash-command
 
   const commands = JSON.parse(output.trim());
   assert.deepEqual(commands, [
+    'backlog:build-image',
+    'backlog:cancel',
     'backlog:config',
+    'backlog:config-raw',
     'backlog:inspect',
     'backlog:list',
+    'backlog:logs',
     'backlog:next',
+    'backlog:pipeline',
     'backlog:plan',
     'backlog:process',
     'backlog:resume',
+    'backlog:run',
     'backlog:runs',
     'backlog:status',
-    'sc:build-image',
-    'sc:cancel',
-    'sc:config',
-    'sc:logs',
-    'sc:pipeline',
-    'sc:resume',
-    'sc:run',
-    'sc:runs',
-    'sc:status',
   ]);
-  assert.deepEqual(
-    commands.filter((name) => !name.startsWith('sc:') && !name.startsWith('backlog:')),
-    [],
-  );
+  assert.deepEqual(commands.filter((name) => name.startsWith('sc:')), []);
+  assert.deepEqual(commands.filter((name) => !name.startsWith('backlog:')), []);
 });
 
 test('sc run management lists recent runs and infers active status safely', async () => {

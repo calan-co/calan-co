@@ -324,35 +324,35 @@ export function registerRunManagementCommands(pi, options = {}) {
 	const service = createRunManagementService(options);
 	const commandDefs = [
 		[
-			"sc:runs",
+			"backlog:runs",
 			"Show durable Sandcastle runs for the current repo",
 			async (_args, ctx) => {
 				notifyResult(ctx, await service.list(ctx.cwd), (result) => result.message);
 			},
 		],
 		[
-			"sc:status",
+			"backlog:status",
 			"Inspect a durable Sandcastle run",
 			async (args, ctx) => {
 				notifyResult(ctx, await service.status(ctx.cwd, normalizeSelector(args)), (result) => result.message);
 			},
 		],
 		[
-			"sc:logs",
+			"backlog:logs",
 			"Show the log path for a durable Sandcastle run",
 			async (args, ctx) => {
 				notifyResult(ctx, await service.logs(ctx.cwd, normalizeSelector(args)), (result) => `Log path: ${result.logPath}`);
 			},
 		],
 		[
-			"sc:cancel",
+			"backlog:cancel",
 			"Cancel one or more active Sandcastle runs",
 			async (args, ctx) => {
 				notifyResult(ctx, await service.cancel(ctx.cwd, normalizeSelector(args)), (result) => result.message);
 			},
 		],
 		[
-			"sc:resume",
+			"backlog:resume",
 			"Resume a resumable Sandcastle run",
 			async (args, ctx) => {
 				notifyResult(ctx, await service.resume(ctx.cwd, normalizeSelector(args)), (result) => result.message);

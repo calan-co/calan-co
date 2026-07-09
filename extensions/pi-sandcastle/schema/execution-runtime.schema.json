@@ -43,6 +43,13 @@
     "policies": {
       "$ref": "#/$defs/policies"
     },
+    "stepModules": {
+      "type": "object",
+      "description": "Reusable pack-internal step templates that compile to pipeline steps.",
+      "additionalProperties": {
+        "$ref": "#/$defs/stepModule"
+      }
+    },
     "adapters": {
       "type": "object",
       "additionalProperties": {
@@ -311,9 +318,20 @@
         "imagePolicy": { "$ref": "#/$defs/referenceOrDefault" }
       }
     },
+    "stepModule": {
+      "allOf": [
+        { "$ref": "#/$defs/pipelineStepBase" },
+        { "required": ["kind"] }
+      ]
+    },
     "pipelineStep": {
+      "allOf": [
+        { "$ref": "#/$defs/pipelineStepBase" },
+        { "required": ["id", "kind"] }
+      ]
+    },
+    "pipelineStepBase": {
       "type": "object",
-      "required": ["id", "kind"],
       "additionalProperties": false,
       "properties": {
         "id": { "$ref": "#/$defs/identifier" },

@@ -5,36 +5,36 @@ import test from 'node:test';
 const docsFileUrl = new URL('../docs/command-surface.md', import.meta.url);
 const documentedCommandSnippets = [
   {
-    message: 'issue 00010 should document /sc:config',
-    snippet: '`/sc:config`',
+    message: 'issue 00010 should document /backlog:config-raw',
+    snippet: '`/backlog:config-raw`',
   },
   {
-    message: 'issue 00010 should document /sc:run',
-    snippet: '`/sc:run [agent] [prompt]`',
+    message: 'issue 00010 should document /backlog:run',
+    snippet: '`/backlog:run [agent] [prompt]`',
   },
   {
-    message: 'issue 00010 should document /sc:pipeline',
-    snippet: '`/sc:pipeline <pipeline> [prompt]`',
+    message: 'issue 00010 should document /backlog:pipeline',
+    snippet: '`/backlog:pipeline <pipeline> [prompt]`',
   },
   {
-    message: 'issue 00010 should document /sc:runs',
-    snippet: '`/sc:runs`',
+    message: 'issue 00010 should document /backlog:runs',
+    snippet: '`/backlog:runs`',
   },
   {
-    message: 'issue 00010 should document /sc:status',
-    snippet: '`/sc:status [run-id]`',
+    message: 'issue 00010 should document /backlog:status',
+    snippet: '`/backlog:status [run-id]`',
   },
   {
-    message: 'issue 00010 should document /sc:logs',
-    snippet: '`/sc:logs [run-id]`',
+    message: 'issue 00010 should document /backlog:logs',
+    snippet: '`/backlog:logs [run-id]`',
   },
   {
-    message: 'issue 00010 should document /sc:cancel',
-    snippet: '`/sc:cancel [run-id|all]`',
+    message: 'issue 00010 should document /backlog:cancel',
+    snippet: '`/backlog:cancel [run-id|all]`',
   },
   {
-    message: 'issue 00010 should document /sc:resume',
-    snippet: '`/sc:resume [run-id]`',
+    message: 'issue 00010 should document /backlog:resume',
+    snippet: '`/backlog:resume [run-id]`',
   },
   {
     message: 'issue 00010 should document /backlog:list',
@@ -75,21 +75,21 @@ const requiredDocsSnippets = [
     snippet: '# Sandcastle Backlog Command Surface',
   },
   {
-    message: 'issue 00010 should explain the /sc:* command namespace',
-    snippet: '`/sc:*` for Sandcastle configuration, primitive execution, and run management.',
+    message: 'issue 00010 should explain the /backlog:* command namespace',
+    snippet: '`/backlog:*` for Sandcastle configuration, primitive execution, and run management.',
   },
   {
     message: 'issue 00010 should document setup and storage',
     snippet: '.pi/sandcastle/results',
   },
   {
-    message: 'issue 00010 should document /sc:config init semantics',
+    message: 'issue 00010 should document /backlog:config-raw init semantics',
     snippet:
-      '`/sc:config init` hydrates missing repo-local files and prompt templates without overwriting existing edits.',
+      '`/backlog:config-raw init` hydrates missing repo-local files and prompt templates without overwriting existing edits.',
   },
   {
     message: 'issue 00010 should document fixed pipeline execution',
-    snippet: '`/sc:pipeline <pipeline> [prompt]` runs a fixed domain pipeline directly.',
+    snippet: '`/backlog:pipeline <pipeline> [prompt]` runs a fixed domain pipeline directly.',
   },
   {
     message: 'issue 00010 should explain deterministic query parsing',

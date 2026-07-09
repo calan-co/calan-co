@@ -29,7 +29,7 @@ function makeRepo(name = 'doc-vader', defaultSandbox = 'docker', options = {}) {
   return cwd;
 }
 
-test('/sc:build-image reports clear next steps when Sandcastle CLI scaffold is missing', async () => {
+test('/backlog:build-image reports clear next steps when Sandcastle CLI scaffold is missing', async () => {
   const cwd = makeRepo('missing-scaffold', 'podman', { skipSandcastleDir: true });
   const pi = fakePi();
   const notifications = [];
@@ -41,14 +41,14 @@ test('/sc:build-image reports clear next steps when Sandcastle CLI scaffold is m
     },
   });
 
-  await pi.commands.get('sc:build-image').handler('', {
+  await pi.commands.get('backlog:build-image').handler('', {
     cwd,
     ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
   });
 
   assert.equal(notifications.at(-1).type, 'error');
-  assert.match(notifications.at(-1).message, /Sandcastle CLI scaffold is missing/);
-  assert.match(notifications.at(-1).message, /\/sc:config init|\/backlog:config/);
+  assert.match(notifications.at(-1).message, /Execution runtime scaffold is missing/);
+  assert.match(notifications.at(-1).message, /\/backlog:config-raw init|\/backlog:config/);
 });
 
 function fakePi() {
@@ -63,7 +63,7 @@ function fakePi() {
   };
 }
 
-test('/sc:build-image builds the default repo image through injectable image capability', async () => {
+test('/backlog:build-image builds the default repo image through injectable image capability', async () => {
   const cwd = makeRepo();
   const pi = fakePi();
   const calls = [];
@@ -76,7 +76,7 @@ test('/sc:build-image builds the default repo image through injectable image cap
     },
   });
 
-  await pi.commands.get('sc:build-image').handler('', {
+  await pi.commands.get('backlog:build-image').handler('', {
     cwd,
     ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
   });
@@ -85,7 +85,7 @@ test('/sc:build-image builds the default repo image through injectable image cap
   assert.equal(notifications.at(-1).type, 'success');
 });
 
-test('/sc:build-image defaults to configured defaultSandbox when provider is omitted', async () => {
+test('/backlog:build-image defaults to configured defaultSandbox when provider is omitted', async () => {
   const cwd = makeRepo('doc-vader', 'podman');
   const pi = fakePi();
   const calls = [];
@@ -97,7 +97,7 @@ test('/sc:build-image defaults to configured defaultSandbox when provider is omi
     },
   });
 
-  await pi.commands.get('sc:build-image').handler('', {
+  await pi.commands.get('backlog:build-image').handler('', {
     cwd,
     ui: { notify() {} },
   });
@@ -105,7 +105,7 @@ test('/sc:build-image defaults to configured defaultSandbox when provider is omi
   assert.equal(calls[0].provider, 'podman');
 });
 
-test('/sc:run auto-builds a missing docker image before starting Sandcastle', async () => {
+test('/backlog:run auto-builds a missing docker image before starting Sandcastle', async () => {
   const cwd = makeRepo();
   const pi = fakePi();
   const calls = [];
@@ -129,7 +129,7 @@ test('/sc:run auto-builds a missing docker image before starting Sandcastle', as
     },
   });
 
-  await pi.commands.get('sc:run').handler('reviewer check this', {
+  await pi.commands.get('backlog:run').handler('reviewer check this', {
     cwd,
     ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
   });
@@ -142,7 +142,7 @@ test('/sc:run auto-builds a missing docker image before starting Sandcastle', as
 });
 
 
-test('/sc:config set reinitializes and silently builds configured image', async () => {
+test('/backlog:config-raw set reinitializes and silently builds configured image', async () => {
   const cwd = makeRepo();
   const pi = fakePi();
   const calls = [];
@@ -155,7 +155,7 @@ test('/sc:config set reinitializes and silently builds configured image', async 
     },
   });
 
-  await pi.commands.get('sc:config').handler('set defaultSandbox docker', {
+  await pi.commands.get('backlog:config-raw').handler('set defaultSandbox docker', {
     cwd,
     ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
   });

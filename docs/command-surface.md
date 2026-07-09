@@ -1,23 +1,23 @@
 # Sandcastle Backlog Command Surface
 
-Pi-Sandcastle separates `/sc:*` for Sandcastle configuration, primitive execution, and run management. from `/backlog:*` for backlog discovery, planning, durable processing, and backlog run management.
+Pi-Sandcastle separates `/backlog:*` for Sandcastle configuration, primitive execution, and run management. from `/backlog:*` for backlog discovery, planning, durable processing, and backlog run management.
 
 ## Setup and storage
 
-Run `/sc:config init` to hydrate local Sandcastle support files. `/sc:config init` hydrates missing repo-local files and prompt templates without overwriting existing edits.
+Run `/backlog:config-raw init` to hydrate local Sandcastle support files. `/backlog:config-raw init` hydrates missing repo-local files and prompt templates without overwriting existing edits.
 
 Durable run records and logs are stored under `.pi/sandcastle/results`. Durable state begins when `/backlog:process` or `/backlog:resume` executes a Sandcastle-backed pipeline.
 
 ## Sandcastle primitive commands
 
-- `/sc:config` manages repo-local Sandcastle config.
-- `/sc:run [agent] [prompt]` runs one configured agent with free-form prompt text.
-- `/sc:pipeline <pipeline> [prompt]` runs a fixed domain pipeline directly.
-- `/sc:runs` lists recent primitive Sandcastle runs.
-- `/sc:status [run-id]` inspects the current, latest, or specified primitive run.
-- `/sc:logs [run-id]` prints or returns the log path for a primitive run.
-- `/sc:cancel [run-id|all]` cancels active primitive run work.
-- `/sc:resume [run-id]` resumes a primitive run when the provider supports resumable execution.
+- `/backlog:config-raw` manages repo-local Sandcastle config.
+- `/backlog:run [agent] [prompt]` runs one configured agent with free-form prompt text.
+- `/backlog:pipeline <pipeline> [prompt]` runs a fixed domain pipeline directly.
+- `/backlog:runs` lists recent primitive Sandcastle runs.
+- `/backlog:status [run-id]` inspects the current, latest, or specified primitive run.
+- `/backlog:logs [run-id]` prints or returns the log path for a primitive run.
+- `/backlog:cancel [run-id|all]` cancels active primitive run work.
+- `/backlog:resume [run-id]` resumes a primitive run when the provider supports resumable execution.
 
 ## Backlog commands
 

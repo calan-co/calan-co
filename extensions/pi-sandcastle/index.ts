@@ -1,5 +1,5 @@
 // Pi Sandcastle extension: Pi-native delegation UI backed by Sandcastle sandboxes.
-// Commands: /sc:* and /backlog:* command surfaces for Sandcastle-backed work.
+// Commands: /backlog:* command surfaces backed by a Pi-Sandcastle execution runtime adapter.
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { SelectList as PiSelectList, matchesKey } from "@earendil-works/pi-tui";
@@ -30,10 +30,10 @@ import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { ConfigShadowModel } from "./config-shadow-model.ts";
 import { buildSandcastleImage } from "./build-image.ts";
-import { registerRunManagementCommands } from "./run-management.mjs";
 import { registerBacklogCommands } from "./backlog.mjs";
 import { buildBacklogPlan, formatBacklogPlan } from "./backlog-planner.mjs";
 import { buildDefaultConfigText, packsToConfig } from "./pipeline-packs.mjs";
+import { loadExecutionRuntimePack, listRuntimeAgents, listRuntimePipelines } from "./execution-runtime.ts";
 import {
 	formatBacklogRunList,
 	formatStatusSelection,
@@ -1763,7 +1763,7 @@ async function loadExistingConfig(cwd: string): Promise<SandcastleConfig> {
 }
 
 function resolveDefaultRunAgentName(cfg: SandcastleConfig): string | undefined {
-	return Object.entries(cfg.agents).find(([, agent]) => Boolean(agent.model))?.[0] || Object.keys(cfg.agents)[0];
+	return Object.entries(cfg.agents).find(([, agent]) => Boolean(agent.model && agent.model !== DEFAULT_MODEL))?.[0] || Object.keys(cfg.agents)[0];
 }
 
 function resolveRunInvocation(args: string, cfg: SandcastleConfig): { agentName: string | undefined; prompt: string } {
@@ -1910,8 +1910,8 @@ async function inspectImageCreated(cwd: string, provider: "docker" | "podman", i
 
 function missingSandcastleCliScaffoldMessage(): string {
 	return [
-		"Sandcastle CLI scaffold is missing: .sandcastle/.",
-		"Initialize it with /sc:config init or /backlog:config. The extension runs non-interactive sandcastle init using values from .pi/sandcastle/config.yaml.",
+		"Execution runtime scaffold is missing: .sandcastle/.",
+		"Initialize it with /backlog:config init or /backlog:config. The extension runs non-interactive sandcastle init using values from .pi/sandcastle/config.yaml.",
 	].join("\n");
 }
 
@@ -1968,7 +1968,7 @@ async function quietlyBuildConfiguredImage(cwd: string, cfg: Partial<SandcastleC
 	try {
 		await buildSandboxImageOnce(cwd, provider, imageName, deps?.buildImage || buildSandboxImage);
 	} catch {
-		// Silent by design: config saves should not become image-build UX unless the user explicitly runs /sc:build-image.
+		// Silent by design: config saves should not become image-build UX unless the user explicitly runs /backlog:build-image.
 	}
 }
 
@@ -2008,18 +2008,18 @@ function registerScRunCommand(
 	sandcastle: SandcastleRunCapability,
 	deps: SandcastleRunDeps,
 ) {
-	pi.registerCommand("sc:run", {
-		description: "Run one Sandcastle-backed agent directly: /sc:run [agent] [prompt]",
-		getArgumentCompletions: (prefix: string) => completionItems(["planner", "worker", "implementer", "reviewer", "merger"], tokenAfterLastSpace(prefix)),
+	pi.registerCommand("backlog:run", {
+		description: "Run one configured backlog execution agent: /backlog:run [agent] [prompt]",
+		getArgumentCompletions: (prefix: string) => completionItems(listRuntimeAgents(loadExecutionRuntimePack()).map((agent) => ({ value: agent.name, label: agent.name, description: agent.description })), tokenAfterLastSpace(prefix)),
 		handler: async (args, ctx) => {
 			const cfg = await loadConfig(ctx.cwd);
 			const { agentName, prompt } = resolveRunInvocation(args, cfg);
 			if (!agentName) {
-				ctx.ui.notify("No Sandcastle agents are configured. Run /sc:config init, then edit .pi/sandcastle/config.yaml.", "error");
+				ctx.ui.notify("No backlog execution agents are configured. Run /backlog:config init, then edit .pi/sandcastle/config.yaml.", "error");
 				return;
 			}
 			if (!prompt) {
-				ctx.ui.notify("Usage: /sc:run [agent] <prompt>", "error");
+				ctx.ui.notify("Usage: /backlog:run [agent] <prompt>", "error");
 				return;
 			}
 
@@ -2053,7 +2053,7 @@ function registerScRunCommand(
 
 			try {
 				await ensureSandboxImage(ctx.cwd, runSettings.sandbox, deps.image, (reason, imageName) => {
-					ctx.ui.notify(`Sandcastle image ${imageName} is ${reason}; rebuilding before /sc:run.`, "info");
+					ctx.ui.notify(`Execution image ${imageName} is ${reason}; rebuilding before /backlog:run.`, "info");
 				}, cfg);
 				const result = await sandcastle.run({
 					agent: sandcastle.makeAgent(runSettings.model, runSettings.provider),
@@ -2061,7 +2061,7 @@ function registerScRunCommand(
 					cwd: ctx.cwd,
 					prompt,
 					maxIterations: 1,
-					name: `sc-run:${id}`,
+					name: `backlog-run:${id}`,
 					branchStrategy: runSettings.branchStrategy,
 					logging: {
 						type: "file",
@@ -2297,7 +2297,7 @@ export async function executePipeline(
 
 function renderWidget(runs: Map<string, RunState>): string[] {
 	const active = [...runs.values()].sort((a, b) => b.startedAt - a.startedAt).slice(0, 8);
-	const lines = [`Sandcastle runs: ${runs.size}`];
+	const lines = [`Execution runs: ${runs.size}`];
 	for (const run of active) {
 		const age = Math.round((Date.now() - run.startedAt) / 1000);
 		const commits = run.commits?.length ? ` · ${run.commits.length} commit(s)` : "";
@@ -2313,7 +2313,7 @@ function completionItems(values: Array<string | SelectItem>, prefix: string): Se
 }
 
 function pipelineCompletionItems(prefix: string): SelectItem[] | null {
-	return completionItems(["simple-loop", "sequential-reviewer", "parallel-planner", "parallel-planner-with-review", "archive"], prefix);
+	return completionItems(listRuntimePipelines(loadExecutionRuntimePack()).map((pipeline) => ({ value: pipeline.name, label: pipeline.name, description: pipeline.description })), prefix);
 }
 
 function flagCompletionItems(flags: string[], prefix: string): SelectItem[] | null {
@@ -2612,13 +2612,13 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 			title: "ACTIONS",
 			subtitle: "Operational commands around config editing",
 			items: [
-				{ value: "action:init", label: "Initialize / hydrate config", description: "Run /sc:config init without overwriting edits" },
+				{ value: "action:init", label: "Initialize / hydrate config", description: "Run /backlog:config init without overwriting edits" },
 				{ value: "nav:packs", label: "Apply config pack", description: "Choose a template pack; confirmation required" },
 				{ value: "action:edit", label: "Edit raw config", description: `Open ${CONFIG_PATH} in ${getPreferredEditor(ctx.cwd)}` },
 				{ value: "nav:editors", label: "Preferred editor", description: "Choose a common terminal editor" },
-				{ value: "action:validate", label: "Validate config", description: "Run /sc:config validate" },
-				{ value: "action:sandcastle-init", label: "Initialize Sandcastle CLI scaffold", description: "Run non-interactive sandcastle init using this config" },
-				{ value: "action:build", label: "Build sandbox image", description: "Run /sc:build-image using defaultSandbox" },
+				{ value: "action:validate", label: "Validate config", description: "Run /backlog:config validate" },
+				{ value: "action:sandcastle-init", label: "Initialize Execution runtime scaffold", description: "Run non-interactive sandcastle init using this config" },
+				{ value: "action:build", label: "Build sandbox image", description: "Run /backlog:build-image using defaultSandbox" },
 			],
 		});
 
@@ -2843,7 +2843,40 @@ export default function piSandcastle(
 	}
 
 	function helpText(): string {
-		return `Sandcastle commands\n\nSetup and configuration:\n  /backlog:config\n    Open the friendly BIOS-style config wrapper.\n\n  /sc:config init\n    Initialize/hydrate the local config/runner scaffold.\n\n  /sc:config show|get|set|edit|editor|reset|validate\n    Inspect and maintain repo-local Sandcastle config.\n\nExecution:\n  /sc:build-image [docker|podman]\n    Build the repo's Sandcastle sandbox image.\n\n  /sc:run [agent] <prompt>\n    Run one Sandcastle-backed agent directly.\n\n  /sc:pipeline <pipeline> [prompt]\n    Run a fixed-domain pipeline directly.\n\nRun management:\n  /sc:runs\n    Show durable Sandcastle runs.\n\n  /sc:status [run-id]\n    Inspect a current, latest, or specified Sandcastle run.\n\n  /sc:logs [run-id]\n    Show the stored log path for a run.\n\n  /sc:cancel [run-id]\n    Cancel active Sandcastle work.\n\n  /sc:resume [run-id]\n    Resume resumable Sandcastle work.\n\nBacklog views and processing:\n  /backlog:list [query]\n    List backlog items without mutation.\n\n  /backlog:inspect <item-id>\n    Inspect one backlog item without mutation.\n\n  /backlog:plan [query] --iterations N\n    Plan read-only backlog iterations.\n\n  /backlog:next [query]\n    Plan the next backlog iteration.\n\n  /backlog:process [query] --pipeline <pipeline>\n    Start durable backlog processing.\n\n  /backlog:runs|status|resume\n    Manage durable backlog processing runs.`;
+		return `Backlog execution commands
+
+Setup and configuration:
+  /backlog:config [show|init|edit|editor|get|set|reset|validate]
+    Open the friendly config TUI, or run raw config utility actions when arguments are supplied.
+
+Execution utilities:
+  /backlog:build-image [docker|podman]
+    Build the repo execution sandbox image.
+
+  /backlog:run [agent] <prompt>
+    Run one configured execution agent directly.
+
+  /backlog:pipeline <pipeline> [prompt]
+    Run a fixed-domain runtime pipeline directly.
+
+Backlog views and processing:
+  /backlog:list [query]
+    List backlog items without mutation.
+
+  /backlog:inspect <item-id>
+    Inspect one backlog item without mutation.
+
+  /backlog:plan [query] --iterations N
+    Plan read-only backlog iterations.
+
+  /backlog:next [query]
+    Plan the next backlog iteration.
+
+  /backlog:process [query] --pipeline <pipeline>
+    Start durable backlog processing through the execution runtime adapter.
+
+  /backlog:runs|status|resume
+    Manage durable backlog processing runs.`;
 	}
 
 	function getBacklogResumeCapability(ctx: any): ((record: unknown) => Promise<unknown> | unknown) | undefined {
@@ -2868,7 +2901,7 @@ export default function piSandcastle(
 	async function dispatch(cwd: string, agentName: string, task: string, ctx?: any): Promise<RunState> {
 		const cfg = await loadConfig(cwd);
 		const agent = cfg.agents[agentName];
-		if (!agent) throw new Error(`Unknown Sandcastle agent '${agentName}'. Run /sc:config show to inspect configured agents.`);
+		if (!agent) throw new Error(`Unknown execution agent '${agentName}'. Run /backlog:config show to inspect configured agents.`);
 		const id = `${Date.now().toString(36)}-${randomUUID().slice(0, 8)}-${agentName}`;
 		const resultPath = join(cwd, RESULTS_DIR, `${id}.json`);
 		const logPath = join(cwd, RESULTS_DIR, `${id}.log`);
@@ -2900,7 +2933,7 @@ export default function piSandcastle(
 		try {
 			await ensureSandboxImage(cwd, runtime.sandbox, deps.image, (reason, imageName) => {
 				state.lastLine = `building ${reason} image ${imageName}`;
-				ctx?.ui?.notify(`Sandcastle image ${imageName} is ${reason}; rebuilding before dispatch.`, "info");
+				ctx?.ui?.notify(`Execution image ${imageName} is ${reason}; rebuilding before dispatch.`, "info");
 				refreshWidget();
 			}, cfg);
 		} catch (error) {
@@ -2970,15 +3003,15 @@ export default function piSandcastle(
 	async function delegateDefault(cwd: string, task: string, ctx?: any): Promise<void> {
 		const cfg = await loadConfig(cwd);
 		const agent = cfg.agents.planner ? "planner" : Object.keys(cfg.agents)[0];
-		if (!agent) throw new Error("No Sandcastle agents configured. Run /sc:config init, then edit .pi/sandcastle/config.yaml.");
+		if (!agent) throw new Error("No execution agents configured. Run /backlog:config init, then edit .pi/sandcastle/config.yaml.");
 		await dispatch(cwd, agent, task, ctx);
 	}
 
 	async function delegateOpenWork(cwd: string, focus: string, ctx?: any): Promise<void> {
-		const task = `Inspect available open work for this repository and recommend what to pick up next.\n\nLook for, in order when available:\n1. GitHub issues and PRs via gh (for example: gh issue list, gh pr list).\n2. Local backlog/work-item directories, docs, TODO/FIXME comments, and project planning files.\n3. Failing or skipped tests that indicate unfinished work.\n\nFocus: ${focus || "general project work"}\n\nOutput:\n- Ranked open work items with source/link/file evidence.\n- Suggested first item to delegate next.\n- A ready-to-run /sc:run command for the top item.\n\nDo not modify files. End with <promise>COMPLETE</promise>.`;
+		const task = `Inspect available open work for this repository and recommend what to pick up next.\n\nLook for, in order when available:\n1. GitHub issues and PRs via gh (for example: gh issue list, gh pr list).\n2. Local backlog/work-item directories, docs, TODO/FIXME comments, and project planning files.\n3. Failing or skipped tests that indicate unfinished work.\n\nFocus: ${focus || "general project work"}\n\nOutput:\n- Ranked open work items with source/link/file evidence.\n- Suggested first item to delegate next.\n- A ready-to-run /backlog:run command for the top item.\n\nDo not modify files. End with <promise>COMPLETE</promise>.`;
 		const cfg = await loadConfig(cwd);
 		const agent = cfg.agents.planner ? "planner" : Object.keys(cfg.agents)[0];
-		if (!agent) throw new Error("No Sandcastle agents configured. Run /sc:config init, then edit .pi/sandcastle/config.yaml.");
+		if (!agent) throw new Error("No execution agents configured. Run /backlog:config init, then edit .pi/sandcastle/config.yaml.");
 		await dispatch(cwd, agent, task, ctx);
 	}
 
@@ -3001,7 +3034,7 @@ export default function piSandcastle(
 	function selectAgentForPipeline(pipeline: string, cfg: SandcastleConfig): string {
 		if (!cfg.pipelines[pipeline]) {
 			const available = Object.keys(cfg.pipelines).sort();
-			throw new Error(`No configured backlog pipeline '${pipeline}'. Run /sc:config init to hydrate default pipelines or choose one of: ${available.length ? available.join(", ") : "(none configured)"}.`);
+			throw new Error(`No configured backlog pipeline '${pipeline}'. Run /backlog:config init to hydrate default pipelines or choose one of: ${available.length ? available.join(", ") : "(none configured)"}.`);
 		}
 		switch (pipeline) {
 			case "review":
@@ -3081,19 +3114,20 @@ export default function piSandcastle(
 			});
 		}
 
-		const cfg = await loadConfig(cwd);
-		const agentName = selectAgentForPipeline(record.pipeline, cfg);
-		const shouldRunInParallel = parallel && record.resolvedItems.length > 1;
-		const dispatched = shouldRunInParallel
-			? await dispatchBacklogItemsWithLimit(cwd, agentName, record, 4, ctx)
-			: await dispatchBacklogItemsSequentially(cwd, agentName, record, ctx);
-
-		const status = dispatched.every((entry) => entry.status === "done") ? "done" : "error";
-
+		const runtimePrompt = [
+			`Backlog process ${record.id}`,
+			`Pipeline: ${record.pipeline}`,
+			`Query: ${record.query || "(none)"}`,
+			`Parallel requested: ${parallel ? "yes" : "no"}`,
+			"",
+			"Items:",
+			...record.resolvedItems.map((item) => `- ${item.id} ${item.title} (${item.sourcePath})${item.summary ? ` — ${item.summary}` : ""}`),
+		].join("\n");
+		const pipelineRun = await executePipeline(cwd, record.pipeline, runtimePrompt, { ...deps.pipeline, image: deps.pipeline?.image || deps.image });
 		return {
-			branches: dispatched.map((entry) => entry.branch).filter((branch): branch is string => !!branch),
-			logs: dispatched.map((entry) => entry.logPath).filter((logPath): logPath is string => !!logPath),
-			status,
+			branches: [pipelineRun.branch].filter((branch): branch is string => !!branch),
+			logs: [pipelineRun.logDir].filter((logPath): logPath is string => !!logPath),
+			status: pipelineRun.status === "completed" ? "done" : "error",
 		};
 	}
 
@@ -3113,7 +3147,7 @@ export default function piSandcastle(
 			const agentLines = Object.entries(cfg.agents).map(([name, agent]) => `- ${name}: ${agent?.description || "configured delegation agent"}`).join("\n");
 			if (!agentLines) return;
 			return {
-				systemPrompt: `${event.systemPrompt}\n\n## Pi Sandcastle delegation mode\nAvailable agents:\n${agentLines}\n\nPrefer delegate_agent for delegable research, implementation, review, and AFK work. Dispatch prompts must be self-contained and include expected output/artifacts. Use /backlog:list and /backlog:inspect to inspect work, /sc:run to start agent work, and /sc:runs to inspect progress.`,
+				systemPrompt: `${event.systemPrompt}\n\n## Pi Sandcastle delegation mode\nAvailable agents:\n${agentLines}\n\nPrefer delegate_agent for delegable research, implementation, review, and AFK work. Dispatch prompts must be self-contained and include expected output/artifacts. Use /backlog:list and /backlog:inspect to inspect work, /backlog:run to start agent work, and /backlog:runs to inspect progress.`,
 			};
 		} catch {
 			return;
@@ -3124,17 +3158,16 @@ export default function piSandcastle(
 		for (const run of runs.values()) if (run.status === "running") run.proc?.kill("SIGTERM");
 	});
 
-	registerRunManagementCommands(pi);
 
-	pi.registerCommand("sc:build-image", {
-		description: "Build the repo's Sandcastle sandbox image: /sc:build-image [docker|podman]",
+	pi.registerCommand("backlog:build-image", {
+		description: "Build the repo's execution sandbox image: /backlog:build-image [docker|podman]",
 		getArgumentCompletions: (prefix: string) => completionItems(["docker", "podman"], tokenAfterLastSpace(prefix)),
 		handler: async (args, ctx) => {
 			const providerArg = args.trim().split(/\s+/).filter(Boolean)[0] as "docker" | "podman" | undefined;
 			const cfg = await loadConfig(ctx.cwd).catch(() => ({ defaultSandbox: DEFAULT_SANDBOX, agents: {}, chains: {}, pipelines: {} }) as SandcastleConfig);
 			const provider = providerArg || imageProviderForSandbox(cfg.defaultSandbox) || "docker";
 			if (provider !== "docker" && provider !== "podman") {
-				ctx.ui.notify("Usage: /sc:build-image [docker|podman]", "error");
+				ctx.ui.notify("Usage: /backlog:build-image [docker|podman]", "error");
 				return;
 			}
 			const imageName = defaultSandcastleImageName(ctx.cwd, cfg.imageNamePattern);
@@ -3151,10 +3184,10 @@ export default function piSandcastle(
 	});
 
 	pi.registerCommand("backlog:config", {
-		description: "Open the friendly backlog/Sandcastle configuration BIOS",
+		description: "Open the friendly backlog/Backlog execution configuration BIOS",
 		handler: async (_args, ctx) => {
 			if (ctx.mode !== "tui" || !ctx.ui?.custom) {
-				ctx.ui.notify("/backlog:config requires TUI mode. Use /sc:config for raw commands.", "error");
+				ctx.ui.notify("/backlog:config requires TUI mode. Use /backlog:config for raw commands.", "error");
 				return;
 			}
 			const action = await showBacklogConfigTui(ctx);
@@ -3168,7 +3201,7 @@ export default function piSandcastle(
 					const cliResult = await ensureSandcastleCliScaffold(ctx.cwd, cfg);
 					await quietlyBuildConfiguredImage(ctx.cwd, cfg, deps.image);
 					const changes = [...result.changes, ...cliResult.changes];
-					ctx.ui.notify(`Initialized Sandcastle config: ${changes.length ? changes.join("; ") : "no changes needed"}.`, "success");
+					ctx.ui.notify(`Initialized Backlog execution config: ${changes.length ? changes.join("; ") : "no changes needed"}.`, "success");
 				}
 				if (action.type === "apply-pack") {
 					ensureScaffold(ctx.cwd, { hydrate: false });
@@ -3180,7 +3213,7 @@ export default function piSandcastle(
 				}
 				if (action.type === "set-editor") {
 					setPreferredEditor(ctx.cwd, action.editor);
-					ctx.ui.notify(`Preferred Sandcastle config editor set to: ${action.editor}`, "success");
+					ctx.ui.notify(`Preferred Backlog execution config editor set to: ${action.editor}`, "success");
 				}
 				if (action.type === "set-config") {
 					if (!supportedConfigPath(action.path)) throw new Error(`Unsupported config path '${action.path}'.`);
@@ -3215,7 +3248,7 @@ export default function piSandcastle(
 				if (action.type === "validate") {
 					const cfg = await loadExistingConfig(ctx.cwd);
 					const issues = validateConfig(ctx.cwd, cfg);
-					ctx.ui.notify(issues.length ? `Sandcastle config validation failed:\n- ${issues.join("\n- ")}` : "Sandcastle config validation passed.", issues.length ? "error" : "success");
+					ctx.ui.notify(issues.length ? `Backlog execution config validation failed:\n- ${issues.join("\n- ")}` : "Backlog execution config validation passed.", issues.length ? "error" : "success");
 				}
 				if (action.type === "build-image") {
 					const cfg = await loadConfig(ctx.cwd).catch(() => ({ defaultSandbox: DEFAULT_SANDBOX, agents: {}, chains: {}, pipelines: {} }) as SandcastleConfig);
@@ -3229,7 +3262,7 @@ export default function piSandcastle(
 					const cfg = await loadConfig(ctx.cwd);
 					const result = await ensureSandcastleCliScaffold(ctx.cwd, cfg, { reinitialize: true });
 					await quietlyBuildConfiguredImage(ctx.cwd, cfg, deps.image);
-					ctx.ui.notify(`Initialized Sandcastle CLI scaffold: ${result.changes.join("; ")}.`, "success");
+					ctx.ui.notify(`Initialized Execution runtime scaffold: ${result.changes.join("; ")}.`, "success");
 				}
 				if (action.type === "edit") {
 					const configPath = ensureScaffoldPath(ctx.cwd);
@@ -3249,7 +3282,7 @@ export default function piSandcastle(
 					const cfg = await loadConfig(ctx.cwd);
 					const cliResult = await ensureSandcastleCliScaffold(ctx.cwd, cfg, { reinitialize: true });
 					await quietlyBuildConfiguredImage(ctx.cwd, cfg, deps.image);
-					ctx.ui.notify(`Saved ${actions.length} Sandcastle config change(s); ${cliResult.changes.join("; ")}.`, "success");
+					ctx.ui.notify(`Saved ${actions.length} Backlog execution config change(s); ${cliResult.changes.join("; ")}.`, "success");
 				}
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -3257,8 +3290,8 @@ export default function piSandcastle(
 		},
 	});
 
-	pi.registerCommand("sc:config", {
-		description: "Show, init, edit, reset, or validate Sandcastle repo config",
+	pi.registerCommand("backlog:config-raw", {
+		description: "Show, init, edit, reset, or validate backlog execution config",
 		getArgumentCompletions: (prefix: string) => scConfigCompletionItems(prefix),
 		handler: async (args, ctx) => {
 			const input = args.trim();
@@ -3279,7 +3312,7 @@ export default function piSandcastle(
 						const changes = [...result.changes, ...cliResult.changes];
 						const changeSummary = changes.length ? changes.join("; ") : "no changes needed";
 						const overwriteSummary = result.overwritten.length ? ` Overwrote: ${result.overwritten.join(", ")}.` : "";
-						ctx.ui.notify(`Sandcastle config init complete: ${changeSummary}.${overwriteSummary}`, "success");
+						ctx.ui.notify(`Backlog execution config init complete: ${changeSummary}.${overwriteSummary}`, "success");
 						break;
 					}
 					case "edit": {
@@ -3297,7 +3330,7 @@ export default function piSandcastle(
 							});
 							ctx.ui.notify(exitCode === 0 ? `Edited ${CONFIG_PATH}.` : `Editor exited with code ${exitCode}.`, exitCode === 0 ? "success" : "error");
 						} else {
-							ctx.ui.notify(`Open ${configPath} in your editor, or run in TUI mode for /sc:config edit.`, "info");
+							ctx.ui.notify(`Open ${configPath} in your editor, or run in TUI mode for /backlog:config edit.`, "info");
 						}
 						break;
 					}
@@ -3308,13 +3341,13 @@ export default function piSandcastle(
 							break;
 						}
 						setPreferredEditor(ctx.cwd, editor);
-						ctx.ui.notify(`Preferred Sandcastle config editor set to: ${editor}`, "success");
+						ctx.ui.notify(`Preferred Backlog execution config editor set to: ${editor}`, "success");
 						break;
 					}
 					case "get": {
 						const path = rest.shift();
 						if (!path) {
-							ctx.ui.notify("Usage: /sc:config get <path>", "error");
+							ctx.ui.notify("Usage: /backlog:config get <path>", "error");
 							break;
 						}
 						const cfg = await loadConfig(ctx.cwd);
@@ -3330,7 +3363,7 @@ export default function piSandcastle(
 						const path = rest.shift();
 						const rawValue = rest.join(" ");
 						if (!path || !rawValue) {
-							ctx.ui.notify("Usage: /sc:config set <path> <value>", "error");
+							ctx.ui.notify("Usage: /backlog:config set <path> <value>", "error");
 							break;
 						}
 						if (!supportedConfigPath(path)) {
@@ -3377,12 +3410,12 @@ export default function piSandcastle(
 							cfg = { agents: {}, chains: {}, pipelines: {} };
 						}
 						const issues = validateConfig(ctx.cwd, cfg);
-						if (issues.length) ctx.ui.notify(`Sandcastle config validation failed:\n- ${issues.join("\n- ")}`, "error");
-						else ctx.ui.notify("Sandcastle config validation passed.", "success");
+						if (issues.length) ctx.ui.notify(`Backlog execution config validation failed:\n- ${issues.join("\n- ")}`, "error");
+						else ctx.ui.notify("Backlog execution config validation passed.", "success");
 						break;
 					}
 					default:
-						ctx.ui.notify(`Unknown /sc:config subcommand '${subcommand}'. Use show, init, edit, editor, get, set, reset, or validate.`, "error");
+						ctx.ui.notify(`Unknown /backlog:config subcommand '${subcommand}'. Use show, init, edit, editor, get, set, reset, or validate.`, "error");
 				}
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -3391,13 +3424,13 @@ export default function piSandcastle(
 		},
 	});
 
-	pi.registerCommand("sc:pipeline", {
-		description: "Run a fixed-domain pipeline: /sc:pipeline <pipeline> [prompt]",
+	pi.registerCommand("backlog:pipeline", {
+		description: "Run a fixed-domain pipeline: /backlog:pipeline <pipeline> [prompt]",
 		getArgumentCompletions: (prefix: string) => pipelineCompletionItems(tokenAfterLastSpace(prefix)),
 		handler: async (args, ctx) => {
 			const { pipeline, prompt } = parsePipelineCommandArgs(args);
 			if (!pipeline) {
-				ctx.ui.notify("Usage: /sc:pipeline <pipeline> [prompt]", "error");
+				ctx.ui.notify("Usage: /backlog:pipeline <pipeline> [prompt]", "error");
 				return;
 			}
 			try {
@@ -3505,6 +3538,26 @@ export default function piSandcastle(
 		},
 	});
 
+	pi.registerCommand("backlog:logs", {
+		description: "Show log paths for a backlog processing run: /backlog:logs [run-id]",
+		handler: async (args, ctx) => {
+			const selection = selectBacklogRunForStatus(listBacklogRuns(ctx.cwd), args.trim());
+			if (selection.kind !== "record") {
+				ctx.ui.notify(formatStatusSelection(selection), "error");
+				return;
+			}
+			const logs = selection.record.logs || [];
+			ctx.ui.notify(logs.length ? logs.join("\n") : `No logs recorded for backlog run ${selection.record.id}.`, "info");
+		},
+	});
+
+	pi.registerCommand("backlog:cancel", {
+		description: "Cancel active backlog processing work: /backlog:cancel [run-id]",
+		handler: async (_args, ctx) => {
+			ctx.ui.notify("Backlog run cancellation is not available for completed durable records yet.", "error");
+		},
+	});
+
 	pi.registerCommand("backlog:resume", {
 		description: "Resume a backlog processing run: /backlog:resume [run-id]",
 		handler: async (args, ctx) => {
@@ -3535,7 +3588,7 @@ export default function piSandcastle(
 			onUpdate?.({ content: [{ type: "text", text: `Dispatching ${agent} via Sandcastle...` }] });
 			const run = await dispatch(ctx.cwd, agent, task, ctx);
 			return {
-				content: [{ type: "text", text: `Dispatched ${agent} as ${run.id}. Branch: ${run.branch}. Log: ${run.logPath}. Result: ${run.resultPath}. Use /sc:runs for progress.` }],
+				content: [{ type: "text", text: `Dispatched ${agent} as ${run.id}. Branch: ${run.branch}. Log: ${run.logPath}. Result: ${run.resultPath}. Use /backlog:runs for progress.` }],
 				details: { id: run.id, agent, branch: run.branch, logPath: run.logPath, resultPath: run.resultPath },
 			};
 		},

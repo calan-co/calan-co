@@ -1,0 +1,202 @@
+{
+  "runtimeVersion": 1,
+  "metadata": {
+    "id": "pi-sandcastle.sandcastle-templates",
+    "label": "Sandcastle template equivalents",
+    "description": "Pi-native deterministic runtime pack ported from the bundled Sandcastle template concepts.",
+    "inspiredBy": [
+      "sandcastle@0.12.0 templates/blank",
+      "sandcastle@0.12.0 templates/simple-loop",
+      "sandcastle@0.12.0 templates/sequential-reviewer",
+      "sandcastle@0.12.0 templates/parallel-planner",
+      "sandcastle@0.12.0 templates/parallel-planner-with-review"
+    ]
+  },
+  "defaults": {
+    "agentProvider": "claude-code",
+    "sandboxProvider": "docker",
+    "model": "Agent Default",
+    "issueTracker": "github-issues",
+    "imagePolicy": "repo-default",
+    "branchPolicy": "branch-per-run",
+    "completionPolicy": "promise-complete"
+  },
+  "providers": {
+    "agentProviders": {
+      "claude-code": { "adapter": "sandcastle", "defaultModel": "Agent Default", "capabilities": ["streaming", "tools"] },
+      "pi": { "adapter": "sandcastle", "defaultModel": "Agent Default", "capabilities": ["streaming", "tools"] },
+      "codex": { "adapter": "sandcastle", "defaultModel": "Agent Default", "capabilities": ["streaming", "tools"] },
+      "cursor": { "adapter": "sandcastle", "defaultModel": "Agent Default", "capabilities": ["streaming", "tools"] },
+      "opencode": { "adapter": "sandcastle", "defaultModel": "Agent Default", "capabilities": ["streaming", "tools"] },
+      "copilot": { "adapter": "sandcastle", "defaultModel": "Agent Default", "capabilities": ["streaming", "tools"] }
+    },
+    "sandboxProviders": {
+      "docker": { "adapter": "sandcastle", "imagePolicy": "repo-default" },
+      "podman": { "adapter": "sandcastle", "imagePolicy": "repo-default" },
+      "vercel": { "adapter": "sandcastle" },
+      "no-sandbox": { "adapter": "sandcastle" }
+    }
+  },
+  "issueTrackers": {
+    "github-issues": {
+      "kind": "github-issues",
+      "listCommand": "gh issue list --state open",
+      "inspectCommand": "gh issue view {{ id }}",
+      "closeCommand": "gh issue close {{ id }}"
+    },
+    "beads": {
+      "kind": "beads",
+      "listCommand": "bd list --status open",
+      "inspectCommand": "bd show {{ id }}",
+      "closeCommand": "bd close {{ id }}"
+    },
+    "custom": {
+      "kind": "custom"
+    }
+  },
+  "agents": {
+    "planner": {
+      "role": "planner",
+      "provider": "default",
+      "model": "default",
+      "sandbox": "default",
+      "maxIterations": 1,
+      "systemPrompt": "You are the Sandcastle planner agent. Analyze dependencies, select safe work, and produce deterministic plans."
+    },
+    "worker": {
+      "role": "worker",
+      "provider": "default",
+      "model": "default",
+      "sandbox": "default",
+      "maxIterations": 3,
+      "systemPrompt": "You are the Sandcastle worker agent. Pick one open task, complete it, validate it, and report results."
+    },
+    "implementer": {
+      "role": "implementer",
+      "provider": "default",
+      "model": "default",
+      "sandbox": "default",
+      "maxIterations": 100,
+      "systemPrompt": "You are the Sandcastle implementer agent. Implement the selected task on an isolated branch and validate your work."
+    },
+    "reviewer": {
+      "role": "reviewer",
+      "provider": "default",
+      "model": "default",
+      "sandbox": "default",
+      "maxIterations": 1,
+      "systemPrompt": "You are the Sandcastle reviewer agent. Review branch diffs for correctness, regressions, and missing tests."
+    },
+    "merger": {
+      "role": "merger",
+      "provider": "default",
+      "model": "default",
+      "sandbox": "default",
+      "maxIterations": 1,
+      "systemPrompt": "You are the Sandcastle merger agent. Merge accepted branches, resolve conflicts conservatively, and summarize the result."
+    }
+  },
+  "prompts": {
+    "blank": {
+      "format": "markdown",
+      "template": "$INPUT"
+    },
+    "simple-loop": {
+      "format": "markdown",
+      "template": "Pick the next open task from the configured issue tracker, implement it, validate the result, and close or clearly report the outcome.\n\nUser input:\n$INPUT"
+    },
+    "plan-work": {
+      "format": "markdown",
+      "template": "Inspect the configured issue tracker and repository state. Produce a dependency-aware implementation plan with independently executable work items.\n\nUser input:\n$INPUT"
+    },
+    "implement-work": {
+      "format": "markdown",
+      "template": "Implement the selected work item on the assigned branch. Keep changes focused, run relevant tests, and end with a concise result summary.\n\nWork item:\n$INPUT"
+    },
+    "review-work": {
+      "format": "markdown",
+      "template": "Review the completed branch or worktree for correctness, regressions, test quality, and merge blockers. Return actionable findings and an accept/reject recommendation.\n\nReview target:\n$INPUT"
+    },
+    "merge-work": {
+      "format": "markdown",
+      "template": "Merge accepted completed branches into the target branch. Resolve conflicts only when safe, run validation, and summarize merged commits.\n\nMerge context:\n$INPUT"
+    },
+    "archive-terminal-work": {
+      "format": "markdown",
+      "template": "Archive or summarize terminal-state work items without reopening completed implementation work.\n\nItems:\n$INPUT"
+    }
+  },
+  "policies": {
+    "branch": {
+      "merge-to-head": { "type": "merge-to-head" },
+      "branch-per-run": { "type": "branch", "pattern": "sandcastle/{{ pipeline.id }}/{{ run.id }}" }
+    },
+    "image": {
+      "repo-default": { "providerFrom": "defaults.sandboxProvider", "namePattern": "sandcastle:<repo-dir-name>", "build": "if-missing-or-stale" }
+    },
+    "completion": {
+      "promise-complete": { "promise": "COMPLETE" }
+    }
+  },
+  "adapters": {
+    "sandcastle": { "kind": "sandcastle", "module": "@ai-hero/sandcastle", "capabilities": ["runAgent", "buildImage", "worktree"] }
+  },
+  "stepModules": {
+    "run-worker": { "kind": "runAgent", "agent": "worker", "prompt": "simple-loop" },
+    "plan-work": { "kind": "runAgent", "agent": "planner", "prompt": "plan-work" },
+    "implement-work": { "kind": "runAgent", "agent": "implementer", "prompt": "implement-work" },
+    "review-work": { "kind": "review", "agent": "reviewer", "prompt": "review-work" },
+    "merge-work": { "kind": "merge", "agent": "merger", "prompt": "merge-work" },
+    "archive-terminal-work": { "kind": "runAgent", "agent": "reviewer", "prompt": "archive-terminal-work" }
+  },
+  "pipelines": {
+    "blank": {
+      "description": "Run a single worker with caller-provided input.",
+      "defaults": { "branchPolicy": "merge-to-head" },
+      "steps": [
+        { "id": "run", "kind": "runAgent", "agent": "worker", "prompt": "blank" }
+      ]
+    },
+    "simple-loop": {
+      "description": "Worker picks and closes one open task at a time.",
+      "defaults": { "branchPolicy": "merge-to-head" },
+      "steps": [
+        { "id": "run", "kind": "runAgent", "agent": "worker", "prompt": "simple-loop" }
+      ]
+    },
+    "sequential-reviewer": {
+      "description": "Implement one work item, then review the resulting branch.",
+      "defaults": { "branchPolicy": "branch-per-run" },
+      "steps": [
+        { "id": "implement", "kind": "runAgent", "agent": "implementer", "prompt": "implement-work" },
+        { "id": "review", "kind": "review", "needs": ["implement"], "agent": "reviewer", "prompt": "review-work" }
+      ]
+    },
+    "parallel-planner": {
+      "description": "Plan unblocked work, fan out implementation, then merge accepted branches.",
+      "defaults": { "branchPolicy": "branch-per-run" },
+      "steps": [
+        { "id": "plan", "kind": "runAgent", "agent": "planner", "prompt": "plan-work" },
+        { "id": "implement", "kind": "fanOut", "needs": ["plan"], "over": "$.steps.plan.outputs.items", "concurrency": 4, "step": { "id": "implement-one", "kind": "runAgent", "agent": "implementer", "prompt": "implement-work" } },
+        { "id": "merge", "kind": "merge", "needs": ["implement"], "strategy": "accepted-only" }
+      ]
+    },
+    "parallel-planner-with-review": {
+      "description": "Plan unblocked work, fan out implementation, review completed branches, then merge accepted branches.",
+      "defaults": { "branchPolicy": "branch-per-run" },
+      "steps": [
+        { "id": "plan", "kind": "runAgent", "agent": "planner", "prompt": "plan-work" },
+        { "id": "implement", "kind": "fanOut", "needs": ["plan"], "over": "$.steps.plan.outputs.items", "concurrency": 4, "step": { "id": "implement-one", "kind": "runAgent", "agent": "implementer", "prompt": "implement-work" } },
+        { "id": "review", "kind": "fanOut", "needs": ["implement"], "over": "$.steps.implement.outputs.branches", "concurrency": 4, "step": { "id": "review-one", "kind": "review", "agent": "reviewer", "prompt": "review-work" } },
+        { "id": "merge", "kind": "merge", "needs": ["review"], "strategy": "accepted-only" }
+      ]
+    },
+    "archive": {
+      "description": "Archive or summarize terminal-state backlog work.",
+      "defaults": { "branchPolicy": "merge-to-head" },
+      "steps": [
+        { "id": "archive", "kind": "runAgent", "agent": "reviewer", "prompt": "archive-terminal-work" }
+      ]
+    }
+  }
+}

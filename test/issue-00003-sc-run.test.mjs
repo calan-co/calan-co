@@ -18,7 +18,7 @@ function makeFakeExtensionAPI() {
   };
 }
 
-test('issue 00003 registers /sc:run and uses the injected Sandcastle capability', async () => {
+test('issue 00003 registers /backlog:run and uses the injected Sandcastle capability', async () => {
   const repoDir = await mkdtemp(join(tmpdir(), 'pi-sandcastle-sc-run-'));
   try {
     const configDir = join(repoDir, '.pi', 'sandcastle');
@@ -69,7 +69,7 @@ test('issue 00003 registers /sc:run and uses the injected Sandcastle capability'
         };
       },
       async createSandbox() {
-        throw new Error('createSandbox should not be called by /sc:run');
+        throw new Error('createSandbox should not be called by /backlog:run');
       },
     };
     const fakePi = makeFakeExtensionAPI();
@@ -80,9 +80,9 @@ test('issue 00003 registers /sc:run and uses the injected Sandcastle capability'
       randomId: () => 'run-123',
     });
 
-    assert.ok(fakePi.commands.has('sc:run'), '/sc:run should be registered');
+    assert.ok(fakePi.commands.has('backlog:run'), '/backlog:run should be registered');
 
-    const handler = fakePi.commands.get('sc:run').handler;
+    const handler = fakePi.commands.get('backlog:run').handler;
     await handler('Check the docs --not-a-flag', {
       cwd: repoDir,
       ui: {
@@ -103,7 +103,7 @@ test('issue 00003 registers /sc:run and uses the injected Sandcastle capability'
     assert.equal(calls[2].options.prompt, 'Check the docs --not-a-flag');
     assert.equal(calls[2].options.cwd, repoDir);
     assert.equal(calls[2].options.maxIterations, 1);
-    assert.equal(calls[2].options.name, 'sc-run:run-123');
+    assert.equal(calls[2].options.name, 'backlog-run:run-123');
     assert.equal(calls[2].options.logging.path, join(repoDir, '.pi', 'sandcastle', 'logs', 'run-123.log'));
     assert.equal(calls[2].options.branchStrategy, undefined);
 

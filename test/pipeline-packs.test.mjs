@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { loadExecutionRuntimePack } from '../extensions/pi-sandcastle/execution-runtime.ts';
 import { loadPipelinePacks, packsToConfig, buildDefaultConfigText } from '../extensions/pi-sandcastle/pipeline-packs.mjs';
 
-test('pipeline packs are discovered from Sandcastle template filesystem', () => {
+test('pipeline packs are discovered from the Pi-Sandcastle execution runtime pack', () => {
   const packs = loadPipelinePacks();
   const names = packs.map((pack) => pack.name).sort();
-  assert.deepEqual(names, ['blank', 'parallel-planner', 'parallel-planner-with-review', 'sequential-reviewer', 'simple-loop']);
-  const parallel = packs.find((pack) => pack.name === 'parallel-planner');
-  assert.deepEqual(parallel.agents, ['planner', 'implementer', 'merger']);
-  assert.equal(parallel.steps[0].prompt.length > 20, true);
+  assert.deepEqual(names, ['archive', 'blank', 'parallel-planner', 'parallel-planner-with-review', 'sequential-reviewer', 'simple-loop']);
+  const runtime = loadExecutionRuntimePack();
+  assert.ok(runtime.prompts['implement-work'].template.length > 20);
+  assert.equal(runtime.stepModules['plan-work'].agent, 'planner');
 });
 
 test('pipeline packs map into pi-sandcastle agent and pipeline inventory', () => {

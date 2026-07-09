@@ -135,7 +135,7 @@ test("backlog list and inspect use a fake filesystem without writes", async () =
       makeItemMarkdown({
         id: "wi-00002",
         title: "Sandcastle Config Scaffolding and Validation",
-        summary: "Implement /sc:config subcommands for setup, show, get, set, reset, and validate.",
+        summary: "Implement /backlog:config-raw subcommands for setup, show, get, set, reset, and validate.",
         priority: "high",
         estimated: 5,
       }),

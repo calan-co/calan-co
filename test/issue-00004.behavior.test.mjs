@@ -105,7 +105,7 @@ test('parseSimpleYaml keeps chain and pipeline step indentation rules aligned wi
   assert.match(parsed.pipelines.implement.steps[0].prompt, /Implement the requested work\.\n\$INPUT/);
 });
 
-test('/sc:pipeline registers and parses prompt text deterministically', async () => {
+test('/backlog:pipeline registers and parses prompt text deterministically', async () => {
   const repoRoot = await createRepo();
   const fakePi = createFakePi();
   const calls = [];
@@ -134,9 +134,9 @@ test('/sc:pipeline registers and parses prompt text deterministically', async ()
     },
   });
 
-  assert.ok(fakePi.commands.has('sc:pipeline'), '/sc:pipeline command should be registered');
+  assert.ok(fakePi.commands.has('backlog:pipeline'), '/backlog:pipeline command should be registered');
 
-  const handler = fakePi.commands.get('sc:pipeline');
+  const handler = fakePi.commands.get('backlog:pipeline');
   const ctx = {
     cwd: repoRoot,
     ui: {
@@ -171,7 +171,7 @@ test('/sc:pipeline registers and parses prompt text deterministically', async ()
   assert.equal(record.steps[1].commits[0], 'commit-2');
 });
 
-test('/sc:pipeline rejects unknown pipelines with available options', async () => {
+test('/backlog:pipeline rejects unknown pipelines with available options', async () => {
   const repoRoot = await createRepo();
   const fakePi = createFakePi();
   const notifications = [];
@@ -188,7 +188,7 @@ test('/sc:pipeline rejects unknown pipelines with available options', async () =
     },
   });
 
-  const handler = fakePi.commands.get('sc:pipeline');
+  const handler = fakePi.commands.get('backlog:pipeline');
   await handler('missing anything at all', {
     cwd: repoRoot,
     ui: {
@@ -203,7 +203,7 @@ test('/sc:pipeline rejects unknown pipelines with available options', async () =
   assert.match(notifications.at(-1).message, /Available pipelines: .*broken.*implement/);
 });
 
-test('/sc:pipeline records failed steps and stops after the first error', async () => {
+test('/backlog:pipeline records failed steps and stops after the first error', async () => {
   const repoRoot = await createRepo();
   const fakePi = createFakePi();
   const notifications = [];
@@ -226,7 +226,7 @@ test('/sc:pipeline records failed steps and stops after the first error', async 
     },
   });
 
-  const handler = fakePi.commands.get('sc:pipeline');
+  const handler = fakePi.commands.get('backlog:pipeline');
   await handler('broken recover from failure', {
     cwd: repoRoot,
     ui: {

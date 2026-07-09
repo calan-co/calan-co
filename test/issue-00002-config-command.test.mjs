@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import test from 'node:test';
 
-test('issue 00002 registers /sc:config and manages repo-local config', () => {
+test('issue 00002 registers /backlog:config-raw and manages repo-local config', () => {
   const script = String.raw`
     import assert from 'node:assert/strict';
     import { execFileSync as execFileSyncInner } from 'node:child_process';
@@ -22,7 +22,7 @@ test('issue 00002 registers /sc:config and manages repo-local config', () => {
     };
 
     piSandcastle(api);
-    assert.ok(commands.has('sc:config'));
+    assert.ok(commands.has('backlog:config-raw'));
 
     const cwd = mkdtempSync(join(tmpdir(), 'pi-sandcastle-config-'));
     const configDir = join(cwd, '.pi', 'sandcastle');
@@ -67,11 +67,11 @@ test('issue 00002 registers /sc:config and manages repo-local config', () => {
 
     const invoke = async (args) => {
       notifications.length = 0;
-      await commands.get('sc:config').handler(args, ctx);
+      await commands.get('backlog:config-raw').handler(args, ctx);
       return notifications.map(({ message, type }) => ({ message, type }));
     };
 
-    const configCompletions = commands.get('sc:config').getArgumentCompletions;
+    const configCompletions = commands.get('backlog:config-raw').getArgumentCompletions;
     assert.ok(configCompletions);
     assert.deepEqual(
       configCompletions('get ').map((item) => item.value).filter((value) => ['get defaultModel', 'get defaultSandbox', 'get defaultAgent'].includes(value)).sort(),
@@ -120,7 +120,7 @@ test('issue 00002 registers /sc:config and manages repo-local config', () => {
     assert.match(validateNotifications[0].message, /Missing runner scaffold: \.pi\/sandcastle\/run-job\.mjs/);
 
     console.log(JSON.stringify({
-      commandRegistered: commands.has('sc:config'),
+      commandRegistered: commands.has('backlog:config-raw'),
       notifications: {
         setup: setupNotifications,
         show: showNotifications,
