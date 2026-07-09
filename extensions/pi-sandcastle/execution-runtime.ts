@@ -11,6 +11,7 @@ export interface ExecutionRuntimePack {
 	defaults?: Record<string, unknown>;
 	providers?: Record<string, unknown>;
 	issueTrackers?: Record<string, unknown>;
+	roles?: Record<string, RuntimeAgent>;
 	agents: Record<string, RuntimeAgent>;
 	prompts: Record<string, RuntimePrompt>;
 	policies?: Record<string, unknown>;
@@ -96,7 +97,9 @@ export function validateExecutionRuntimePack(value: unknown): ExecutionRuntimePa
 		throw new Error("Invalid execution runtime pack:\n- runtime pack must be an object");
 	}
 	if (!Number.isInteger(pack.runtimeVersion) || Number(pack.runtimeVersion) < 1) errors.push("runtimeVersion must be a positive integer");
-	if (!pack?.agents || typeof pack.agents !== "object" || Object.keys(pack.agents).length === 0) errors.push("agents must contain at least one agent");
+	const roles = pack.roles || pack.agents;
+	if (!roles || typeof roles !== "object" || Object.keys(roles).length === 0) errors.push("roles must contain at least one role");
+	else pack.agents = roles;
 	if (!pack?.prompts || typeof pack.prompts !== "object" || Object.keys(pack.prompts).length === 0) errors.push("prompts must contain at least one prompt");
 	if (!pack?.pipelines || typeof pack.pipelines !== "object" || Object.keys(pack.pipelines).length === 0) errors.push("pipelines must contain at least one pipeline");
 	for (const [name, prompt] of Object.entries(pack.prompts || {})) {
@@ -144,10 +147,10 @@ export function runtimeToSandcastleConfig(pack = loadExecutionRuntimePack(), def
 	for (const [name, agent] of Object.entries(pack.agents)) {
 		agents[name] = {
 			name,
-			description: agent.role ? `${agent.role} agent` : `${name} agent`,
+			description: agent.role ? `${agent.role} role` : `${name} role`,
 			provider: normalizeProvider(normalizeDefault(agent.provider, defaultAgent)),
 			model: normalizeDefault(agent.model, defaultModel),
-			sandbox: normalizeSandbox(String(normalizeDefault(agent.sandbox, defaultSandbox))),
+			sandbox: agent.sandbox && agent.sandbox !== "default" ? normalizeSandbox(String(agent.sandbox)) : undefined,
 			systemPrompt: agent.systemPrompt,
 			maxIterations: agent.maxIterations,
 			copyToWorktree: agent.copyToWorktree,
@@ -158,7 +161,6 @@ export function runtimeToSandcastleConfig(pack = loadExecutionRuntimePack(), def
 		pipelines[name] = {
 			description: pipeline.description,
 			branchStrategy: branchPolicy === "merge-to-head" ? { type: "merge-to-head" } : { type: "branch", branch: `sandcastle/${name}` },
-			sandbox: defaultSandbox,
 			model: defaultModel,
 			copyToWorktree: ["node_modules"],
 			steps: compileRuntimeSteps(pipeline.steps, pack),

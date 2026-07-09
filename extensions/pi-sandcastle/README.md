@@ -33,7 +33,7 @@ Then reload Pi from this repo with `/reload`.
 The default runtime pack is `extensions/pi-sandcastle/runtime-packs/sandcastle-templates.json`. It ports the current Sandcastle template concepts into explicit Pi-Sandcastle runtime data:
 
 - prompts
-- agents
+- roles
 - pipelines
 - step modules
 - providers
@@ -45,7 +45,7 @@ The schema is `extensions/pi-sandcastle/schema/execution-runtime.schema.json`.
 
 ## LLM tool
 
-`delegate_agent({ agent, task })` lets the primary Pi agent delegate self-contained tasks to configured agents without exposing legacy slash-command aliases.
+`delegate_agent({ agent, task })` lets the primary Pi agent delegate self-contained tasks to configured execution roles without exposing legacy slash-command aliases.
 
 ## Config and artifacts
 

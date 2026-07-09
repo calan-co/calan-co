@@ -35,9 +35,15 @@
       "type": "string",
       "minLength": 1
     },
+    "roles": {
+      "type": "object",
+      "description": "Reusable execution roles consumed by runtime pipelines and backlog commands.",
+      "additionalProperties": { "$ref": "#/$defs/agent" }
+    },
     "agents": {
       "type": "object",
-      "description": "Reusable execution identities consumed by Sandcastle pipelines and backlog commands.",
+      "description": "Deprecated alias for roles. Prefer roles to avoid overloading agent provider terminology.",
+      "deprecated": true,
       "additionalProperties": { "$ref": "#/$defs/agent" }
     },
     "pipelines": {

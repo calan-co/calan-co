@@ -95,16 +95,16 @@ function runTuiScript(body) {
 test('backlog config TUI escape cancels rename and backs through nested agent screens', () => {
   runTuiScript(String.raw`
     assert.match(text(), /BACKLOG CONFIG BIOS/);
-    down(); enter(); // Agents
-    assert.match(text(), /AGENTS/);
-    down(); enter(); // first agent
-    assert.match(text(), /AGENT \/ /);
-    enter(); // Rename agent
-    assert.match(text(), /RENAME AGENT/);
+    down(); enter(); // Roles
+    assert.match(text(), /ROLES/);
+    down(); enter(); // first role
+    assert.match(text(), /ROLE \/ /);
+    enter(); // Rename role
+    assert.match(text(), /RENAME ROLE/);
     esc();
-    assert.match(text(), /AGENT \/ /);
+    assert.match(text(), /ROLE \/ /);
     esc();
-    assert.match(text(), /AGENTS/);
+    assert.match(text(), /ROLES/);
     esc();
     assert.match(text(), /BACKLOG CONFIG BIOS/);
   `);
@@ -112,10 +112,10 @@ test('backlog config TUI escape cancels rename and backs through nested agent sc
 
 test('backlog config TUI right arrow does not navigate back like escape', () => {
   runTuiScript(String.raw`
-    down(); enter(); // Agents
-    assert.match(text(), /AGENTS/);
+    down(); enter(); // Roles
+    assert.match(text(), /ROLES/);
     right();
-    assert.match(text(), /AGENTS/);
+    assert.match(text(), /ROLES/);
     assert.doesNotMatch(text(), /BACKLOG CONFIG BIOS/);
     esc();
     assert.match(text(), /BACKLOG CONFIG BIOS/);
@@ -142,10 +142,10 @@ test('backlog config TUI escape cancels fixed-domain field editor', () => {
 
 test('backlog config TUI ctrl+q force quits from nested edit mode', () => {
   runTuiScript(String.raw`
-    down(); enter(); // Agents
-    down(); enter(); // first agent
-    enter(); // Rename agent
-    assert.match(text(), /RENAME AGENT/);
+    down(); enter(); // Roles
+    down(); enter(); // first role
+    enter(); // Rename role
+    assert.match(text(), /RENAME ROLE/);
     ctrlQ();
     await runPromise;
     assert.deepEqual(notifications, []);

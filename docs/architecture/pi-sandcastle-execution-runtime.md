@@ -7,7 +7,7 @@ Pi-Sandcastle should define a Pi-native, deterministic workflow model and use Sa
 In this split:
 
 - **Pi extension layer** owns slash commands, completions, TUI config editing, schema validation, run records, state freshness, and user-facing formatting.
-- **Pi-Sandcastle runtime model** owns typed definitions for agents, prompts, pipelines, issue trackers, branch policy, image policy, completion policy, and execution records.
+- **Pi-Sandcastle runtime model** owns typed definitions for roles, prompts, pipelines, issue trackers, branch policy, image policy, completion policy, and execution records.
 - **Sandcastle adapter** owns the low-level primitive: run this agent provider with this prompt in this sandbox/worktree and return branch, commits, logs, and errors.
 
 This preserves the strengths observed from Sandcastle AFK use—robust sandboxed execution, extensibility, tailored prompts, and resilient post-processing—while removing the recurring init/post-processing friction from the user-facing model.
@@ -42,9 +42,9 @@ The stable, reusable, overrideable objects are:
    - Typed issue/backlog adapters such as `github-issues`, `beads`, `doc-vader`, or `custom`.
    - Replaces template placeholder substitution with an explicit contract.
 
-6. `agents`
+6. `roles`
    - Reusable named execution identities.
-   - Agents are globally scoped by default because they are reused across pipelines and surfaced in `/backlog:run`.
+   - Roles are globally scoped by default because they are reused across pipelines and surfaced in `/backlog:run`.
    - Pipelines may override agent settings per step without mutating the shared agent.
 
 7. `prompts`
@@ -67,7 +67,7 @@ The stable, reusable, overrideable objects are:
 
 Use a **hybrid** model:
 
-- Top-level `agents` define reusable identities and defaults.
+- Top-level `roles` define reusable identities and defaults.
 - Pipeline steps reference a top-level agent by name.
 - Step-local overrides are allowed for `model`, `sandbox`, `maxIterations`, `systemPrompt`, `copyToWorktree`, and `branchPolicy`.
 - Pipeline-local anonymous agents are allowed only for pack authors, not for the initial user-facing config editor.
@@ -138,7 +138,7 @@ issueTrackers:
     listCommand: /backlog:list
     inspectCommand: /backlog:inspect
 
-agents:
+roles:
   planner:
     role: planner
     provider: default

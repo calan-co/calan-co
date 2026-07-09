@@ -78,7 +78,7 @@ test('issue 00002 registers /backlog:config-raw and manages repo-local config', 
       ['get defaultAgent', 'get defaultModel', 'get defaultSandbox'],
     );
     assert.deepEqual(
-      configCompletions('get agents.implementer.').map((item) => item.label).sort(),
+      configCompletions('get roles.implementer.').map((item) => item.label).sort(),
       ['branch', 'description', 'maxIterations', 'model', 'provider', 'sandbox', 'systemPrompt'],
     );
     assert.deepEqual(
@@ -98,7 +98,9 @@ test('issue 00002 registers /backlog:config-raw and manages repo-local config', 
     assert.equal(forceNotifications[0].type, 'success');
     assert.match(forceNotifications[0].message, /Overwrote:/);
     assert.equal(readFileSync(configPath, 'utf8').includes('extraRoot: keep-me'), false);
-    assert.match(readFileSync(configPath, 'utf8'), /^agents:/m);
+    assert.match(readFileSync(configPath, 'utf8'), /^roles:/m);
+    assert.match(readFileSync(configPath, 'utf8'), /systemPrompt: \|/);
+    assert.doesNotMatch(readFileSync(configPath, 'utf8'), /^    sandbox: docker/m);
     assert.match(readFileSync(configPath, 'utf8'), /^pipelines:/m);
 
     const showNotifications = await invoke('');

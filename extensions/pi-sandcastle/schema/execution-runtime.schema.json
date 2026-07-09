@@ -4,7 +4,7 @@
   "title": "Pi-Sandcastle Execution Runtime",
   "description": "Deterministic Pi-native runtime contract for Sandcastle-backed agent execution packs.",
   "type": "object",
-  "required": ["runtimeVersion", "defaults", "agents", "prompts", "pipelines"],
+  "required": ["runtimeVersion", "defaults", "roles", "prompts", "pipelines"],
   "additionalProperties": false,
   "properties": {
     "runtimeVersion": {
@@ -26,8 +26,17 @@
         "$ref": "#/$defs/issueTracker"
       }
     },
+    "roles": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "$ref": "#/$defs/agent"
+      }
+    },
     "agents": {
       "type": "object",
+      "description": "Deprecated alias for roles.",
+      "deprecated": true,
       "minProperties": 1,
       "additionalProperties": {
         "$ref": "#/$defs/agent"

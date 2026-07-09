@@ -38,11 +38,11 @@ export function configToYaml(config) {
     ...(config.issueTrackerSetupCommand ? [`issueTrackerSetupCommand: ${yamlScalar(config.issueTrackerSetupCommand)}`] : []),
     `imageNamePattern: ${yamlScalar(config.imageNamePattern || 'sandcastle:<repo-dir-name>')}`,
     '',
-    'agents:',
+    'roles:',
   ];
   for (const [name, agent] of Object.entries(config.agents)) {
     lines.push(`  ${name}:`);
-    for (const key of ['description', 'provider', 'model', 'sandbox', 'maxIterations', 'branch']) {
+    for (const key of ['description', 'provider', 'model', 'maxIterations', 'branch']) {
       if (agent[key] !== undefined) lines.push(`    ${key}: ${yamlScalar(agent[key])}`);
     }
     if (agent.systemPrompt) lines.push(`    systemPrompt: ${yamlBlock(agent.systemPrompt, 6)}`);
@@ -51,7 +51,8 @@ export function configToYaml(config) {
   for (const [name, pipeline] of Object.entries(config.pipelines)) {
     lines.push(`  ${name}:`, `    description: ${yamlScalar(pipeline.description)}`, '    branchStrategy:');
     for (const [key, value] of Object.entries(pipeline.branchStrategy || {})) lines.push(`      ${key}: ${yamlScalar(value)}`);
-    lines.push(`    sandbox: ${yamlScalar(pipeline.sandbox)}`, `    model: ${yamlScalar(pipeline.model)}`, `    copyToWorktree: ${yamlScalar(pipeline.copyToWorktree || [])}`, '    steps:');
+    if (pipeline.sandbox !== undefined) lines.push(`    sandbox: ${yamlScalar(pipeline.sandbox)}`);
+    lines.push(`    model: ${yamlScalar(pipeline.model)}`, `    copyToWorktree: ${yamlScalar(pipeline.copyToWorktree || [])}`, '    steps:');
     for (const step of pipeline.steps || []) {
       lines.push(`      - agent: ${yamlScalar(step.agent)}`, `        prompt: ${yamlBlock(step.prompt, 10)}`);
       if (step.maxIterations !== undefined) lines.push(`        maxIterations: ${yamlScalar(step.maxIterations)}`);

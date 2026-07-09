@@ -1265,7 +1265,7 @@ function formatConfigValue(value: unknown): string {
 function readConfigValue(cfg: SandcastleConfig, path: string): unknown {
 	const parts = splitConfigPath(path);
 	if (parts.length === 1 && isRootConfigKey(parts[0])) return cfg[parts[0]];
-	if (parts[0] === "agents" && parts.length === 3 && isEditableAgentField(parts[2])) {
+	if ((parts[0] === "roles" || parts[0] === "agents") && parts.length === 3 && isEditableAgentField(parts[2])) {
 		return cfg.agents[parts[1]]?.[parts[2]];
 	}
 	if (parts[0] === "chains" && parts.length === 2) return cfg.chains[parts[1]];
@@ -1275,7 +1275,7 @@ function readConfigValue(cfg: SandcastleConfig, path: string): unknown {
 function supportedConfigPath(path: string): boolean {
 	const parts = splitConfigPath(path);
 	if (parts.length === 1) return isRootConfigKey(parts[0]);
-	return parts[0] === "agents" && parts.length === 3 && isEditableAgentField(parts[2]);
+	return (parts[0] === "roles" || parts[0] === "agents") && parts.length === 3 && isEditableAgentField(parts[2]);
 }
 
 function defaultConfigValue(path: string): unknown {
@@ -1283,7 +1283,7 @@ function defaultConfigValue(path: string): unknown {
 	if (parts.length === 1 && isRootConfigKey(parts[0])) {
 		return DEFAULT_CONFIG[parts[0]];
 	}
-	if (parts[0] === "agents" && parts.length === 3 && isEditableAgentField(parts[2])) {
+	if ((parts[0] === "roles" || parts[0] === "agents") && parts.length === 3 && isEditableAgentField(parts[2])) {
 		return DEFAULT_CONFIG.agents[parts[1]]?.[parts[2]];
 	}
 	return undefined;
@@ -1291,7 +1291,7 @@ function defaultConfigValue(path: string): unknown {
 
 function removeConfigValueInText(raw: string, path: string): string {
 	const parts = splitConfigPath(path);
-	if (parts[0] !== "agents" || parts.length !== 3) return raw;
+	if ((parts[0] !== "roles" && parts[0] !== "agents") || parts.length !== 3) return raw;
 	const [, agentName, fieldName] = parts;
 	const lines = raw.replace(/\r/g, "").split("\n");
 	const agentHeader = new RegExp(`^  ${escapeRegExp(agentName)}:\\s*$`);
@@ -1323,7 +1323,7 @@ function setConfigValueInText(raw: string, path: string, value: unknown): string
 				lines[i] = replacement;
 				return lines.join("\n");
 			}
-			if (/^(agents|chains|pipelines):\s*$/.test(lines[i])) {
+			if (/^(roles|agents|chains|pipelines):\s*$/.test(lines[i])) {
 				lines.splice(i, 0, replacement);
 				return lines.join("\n");
 			}
@@ -1332,7 +1332,7 @@ function setConfigValueInText(raw: string, path: string, value: unknown): string
 		return lines.join("\n");
 	}
 
-	if (parts[0] === "agents" && parts.length === 3) {
+	if ((parts[0] === "roles" || parts[0] === "agents") && parts.length === 3) {
 		const [, agentName, fieldName] = parts;
 		const agentHeader = new RegExp(`^  ${escapeRegExp(agentName)}:\\s*$`);
 		let agentIndex = -1;
@@ -1424,10 +1424,14 @@ function removeYamlReferences(raw: string, name: string): string {
 	return raw.replace(new RegExp(`(agent:\\s*)${yamlMapKeyRegex(name)}(?=\\s*$)`, "gm"), "$1");
 }
 
+function roleSectionName(raw: string): "roles" | "agents" {
+	return /^agents:\s*$/m.test(raw) && !/^roles:\s*$/m.test(raw) ? "agents" : "roles";
+}
+
 function appendAgentText(raw: string, name: string): string {
-	if (new RegExp(`^  ${yamlMapKeyRegex(name)}:\\s*$`, "m").test(raw)) throw new Error(`Agent '${name}' already exists.`);
-	const block = [`  ${formatYamlMapKey(name)}:`, `    description: ${name} agent`, `    # model omitted: uses defaultModel`, `    # sandbox omitted: uses defaultSandbox`, `    provider: pi`, `    maxIterations: 1`].join("\n");
-	return appendToYamlSection(raw, "agents", block);
+	if (new RegExp(`^  ${yamlMapKeyRegex(name)}:\s*$`, "m").test(raw)) throw new Error(`Role '${name}' already exists.`);
+	const block = [`  ${formatYamlMapKey(name)}:`, `    description: ${name} role`, `    # model omitted: uses defaultModel`, `    provider: pi`, `    maxIterations: 1`, `    systemPrompt: |`, `      You are the ${name} role.`].join("\n");
+	return appendToYamlSection(raw, roleSectionName(raw), block);
 }
 
 function appendPipelineText(raw: string, name: string): string {
@@ -1483,6 +1487,7 @@ function configuredConfigPaths(cfg: SandcastleConfig): string[] {
 	const pipelineFields = ["description", "model", "sandbox"];
 	return [
 		...rootPaths,
+		...Object.keys(cfg.agents).flatMap((agent) => agentFields.map((field) => `roles.${agent}.${field}`)),
 		...Object.keys(cfg.agents).flatMap((agent) => agentFields.map((field) => `agents.${agent}.${field}`)),
 		...Object.keys(cfg.pipelines).flatMap((pipeline) => pipelineFields.map((field) => `pipelines.${pipeline}.${field}`)),
 	].sort();
@@ -1648,7 +1653,7 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 			setField(cfg, key, parseScalar(top[2]) as SandcastleConfig[typeof key]);
 			continue;
 		}
-		const sectionMatch = line.match(/^(agents|chains|pipelines):\s*$/);
+		const sectionMatch = line.match(/^(roles|agents|chains|pipelines):\s*$/);
 		if (sectionMatch) {
 			section = sectionMatch[1];
 			currentAgent = "";
@@ -1658,7 +1663,7 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 			currentBranchStrategy = null;
 			continue;
 		}
-		if (section === "agents") {
+		if (section === "agents" || section === "roles") {
 			const agentMatch = line.match(/^  (\S.*):\s*$/);
 			if (agentMatch) {
 				currentAgent = parseYamlMapKey(agentMatch[1]);
@@ -2515,7 +2520,7 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 			subtitle: "Section editor over .pi/sandcastle/config.yaml",
 			items: [
 				{ value: "nav:defaults", label: "Defaults", description: "Set the default values to be used for this repo" },
-				{ value: "nav:agents", label: "Agents", description: "Create and configure reusable Sandcastle execution identities" },
+				{ value: "nav:agents", label: "Roles", description: "Create and configure reusable execution roles" },
 				{ value: "nav:pipelines", label: "Pipelines", description: "Configure deterministic workflows and their steps" },
 				{ value: "nav:actions", label: "Actions", description: "init, validate, build image, config packs, raw edit" },
 				{ value: "cancel", label: "Exit", description: "Close this configuration editor" },
@@ -2529,27 +2534,26 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 		});
 
 		const agentsScreen = (): Screen => ({
-			title: "AGENTS",
-			subtitle: "Choose an agent to edit its fields",
+			title: "ROLES",
+			subtitle: "Choose a role to edit its fields",
 			items: [
-				{ value: "text:add-agent", label: "New agent", description: "Create an agent with default model/sandbox" },
-				...Object.entries(cfg.agents).map(([name, agent]) => ({ value: `nav:agent:${name}`, label: name, description: agent.description || agent.model || "configured agent" })),
+				{ value: "text:add-agent", label: "New role", description: "Create a role using global defaults" },
+				...Object.entries(cfg.agents).map(([name, agent]) => ({ value: `nav:agent:${name}`, label: name, description: agent.description || agent.model || "configured role" })),
 			],
 		});
 
 		const agentScreen = (name: string): Screen => ({
-			title: `AGENT / ${name}`,
-			subtitle: "Editable fields for this Sandcastle agent",
+			title: `ROLE / ${name}`,
+			subtitle: "Editable fields for this execution role",
 			items: [
-				{ value: `text:rename-agent:${name}`, label: "Rename agent", description: name },
-				{ value: `delete-agent:${name}`, label: "Delete agent", description: "Remove this agent from the config" },
-				field(`agents.${name}.description`),
-				field(`agents.${name}.model`),
-				field(`agents.${name}.sandbox`),
-				field(`agents.${name}.provider`),
-				field(`agents.${name}.maxIterations`),
-				field(`agents.${name}.branch`),
-				field(`agents.${name}.systemPrompt`),
+				{ value: `text:rename-agent:${name}`, label: "Rename role", description: name },
+				{ value: `delete-agent:${name}`, label: "Delete role", description: "Remove this role from the config" },
+				field(`roles.${name}.description`),
+				field(`roles.${name}.model`),
+				field(`roles.${name}.provider`),
+				field(`roles.${name}.maxIterations`),
+				field(`roles.${name}.branch`),
+				field(`roles.${name}.systemPrompt`),
 			],
 		});
 
@@ -2697,9 +2701,9 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 				tui.requestRender();
 				return;
 			}
-			if (value.startsWith("text:add-agent")) return beginTextAction("add-agent", "NEW AGENT");
+			if (value.startsWith("text:add-agent")) return beginTextAction("add-agent", "NEW ROLE");
 			if (value.startsWith("text:add-pipeline")) return beginTextAction("add-pipeline", "NEW PIPELINE");
-			if (value.startsWith("text:rename-agent:")) return beginTextAction("rename-agent", "RENAME AGENT", { oldName: value.slice("text:rename-agent:".length) }, value.slice("text:rename-agent:".length));
+			if (value.startsWith("text:rename-agent:")) return beginTextAction("rename-agent", "RENAME ROLE", { oldName: value.slice("text:rename-agent:".length) }, value.slice("text:rename-agent:".length));
 			if (value.startsWith("text:rename-pipeline:")) return beginTextAction("rename-pipeline", "RENAME PIPELINE", { oldName: value.slice("text:rename-pipeline:".length) }, value.slice("text:rename-pipeline:".length));
 			if (value.startsWith("delete-agent:")) { const name = value.slice("delete-agent:".length); model.deleteAgent(name); route = ["main", "agents"]; return queueAction({ type: "delete-agent", name }); }
 			if (value.startsWith("delete-pipeline:")) { const name = value.slice("delete-pipeline:".length); model.deletePipeline(name); route = ["main", "pipelines"]; return queueAction({ type: "delete-pipeline", name }); }
@@ -3236,8 +3240,8 @@ Backlog views and processing:
 					const raw = readFileSync(configPath, "utf8");
 					let updated = raw;
 					if (action.type === "add-agent") updated = appendAgentText(raw, action.name);
-					if (action.type === "rename-agent") updated = updateYamlReferences(renameTopLevelMapEntry(raw, "agents", action.oldName, action.newName), action.oldName, action.newName);
-					if (action.type === "delete-agent") updated = removeYamlReferences(deleteTopLevelMapEntry(raw, "agents", action.name), action.name);
+					if (action.type === "rename-agent") updated = updateYamlReferences(renameTopLevelMapEntry(raw, roleSectionName(raw), action.oldName, action.newName), action.oldName, action.newName);
+					if (action.type === "delete-agent") updated = removeYamlReferences(deleteTopLevelMapEntry(raw, roleSectionName(raw), action.name), action.name);
 					if (action.type === "add-pipeline") updated = appendPipelineText(raw, action.name);
 					if (action.type === "rename-pipeline") updated = renameTopLevelMapEntry(raw, "pipelines", action.oldName, action.newName);
 					if (action.type === "delete-pipeline") updated = deleteTopLevelMapEntry(raw, "pipelines", action.name);

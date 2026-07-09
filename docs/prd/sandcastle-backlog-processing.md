@@ -8,7 +8,7 @@ Define a deterministic command surface for Pi users to configure Sandcastle-back
 
 1. As a Pi user, I want one Sandcastle config command, so that init, viewing, getting, setting, resetting, and validating config are organized consistently.
 2. As a Pi user, I want config init to preserve edited repo-local files, so that setup is safe to rerun.
-3. As a Pi user, I want config validation diagnostics, so that broken agents, prompts, pipelines, models, sandbox providers, and runner files are clear.
+3. As a Pi user, I want config validation diagnostics, so that broken roles, prompts, pipelines, models, sandbox providers, and runner files are clear.
 4. As a Pi user, I want repo-local config defaults, so that repeated Sandcastle runs use predictable agent, model, sandbox, and pipeline choices.
 5. As a Pi user, I want prompt templates and pipeline definitions to be explicit files, so that AFK behavior is reviewable.
 6. As a Pi user, I want command handlers to use injectable capabilities, so that tests never require real containers or agents.

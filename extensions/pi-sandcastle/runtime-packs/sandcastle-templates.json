@@ -54,14 +54,14 @@
       "kind": "custom"
     }
   },
-  "agents": {
+  "roles": {
     "planner": {
       "role": "planner",
       "provider": "default",
       "model": "default",
       "sandbox": "default",
       "maxIterations": 1,
-      "systemPrompt": "You are the Sandcastle planner agent. Analyze dependencies, select safe work, and produce deterministic plans."
+      "systemPrompt": "You are the Sandcastle planner role. Analyze dependencies, select safe work, and produce deterministic plans."
     },
     "worker": {
       "role": "worker",
@@ -69,7 +69,7 @@
       "model": "default",
       "sandbox": "default",
       "maxIterations": 3,
-      "systemPrompt": "You are the Sandcastle worker agent. Pick one open task, complete it, validate it, and report results."
+      "systemPrompt": "You are the Sandcastle worker role. Pick one open task, complete it, validate it, and report results."
     },
     "implementer": {
       "role": "implementer",
@@ -77,7 +77,7 @@
       "model": "default",
       "sandbox": "default",
       "maxIterations": 100,
-      "systemPrompt": "You are the Sandcastle implementer agent. Implement the selected task on an isolated branch and validate your work."
+      "systemPrompt": "You are the Sandcastle implementer role. Implement the selected task on an isolated branch and validate your work."
     },
     "reviewer": {
       "role": "reviewer",
@@ -85,7 +85,7 @@
       "model": "default",
       "sandbox": "default",
       "maxIterations": 1,
-      "systemPrompt": "You are the Sandcastle reviewer agent. Review branch diffs for correctness, regressions, and missing tests."
+      "systemPrompt": "You are the Sandcastle reviewer role. Review branch diffs for correctness, regressions, and missing tests."
     },
     "merger": {
       "role": "merger",
@@ -93,7 +93,7 @@
       "model": "default",
       "sandbox": "default",
       "maxIterations": 1,
-      "systemPrompt": "You are the Sandcastle merger agent. Merge accepted branches, resolve conflicts conservatively, and summarize the result."
+      "systemPrompt": "You are the Sandcastle merger role. Merge accepted branches, resolve conflicts conservatively, and summarize the result."
     }
   },
   "prompts": {

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import test from 'node:test';
 
-test('backlog config TUI no longer exposes team editing; pack-derived agents remain visible', () => {
+test('backlog config TUI no longer exposes team editing; pack-derived roles remain visible', () => {
   const script = String.raw`
     import assert from 'node:assert/strict';
     import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -34,7 +34,7 @@ test('backlog config TUI no longer exposes team editing; pack-derived agents rem
     assert.doesNotMatch(text(), /Teams/);
     component.handleInput('\x1b[B');
     component.handleInput('\r');
-    assert.match(text(), /AGENTS/);
+    assert.match(text(), /ROLES/);
     assert.match(text(), /worker/);
     component.handleInput('\x11');
     await runPromise;
