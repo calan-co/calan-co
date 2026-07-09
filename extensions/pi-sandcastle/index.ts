@@ -32,7 +32,7 @@ import { ConfigShadowModel } from "./config-shadow-model.ts";
 import { buildSandcastleImage } from "./build-image.ts";
 import { registerBacklogCommands } from "./backlog.mjs";
 import { buildBacklogPlan, formatBacklogPlan } from "./backlog-planner.mjs";
-import { buildDefaultConfigText, packsToConfig } from "./pipeline-packs.mjs";
+import { buildDefaultConfigText, configToYaml, packsToConfig } from "./pipeline-packs.mjs";
 import { loadExecutionRuntimePack, listRuntimeAgents, listRuntimePipelines } from "./execution-runtime.ts";
 import {
 	formatBacklogRunList,
@@ -1066,7 +1066,7 @@ function readBacklogItems(cwd: string): BacklogItem[] {
 		.sort((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true }));
 }
 
-const SAMPLE_CONFIG = buildDefaultConfigText();
+const SAMPLE_CONFIG = configToYaml(packsToConfig());
 
 function matchesBacklogQuery(item: BacklogItem, query: string): boolean {
 	const raw = query.trim().toLowerCase();
@@ -1137,12 +1137,6 @@ function ensureScaffold(cwd: string, options: { overwrite?: boolean; hydrate?: b
 		if (hadConfig && options.overwrite) overwritten.push(CONFIG_PATH);
 		writeFileSync(configPath, SAMPLE_CONFIG);
 		changes.push(`${hadConfig && options.overwrite ? "overwrote" : "wrote"} ${CONFIG_PATH}`);
-	} else if (options.hydrate !== false) {
-		const hydrated = hydrateConfigDefaults(readFileSync(configPath, "utf8"));
-		if (hydrated.changed) {
-			writeFileSync(configPath, hydrated.text);
-			changes.push(...hydrated.changes.map((change) => `${change} in ${CONFIG_PATH}`));
-		}
 	}
 	const runnerPath = join(cwd, RUNNER_PATH);
 	const hadRunner = existsSync(runnerPath);
@@ -3196,7 +3190,12 @@ Backlog views and processing:
 				const actions = action.type === "batch" ? action.actions : [action];
 				for (const action of actions) {
 				if (action.type === "init") {
-					const result = ensureScaffold(ctx.cwd, { hydrate: true });
+					if (existsSync(join(ctx.cwd, CONFIG_PATH))) {
+						ensureScaffold(ctx.cwd, { hydrate: false });
+						ctx.ui.notify(`${CONFIG_PATH} already exists. Use /backlog:config-raw init --force to overwrite it with defaults.`, "warning");
+						continue;
+					}
+					const result = ensureScaffold(ctx.cwd, { hydrate: false });
 					const cfg = await loadConfig(ctx.cwd);
 					const cliResult = await ensureSandcastleCliScaffold(ctx.cwd, cfg);
 					await quietlyBuildConfiguredImage(ctx.cwd, cfg, deps.image);
@@ -3305,7 +3304,12 @@ Backlog views and processing:
 					}
 					case "init": {
 						const overwrite = rest.includes("--force") || rest.includes("--overwrite");
-						const result = ensureScaffold(ctx.cwd, { overwrite, hydrate: true });
+						if (existsSync(join(ctx.cwd, CONFIG_PATH)) && !overwrite) {
+							ensureScaffold(ctx.cwd, { hydrate: false });
+							ctx.ui.notify(`${CONFIG_PATH} already exists. Use /backlog:config-raw init --force to overwrite it with defaults.`, "warning");
+							break;
+						}
+						const result = ensureScaffold(ctx.cwd, { overwrite, hydrate: false });
 						const cfg = await loadConfig(ctx.cwd);
 						const cliResult = await ensureSandcastleCliScaffold(ctx.cwd, cfg, { reinitialize: overwrite });
 						await quietlyBuildConfiguredImage(ctx.cwd, cfg, deps.image);

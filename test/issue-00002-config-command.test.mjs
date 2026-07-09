@@ -87,10 +87,10 @@ test('issue 00002 registers /backlog:config-raw and manages repo-local config', 
     );
 
     const setupNotifications = await invoke('init');
-    assert.equal(setupNotifications[0].type, 'success');
+    assert.equal(setupNotifications[0].type, 'warning');
+    assert.match(setupNotifications[0].message, /--force/);
     assert.equal(readFileSync(configPath, 'utf8').includes('extraRoot: keep-me'), true);
-    assert.doesNotMatch(readFileSync(configPath, 'utf8'), /^pipelines:/m);
-    assert.match(readFileSync(configPath, 'utf8'), /^defaultPipeline:/m);
+    assert.doesNotMatch(readFileSync(configPath, 'utf8'), /^defaultPipeline:/m);
     assert.equal(existsSync(runnerPath), true);
     execFileSyncInner(process.execPath, ['--check', runnerPath], { encoding: 'utf8' });
 
@@ -98,6 +98,8 @@ test('issue 00002 registers /backlog:config-raw and manages repo-local config', 
     assert.equal(forceNotifications[0].type, 'success');
     assert.match(forceNotifications[0].message, /Overwrote:/);
     assert.equal(readFileSync(configPath, 'utf8').includes('extraRoot: keep-me'), false);
+    assert.match(readFileSync(configPath, 'utf8'), /^agents:/m);
+    assert.match(readFileSync(configPath, 'utf8'), /^pipelines:/m);
 
     const showNotifications = await invoke('');
     assert.equal(showNotifications[0].type, 'info');
@@ -142,6 +144,6 @@ test('issue 00002 registers /backlog:config-raw and manages repo-local config', 
 
   const result = JSON.parse(output);
   assert.equal(result.commandRegistered, true);
-  assert.equal(result.notifications.setup[0].type, 'success');
+  assert.equal(result.notifications.setup[0].type, 'warning');
   assert.equal(result.notifications.show[0].type, 'info');
 });
