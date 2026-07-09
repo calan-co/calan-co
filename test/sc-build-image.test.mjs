@@ -16,7 +16,7 @@ function makeRepo(name = 'doc-vader', defaultSandbox = 'docker', options = {}) {
         `defaultSandbox: ${defaultSandbox}`, 
     'defaultModel: test-model',
     '',
-    'agents:',
+    'roles:',
     '  reviewer:',
     '    description: Reviewer',
     '    model: test-model',

@@ -9,7 +9,7 @@ test('pipeline packs are discovered from the Pi-Sandcastle execution runtime pac
   assert.deepEqual(names, ['archive', 'blank', 'parallel-planner', 'parallel-planner-with-review', 'sequential-reviewer', 'simple-loop']);
   const runtime = loadExecutionRuntimePack();
   assert.ok(runtime.prompts['implement-work'].template.length > 20);
-  assert.equal(runtime.stepModules['plan-work'].agent, 'planner');
+  assert.equal(runtime.stepModules['plan-work'].role, 'planner');
 });
 
 test('pipeline packs map into pi-sandcastle agent and pipeline inventory', () => {
@@ -19,9 +19,9 @@ test('pipeline packs map into pi-sandcastle agent and pipeline inventory', () =>
   assert.ok(cfg.agents.implementer);
   assert.ok(cfg.agents.reviewer);
   assert.ok(cfg.agents.merger);
-  assert.equal(cfg.pipelines['simple-loop'].steps[0].agent, 'worker');
-  assert.equal(cfg.pipelines['parallel-planner'].steps[0].agent, 'planner');
-  assert.equal(cfg.pipelines['parallel-planner-with-review'].steps[2].agent, 'reviewer');
+  assert.equal(cfg.pipelines['simple-loop'].steps[0].role, 'worker');
+  assert.equal(cfg.pipelines['parallel-planner'].steps[0].role, 'planner');
+  assert.equal(cfg.pipelines['parallel-planner-with-review'].steps[2].role, 'reviewer');
 });
 
 test('default config yaml stores only user-selected/default override settings', () => {

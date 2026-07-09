@@ -15,7 +15,6 @@ test('execution runtime pack ports prompts, roles, pipelines, and step modules',
   assert.equal(pack.runtimeVersion, 1);
   assert.ok(pack.prompts['simple-loop'].template.includes('$INPUT'));
   assert.equal(pack.roles.implementer.role, 'implementer');
-  assert.equal(pack.agents.implementer.role, 'implementer');
   assert.equal(pack.stepModules['implement-work'].prompt, 'implement-work');
   assert.equal(pack.pipelines['parallel-planner-with-review'].steps[2].kind, 'fanOut');
   assert.ok(listRuntimeAgents(pack).some((agent) => agent.name === 'reviewer'));
@@ -30,9 +29,9 @@ test('execution runtime validates negative fixtures with useful diagnostics', ()
       runtimeVersion: 1,
       roles: { worker: {} },
       prompts: { bad: { format: 'markdown' } },
-      pipelines: { p: { steps: [{ id: 's', kind: 'runAgent', agent: 'missing', prompt: 'bad' }] } },
+      pipelines: { p: { steps: [{ id: 's', kind: 'runAgent', foo: 'missing', prompt: 'bad' }] } },
     }),
-    /prompt 'bad' must define template or file.*unknown agent/s,
+    /prompt 'bad' must define template or file.*must reference a role/s,
   );
   assert.throws(
     () => validateExecutionRuntimePack({
@@ -56,7 +55,7 @@ test('runtime compiler converts deterministic runtime pipelines to legacy execut
   assert.equal(cfg.pipelines.archive.sandbox, undefined);
   assert.ok(cfg.agents.planner.systemPrompt.includes('planner'));
   assert.equal(cfg.pipelines.archive.branchStrategy.type, 'merge-to-head');
-  assert.equal(cfg.pipelines['parallel-planner'].steps[1].agent, 'implementer');
+  assert.equal(cfg.pipelines['parallel-planner'].steps[1].role, 'implementer');
   assert.equal(compileRuntimeSteps([{ id: 'noop', kind: 'gate' }], pack)[0].prompt, '$INPUT');
 });
 

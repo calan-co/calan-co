@@ -24,7 +24,7 @@ function runTuiScript(body) {
       'defaultSandbox: docker',
       'defaultModel: claude-sonnet-4-6',
       '',
-      'agents:',
+      'roles:',
       '  planner:',
       '    description: Planner agent',
       '    provider: pi',
@@ -38,7 +38,7 @@ function runTuiScript(body) {
       '  simple-loop:',
       '    description: Simple loop',
       '    steps:',
-      '      - agent: worker',
+      '      - role: worker',
       '        prompt: |',
       '          Do work.',
     ].join('\n'));

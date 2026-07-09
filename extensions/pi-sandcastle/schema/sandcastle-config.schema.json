@@ -8,12 +8,12 @@
   "properties": {
     "defaultSandbox": {
       "$ref": "#/$defs/sandbox",
-      "description": "Default sandbox provider for agents and pipelines."
+      "description": "Default sandbox provider for roles and pipelines."
     },
     "defaultModel": {
       "type": "string",
       "minLength": 1,
-      "description": "Default model reference used when an agent or pipeline does not override it. Use 'Agent Default' to defer to the selected agent provider."
+      "description": "Default model reference used when a role or pipeline does not override it. Use 'Agent Default' to defer to the selected agent provider."
     },
     "defaultPipeline": {
       "type": "string",
@@ -38,17 +38,11 @@
     "roles": {
       "type": "object",
       "description": "Reusable execution roles consumed by runtime pipelines and backlog commands.",
-      "additionalProperties": { "$ref": "#/$defs/agent" }
-    },
-    "agents": {
-      "type": "object",
-      "description": "Deprecated alias for roles. Prefer roles to avoid overloading agent provider terminology.",
-      "deprecated": true,
-      "additionalProperties": { "$ref": "#/$defs/agent" }
+      "additionalProperties": { "$ref": "#/$defs/role" }
     },
     "pipelines": {
       "type": "object",
-      "description": "Deterministic Sandcastle workflows composed from configured agents.",
+      "description": "Deterministic runtime workflows composed from configured roles.",
       "additionalProperties": { "$ref": "#/$defs/pipeline" }
     },
     "chains": {
@@ -71,7 +65,7 @@
       "type": "string",
       "enum": ["claude-code", "claude", "pi", "codex", "cursor", "opencode", "copilot"]
     },
-    "agent": {
+    "role": {
       "type": "object",
       "additionalProperties": true,
       "properties": {
@@ -101,7 +95,7 @@
       "type": "object",
       "additionalProperties": true,
       "properties": {
-        "agent": { "type": "string" },
+        "role": { "type": "string" },
         "prompt": { "type": "string" },
         "sandbox": { "$ref": "#/$defs/sandbox" },
         "model": { "type": "string", "minLength": 1 },
@@ -111,7 +105,7 @@
           "items": { "type": "string" }
         }
       },
-      "required": ["agent", "prompt"]
+      "required": ["role", "prompt"]
     },
     "pipeline": {
       "type": "object",
@@ -137,10 +131,10 @@
       "type": "object",
       "additionalProperties": true,
       "properties": {
-        "agent": { "type": "string" },
+        "role": { "type": "string" },
         "prompt": { "type": "string" }
       },
-      "required": ["agent", "prompt"]
+      "required": ["role", "prompt"]
     }
   }
 }

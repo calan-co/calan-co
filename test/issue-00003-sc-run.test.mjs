@@ -26,7 +26,7 @@ test('issue 00003 registers /backlog:run and uses the injected Sandcastle capabi
     await writeFile(
       join(configDir, 'config.yaml'),
       [
-        'agents:',
+        'roles:',
         '  reviewer:',
         '    model: claude-opus-4-8',
         '    sandbox: no-sandbox',
@@ -49,7 +49,7 @@ test('issue 00003 registers /backlog:run and uses the injected Sandcastle capabi
         calls.push({
           type: 'run',
           options: {
-            agent: options.agent,
+            agent: options.role,
             sandbox: options.sandbox,
             cwd: options.cwd,
             prompt: options.prompt,

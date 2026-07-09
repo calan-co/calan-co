@@ -13,8 +13,8 @@ export interface ConfigAgentDef {
 	copyToWorktree?: string[];
 }
 
-export interface ConfigChainStep { agent: string; prompt: string }
-export interface ConfigPipelineStep { agent: string; prompt: string; sandbox?: ConfigAgentDef["sandbox"]; model?: string; maxIterations?: number; copyToWorktree?: string[] }
+export interface ConfigChainStep { role: string; prompt: string }
+export interface ConfigPipelineStep { role: string; prompt: string; sandbox?: ConfigAgentDef["sandbox"]; model?: string; maxIterations?: number; copyToWorktree?: string[] }
 export interface ConfigPipelineDef { description?: string; branchStrategy?: Record<string, unknown>; sandbox?: ConfigAgentDef["sandbox"]; model?: string; copyToWorktree?: string[]; steps: ConfigPipelineStep[] }
 
 export interface ConfigShadowSnapshot {
@@ -52,7 +52,7 @@ export class ConfigShadowModel extends ShadowModelBase<ConfigShadowSnapshot> {
 		const before = this.capture();
 		const parts = path.split(".");
 		if (parts.length === 1) (this.state as any)[parts[0]] = value;
-		else if (parts[0] === "agents" && parts.length === 3) {
+		else if (parts[0] === "roles" && parts.length === 3) {
 			this.state.agents[parts[1]] ||= { name: parts[1] };
 			if (value === "default" && ["model", "sandbox"].includes(parts[2])) delete (this.state.agents[parts[1]] as any)[parts[2]];
 			else (this.state.agents[parts[1]] as any)[parts[2]] = value;
@@ -62,8 +62,8 @@ export class ConfigShadowModel extends ShadowModelBase<ConfigShadowSnapshot> {
 
 	addAgent(name: string): void {
 		const before = this.capture();
-		this.state.agents[name] = { name, description: `${name} agent`, provider: "pi", maxIterations: 1 };
-		this.emit("add-agent", `Add agent ${name}`, before, { name });
+		this.state.agents[name] = { name, description: `${name} role`, provider: "pi", maxIterations: 1 };
+		this.emit("add-agent", `Add role ${name}`, before, { name });
 	}
 
 	renameAgent(oldName: string, newName: string): void {
@@ -71,21 +71,21 @@ export class ConfigShadowModel extends ShadowModelBase<ConfigShadowSnapshot> {
 		this.state.agents[newName] = this.state.agents[oldName] || { name: newName };
 		this.state.agents[newName].name = newName;
 		delete this.state.agents[oldName];
-		for (const chain of Object.values(this.state.chains)) for (const step of chain) if (step.agent === oldName) step.agent = newName;
-		for (const pipeline of Object.values(this.state.pipelines)) for (const step of pipeline.steps || []) if (step.agent === oldName) step.agent = newName;
-		this.emit("rename-agent", `Rename agent ${oldName} → ${newName}`, before, { oldName, newName });
+		for (const chain of Object.values(this.state.chains)) for (const step of chain) if (step.role === oldName) step.role = newName;
+		for (const pipeline of Object.values(this.state.pipelines)) for (const step of pipeline.steps || []) if (step.role === oldName) step.role = newName;
+		this.emit("rename-agent", `Rename role ${oldName} → ${newName}`, before, { oldName, newName });
 	}
 
 	deleteAgent(name: string): void {
 		const before = this.capture();
 		delete this.state.agents[name];
-		this.emit("delete-agent", `Delete agent ${name}`, before, { name });
+		this.emit("delete-agent", `Delete role ${name}`, before, { name });
 	}
 
 
 	addPipeline(name: string): void {
 		const before = this.capture();
-		this.state.pipelines[name] = { description: `${name} pipeline`, steps: [{ agent: "worker", prompt: "Complete the requested task." }] };
+		this.state.pipelines[name] = { description: `${name} pipeline`, steps: [{ role: "worker", prompt: "Complete the requested task." }] };
 		this.emit("add-pipeline", `Add pipeline ${name}`, before, { name });
 	}
 

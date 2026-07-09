@@ -63,20 +63,22 @@ The stable, reusable, overrideable objects are:
     - Runtime adapter bindings, initially including `sandcastle`.
     - This is the explicit seam that lets Pi-Sandcastle keep Sandcastle now and replace or supplement it later.
 
-## Agent scoping
+## Role scoping
 
 Use a **hybrid** model:
 
-- Top-level `roles` define reusable identities and defaults.
-- Pipeline steps reference a top-level agent by name.
-- Step-local overrides are allowed for `model`, `sandbox`, `maxIterations`, `systemPrompt`, `copyToWorktree`, and `branchPolicy`.
-- Pipeline-local anonymous agents are allowed only for pack authors, not for the initial user-facing config editor.
+- Top-level `roles` define reusable execution identities and defaults.
+- Pipeline steps reference a top-level role by name.
+- Role-reference-local overrides are allowed for `model`, `sandbox`, `maxIterations`, `systemPrompt`, `copyToWorktree`, and `branchPolicy`.
+- Pipeline-local anonymous roles are allowed only for pack authors, not for the initial user-facing config editor.
 
 Resolution order:
 
 ```text
-step override > pipeline default > referenced agent > global defaults > provider defaults
+step override > pipeline default > referenced role > global defaults > provider defaults
 ```
+
+Runtime pack and config files use `role:` for pipeline-step references. `agent:` is not part of the new persisted runtime language.
 
 This keeps the TUI simple while preserving enough flexibility for specialized review, merge, and planner roles.
 
@@ -84,7 +86,7 @@ This keeps the TUI simple while preserving enough flexibility for specialized re
 
 Pipelines should support a small closed set of node kinds before adding generic workflow features:
 
-- `runAgent`: invoke an agent through the selected execution adapter.
+- `runAgent`: invoke a role through the selected execution adapter.
 - `selectWork`: resolve backlog/issue input into work items.
 - `fanOut`: dispatch independent work items with a concurrency limit.
 - `fanIn`: collect child results and normalize statuses.
@@ -145,7 +147,7 @@ roles:
     model: default
     sandbox: default
     maxIterations: 1
-    systemPrompt: You are the planning agent. Produce dependency-aware work selection.
+    systemPrompt: You are the planning role. Produce dependency-aware work selection.
   implementer:
     role: implementer
     provider: default
@@ -204,7 +206,7 @@ pipelines:
       - id: implement
         kind: runAgent
         needs: [select]
-        agent: implementer
+        role: implementer
         prompt: implement-backlog-item
       - id: post-process
         kind: postProcess
@@ -217,7 +219,7 @@ pipelines:
     steps:
       - id: plan
         kind: runAgent
-        agent: planner
+        role: planner
         prompt: plan-backlog-iterations
       - id: implement
         kind: fanOut
@@ -226,7 +228,7 @@ pipelines:
         concurrency: 4
         step:
           kind: runAgent
-          agent: implementer
+          role: implementer
           prompt: implement-backlog-item
       - id: review
         kind: fanOut
@@ -234,7 +236,7 @@ pipelines:
         over: $.steps.implement.outputs.branches
         step:
           kind: review
-          agent: reviewer
+          role: reviewer
           prompt: review-branch
       - id: merge
         kind: merge

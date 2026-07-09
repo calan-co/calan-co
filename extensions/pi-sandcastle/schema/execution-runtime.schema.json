@@ -30,16 +30,7 @@
       "type": "object",
       "minProperties": 1,
       "additionalProperties": {
-        "$ref": "#/$defs/agent"
-      }
-    },
-    "agents": {
-      "type": "object",
-      "description": "Deprecated alias for roles.",
-      "deprecated": true,
-      "minProperties": 1,
-      "additionalProperties": {
-        "$ref": "#/$defs/agent"
+        "$ref": "#/$defs/role"
       }
     },
     "prompts": {
@@ -159,7 +150,7 @@
         "closeCommand": { "type": "string", "minLength": 1 }
       }
     },
-    "agent": {
+    "role": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -319,7 +310,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "agent": { "$ref": "#/$defs/referenceOrDefault" },
+        "role": { "$ref": "#/$defs/referenceOrDefault" },
         "model": { "type": "string", "minLength": 1 },
         "sandbox": { "$ref": "#/$defs/referenceOrDefault" },
         "branchPolicy": { "$ref": "#/$defs/referenceOrDefault" },
@@ -350,7 +341,7 @@
           "items": { "$ref": "#/$defs/identifier" },
           "uniqueItems": true
         },
-        "agent": { "$ref": "#/$defs/referenceOrDefault" },
+        "role": { "$ref": "#/$defs/referenceOrDefault" },
         "prompt": { "$ref": "#/$defs/referenceOrDefault" },
         "issueTracker": { "$ref": "#/$defs/referenceOrDefault" },
         "limit": { "type": "integer", "minimum": 1 },
@@ -368,7 +359,7 @@
       "allOf": [
         {
           "if": { "properties": { "kind": { "const": "runAgent" } }, "required": ["kind"] },
-          "then": { "required": ["agent", "prompt"] }
+          "then": { "required": ["role", "prompt"] }
         },
         {
           "if": { "properties": { "kind": { "const": "fanOut" } }, "required": ["kind"] },
@@ -376,7 +367,7 @@
         },
         {
           "if": { "properties": { "kind": { "const": "review" } }, "required": ["kind"] },
-          "then": { "required": ["agent", "prompt"] }
+          "then": { "required": ["role", "prompt"] }
         }
       ]
     }

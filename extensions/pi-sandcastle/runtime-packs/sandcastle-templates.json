@@ -23,18 +23,70 @@
   },
   "providers": {
     "agentProviders": {
-      "claude-code": { "adapter": "sandcastle", "defaultModel": "Agent Default", "capabilities": ["streaming", "tools"] },
-      "pi": { "adapter": "sandcastle", "defaultModel": "Agent Default", "capabilities": ["streaming", "tools"] },
-      "codex": { "adapter": "sandcastle", "defaultModel": "Agent Default", "capabilities": ["streaming", "tools"] },
-      "cursor": { "adapter": "sandcastle", "defaultModel": "Agent Default", "capabilities": ["streaming", "tools"] },
-      "opencode": { "adapter": "sandcastle", "defaultModel": "Agent Default", "capabilities": ["streaming", "tools"] },
-      "copilot": { "adapter": "sandcastle", "defaultModel": "Agent Default", "capabilities": ["streaming", "tools"] }
+      "claude-code": {
+        "adapter": "sandcastle",
+        "defaultModel": "Agent Default",
+        "capabilities": [
+          "streaming",
+          "tools"
+        ]
+      },
+      "pi": {
+        "adapter": "sandcastle",
+        "defaultModel": "Agent Default",
+        "capabilities": [
+          "streaming",
+          "tools"
+        ]
+      },
+      "codex": {
+        "adapter": "sandcastle",
+        "defaultModel": "Agent Default",
+        "capabilities": [
+          "streaming",
+          "tools"
+        ]
+      },
+      "cursor": {
+        "adapter": "sandcastle",
+        "defaultModel": "Agent Default",
+        "capabilities": [
+          "streaming",
+          "tools"
+        ]
+      },
+      "opencode": {
+        "adapter": "sandcastle",
+        "defaultModel": "Agent Default",
+        "capabilities": [
+          "streaming",
+          "tools"
+        ]
+      },
+      "copilot": {
+        "adapter": "sandcastle",
+        "defaultModel": "Agent Default",
+        "capabilities": [
+          "streaming",
+          "tools"
+        ]
+      }
     },
     "sandboxProviders": {
-      "docker": { "adapter": "sandcastle", "imagePolicy": "repo-default" },
-      "podman": { "adapter": "sandcastle", "imagePolicy": "repo-default" },
-      "vercel": { "adapter": "sandcastle" },
-      "no-sandbox": { "adapter": "sandcastle" }
+      "docker": {
+        "adapter": "sandcastle",
+        "imagePolicy": "repo-default"
+      },
+      "podman": {
+        "adapter": "sandcastle",
+        "imagePolicy": "repo-default"
+      },
+      "vercel": {
+        "adapter": "sandcastle"
+      },
+      "no-sandbox": {
+        "adapter": "sandcastle"
+      }
     }
   },
   "issueTrackers": {
@@ -128,74 +180,223 @@
   },
   "policies": {
     "branch": {
-      "merge-to-head": { "type": "merge-to-head" },
-      "branch-per-run": { "type": "branch", "pattern": "sandcastle/{{ pipeline.id }}/{{ run.id }}" }
+      "merge-to-head": {
+        "type": "merge-to-head"
+      },
+      "branch-per-run": {
+        "type": "branch",
+        "pattern": "sandcastle/{{ pipeline.id }}/{{ run.id }}"
+      }
     },
     "image": {
-      "repo-default": { "providerFrom": "defaults.sandboxProvider", "namePattern": "sandcastle:<repo-dir-name>", "build": "if-missing-or-stale" }
+      "repo-default": {
+        "providerFrom": "defaults.sandboxProvider",
+        "namePattern": "sandcastle:<repo-dir-name>",
+        "build": "if-missing-or-stale"
+      }
     },
     "completion": {
-      "promise-complete": { "promise": "COMPLETE" }
+      "promise-complete": {
+        "promise": "COMPLETE"
+      }
     }
   },
   "adapters": {
-    "sandcastle": { "kind": "sandcastle", "module": "@ai-hero/sandcastle", "capabilities": ["runAgent", "buildImage", "worktree"] }
+    "sandcastle": {
+      "kind": "sandcastle",
+      "module": "@ai-hero/sandcastle",
+      "capabilities": [
+        "runAgent",
+        "buildImage",
+        "worktree"
+      ]
+    }
   },
   "stepModules": {
-    "run-worker": { "kind": "runAgent", "agent": "worker", "prompt": "simple-loop" },
-    "plan-work": { "kind": "runAgent", "agent": "planner", "prompt": "plan-work" },
-    "implement-work": { "kind": "runAgent", "agent": "implementer", "prompt": "implement-work" },
-    "review-work": { "kind": "review", "agent": "reviewer", "prompt": "review-work" },
-    "merge-work": { "kind": "merge", "agent": "merger", "prompt": "merge-work" },
-    "archive-terminal-work": { "kind": "runAgent", "agent": "reviewer", "prompt": "archive-terminal-work" }
+    "run-worker": {
+      "kind": "runAgent",
+      "prompt": "simple-loop",
+      "role": "worker"
+    },
+    "plan-work": {
+      "kind": "runAgent",
+      "prompt": "plan-work",
+      "role": "planner"
+    },
+    "implement-work": {
+      "kind": "runAgent",
+      "prompt": "implement-work",
+      "role": "implementer"
+    },
+    "review-work": {
+      "kind": "review",
+      "prompt": "review-work",
+      "role": "reviewer"
+    },
+    "merge-work": {
+      "kind": "merge",
+      "prompt": "merge-work",
+      "role": "merger"
+    },
+    "archive-terminal-work": {
+      "kind": "runAgent",
+      "prompt": "archive-terminal-work",
+      "role": "reviewer"
+    }
   },
   "pipelines": {
     "blank": {
       "description": "Run a single worker with caller-provided input.",
-      "defaults": { "branchPolicy": "merge-to-head" },
+      "defaults": {
+        "branchPolicy": "merge-to-head"
+      },
       "steps": [
-        { "id": "run", "kind": "runAgent", "agent": "worker", "prompt": "blank" }
+        {
+          "id": "run",
+          "kind": "runAgent",
+          "prompt": "blank",
+          "role": "worker"
+        }
       ]
     },
     "simple-loop": {
       "description": "Worker picks and closes one open task at a time.",
-      "defaults": { "branchPolicy": "merge-to-head" },
+      "defaults": {
+        "branchPolicy": "merge-to-head"
+      },
       "steps": [
-        { "id": "run", "kind": "runAgent", "agent": "worker", "prompt": "simple-loop" }
+        {
+          "id": "run",
+          "kind": "runAgent",
+          "prompt": "simple-loop",
+          "role": "worker"
+        }
       ]
     },
     "sequential-reviewer": {
       "description": "Implement one work item, then review the resulting branch.",
-      "defaults": { "branchPolicy": "branch-per-run" },
+      "defaults": {
+        "branchPolicy": "branch-per-run"
+      },
       "steps": [
-        { "id": "implement", "kind": "runAgent", "agent": "implementer", "prompt": "implement-work" },
-        { "id": "review", "kind": "review", "needs": ["implement"], "agent": "reviewer", "prompt": "review-work" }
+        {
+          "id": "implement",
+          "kind": "runAgent",
+          "prompt": "implement-work",
+          "role": "implementer"
+        },
+        {
+          "id": "review",
+          "kind": "review",
+          "needs": [
+            "implement"
+          ],
+          "prompt": "review-work",
+          "role": "reviewer"
+        }
       ]
     },
     "parallel-planner": {
       "description": "Plan unblocked work, fan out implementation, then merge accepted branches.",
-      "defaults": { "branchPolicy": "branch-per-run" },
+      "defaults": {
+        "branchPolicy": "branch-per-run"
+      },
       "steps": [
-        { "id": "plan", "kind": "runAgent", "agent": "planner", "prompt": "plan-work" },
-        { "id": "implement", "kind": "fanOut", "needs": ["plan"], "over": "$.steps.plan.outputs.items", "concurrency": 4, "step": { "id": "implement-one", "kind": "runAgent", "agent": "implementer", "prompt": "implement-work" } },
-        { "id": "merge", "kind": "merge", "needs": ["implement"], "strategy": "accepted-only" }
+        {
+          "id": "plan",
+          "kind": "runAgent",
+          "prompt": "plan-work",
+          "role": "planner"
+        },
+        {
+          "id": "implement",
+          "kind": "fanOut",
+          "needs": [
+            "plan"
+          ],
+          "over": "$.steps.plan.outputs.items",
+          "concurrency": 4,
+          "step": {
+            "id": "implement-one",
+            "kind": "runAgent",
+            "prompt": "implement-work",
+            "role": "implementer"
+          }
+        },
+        {
+          "id": "merge",
+          "kind": "merge",
+          "needs": [
+            "implement"
+          ],
+          "strategy": "accepted-only"
+        }
       ]
     },
     "parallel-planner-with-review": {
       "description": "Plan unblocked work, fan out implementation, review completed branches, then merge accepted branches.",
-      "defaults": { "branchPolicy": "branch-per-run" },
+      "defaults": {
+        "branchPolicy": "branch-per-run"
+      },
       "steps": [
-        { "id": "plan", "kind": "runAgent", "agent": "planner", "prompt": "plan-work" },
-        { "id": "implement", "kind": "fanOut", "needs": ["plan"], "over": "$.steps.plan.outputs.items", "concurrency": 4, "step": { "id": "implement-one", "kind": "runAgent", "agent": "implementer", "prompt": "implement-work" } },
-        { "id": "review", "kind": "fanOut", "needs": ["implement"], "over": "$.steps.implement.outputs.branches", "concurrency": 4, "step": { "id": "review-one", "kind": "review", "agent": "reviewer", "prompt": "review-work" } },
-        { "id": "merge", "kind": "merge", "needs": ["review"], "strategy": "accepted-only" }
+        {
+          "id": "plan",
+          "kind": "runAgent",
+          "prompt": "plan-work",
+          "role": "planner"
+        },
+        {
+          "id": "implement",
+          "kind": "fanOut",
+          "needs": [
+            "plan"
+          ],
+          "over": "$.steps.plan.outputs.items",
+          "concurrency": 4,
+          "step": {
+            "id": "implement-one",
+            "kind": "runAgent",
+            "prompt": "implement-work",
+            "role": "implementer"
+          }
+        },
+        {
+          "id": "review",
+          "kind": "fanOut",
+          "needs": [
+            "implement"
+          ],
+          "over": "$.steps.implement.outputs.branches",
+          "concurrency": 4,
+          "step": {
+            "id": "review-one",
+            "kind": "review",
+            "prompt": "review-work",
+            "role": "reviewer"
+          }
+        },
+        {
+          "id": "merge",
+          "kind": "merge",
+          "needs": [
+            "review"
+          ],
+          "strategy": "accepted-only"
+        }
       ]
     },
     "archive": {
       "description": "Archive or summarize terminal-state backlog work.",
-      "defaults": { "branchPolicy": "merge-to-head" },
+      "defaults": {
+        "branchPolicy": "merge-to-head"
+      },
       "steps": [
-        { "id": "archive", "kind": "runAgent", "agent": "reviewer", "prompt": "archive-terminal-work" }
+        {
+          "id": "archive",
+          "kind": "runAgent",
+          "prompt": "archive-terminal-work",
+          "role": "reviewer"
+        }
       ]
     }
   }

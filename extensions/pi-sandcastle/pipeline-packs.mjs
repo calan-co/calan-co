@@ -54,7 +54,7 @@ export function configToYaml(config) {
     if (pipeline.sandbox !== undefined) lines.push(`    sandbox: ${yamlScalar(pipeline.sandbox)}`);
     lines.push(`    model: ${yamlScalar(pipeline.model)}`, `    copyToWorktree: ${yamlScalar(pipeline.copyToWorktree || [])}`, '    steps:');
     for (const step of pipeline.steps || []) {
-      lines.push(`      - agent: ${yamlScalar(step.agent)}`, `        prompt: ${yamlBlock(step.prompt, 10)}`);
+      lines.push(`      - role: ${yamlScalar(step.role)}`, `        prompt: ${yamlBlock(step.prompt, 10)}`);
       if (step.maxIterations !== undefined) lines.push(`        maxIterations: ${yamlScalar(step.maxIterations)}`);
       if (step.copyToWorktree !== undefined) lines.push(`        copyToWorktree: ${yamlScalar(step.copyToWorktree)}`);
     }

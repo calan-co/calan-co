@@ -11,8 +11,7 @@ export interface ExecutionRuntimePack {
 	defaults?: Record<string, unknown>;
 	providers?: Record<string, unknown>;
 	issueTrackers?: Record<string, unknown>;
-	roles?: Record<string, RuntimeAgent>;
-	agents: Record<string, RuntimeAgent>;
+	roles: Record<string, RuntimeAgent>;
 	prompts: Record<string, RuntimePrompt>;
 	policies?: Record<string, unknown>;
 	adapters?: Record<string, unknown>;
@@ -50,7 +49,7 @@ export interface RuntimePipelineStep {
 	id: string;
 	kind: "runAgent" | "selectWork" | "fanOut" | "fanIn" | "review" | "merge" | "postProcess" | "gate";
 	needs?: string[];
-	agent?: string;
+	role?: string;
 	prompt?: string;
 	issueTracker?: string;
 	limit?: number;
@@ -97,9 +96,8 @@ export function validateExecutionRuntimePack(value: unknown): ExecutionRuntimePa
 		throw new Error("Invalid execution runtime pack:\n- runtime pack must be an object");
 	}
 	if (!Number.isInteger(pack.runtimeVersion) || Number(pack.runtimeVersion) < 1) errors.push("runtimeVersion must be a positive integer");
-	const roles = pack.roles || pack.agents;
+	const roles = pack.roles;
 	if (!roles || typeof roles !== "object" || Object.keys(roles).length === 0) errors.push("roles must contain at least one role");
-	else pack.agents = roles;
 	if (!pack?.prompts || typeof pack.prompts !== "object" || Object.keys(pack.prompts).length === 0) errors.push("prompts must contain at least one prompt");
 	if (!pack?.pipelines || typeof pack.pipelines !== "object" || Object.keys(pack.pipelines).length === 0) errors.push("pipelines must contain at least one pipeline");
 	for (const [name, prompt] of Object.entries(pack.prompts || {})) {
@@ -119,9 +117,9 @@ export function validateExecutionRuntimePack(value: unknown): ExecutionRuntimePa
 function validateStep(scope: string, step: RuntimePipelineStep, errors: string[], pack: ExecutionRuntimePack): void {
 	if (!step.id) errors.push(`${scope} step is missing id`);
 	if (!step.kind) errors.push(`${scope}.${step.id || "?"} is missing kind`);
-	if ((step.kind === "runAgent" || step.kind === "review") && !step.agent) errors.push(`${scope}.${step.id} must reference an agent`);
+	if ((step.kind === "runAgent" || step.kind === "review") && !step.role) errors.push(`${scope}.${step.id} must reference a role`);
 	if ((step.kind === "runAgent" || step.kind === "review") && !step.prompt) errors.push(`${scope}.${step.id} must reference a prompt`);
-	if (step.agent && step.agent !== "default" && !pack.agents?.[step.agent]) errors.push(`${scope}.${step.id} references unknown agent '${step.agent}'`);
+	if (step.role && step.role !== "default" && !pack.roles?.[step.role]) errors.push(`${scope}.${step.id} references unknown role '${step.role}'`);
 	if (step.prompt && step.prompt !== "default" && !pack.prompts?.[step.prompt]) errors.push(`${scope}.${step.id} references unknown prompt '${step.prompt}'`);
 	if (step.kind === "fanOut") {
 		if (!step.over) errors.push(`${scope}.${step.id} fanOut must define over`);
@@ -135,7 +133,7 @@ export function listRuntimePipelines(pack = loadExecutionRuntimePack()): Array<{
 }
 
 export function listRuntimeAgents(pack = loadExecutionRuntimePack()): Array<{ name: string; description: string }> {
-	return Object.entries(pack.agents).map(([name, agent]) => ({ name, description: agent.systemPrompt || `${agent.role || name} agent` })).sort((a, b) => a.name.localeCompare(b.name));
+	return Object.entries(pack.roles).map(([name, agent]) => ({ name, description: agent.systemPrompt || `${agent.role || name} agent` })).sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export function runtimeToSandcastleConfig(pack = loadExecutionRuntimePack(), defaults: Partial<LegacyConfigLike> = {}): LegacyConfigLike {
@@ -144,7 +142,7 @@ export function runtimeToSandcastleConfig(pack = loadExecutionRuntimePack(), def
 	const defaultAgent = String(defaults.defaultAgent || pack.defaults?.agentProvider || "pi");
 	const agents: Record<string, any> = {};
 	const pipelines: Record<string, any> = {};
-	for (const [name, agent] of Object.entries(pack.agents)) {
+	for (const [name, agent] of Object.entries(pack.roles)) {
 		agents[name] = {
 			name,
 			description: agent.role ? `${agent.role} role` : `${name} role`,
@@ -190,16 +188,16 @@ export function compileRuntimeSteps(steps: RuntimePipelineStep[], pack = loadExe
 			compiled.push({ ...compileAgentStep(step.step, pack), maxIterations: step.concurrency || compileAgentStep(step.step, pack).maxIterations });
 			continue;
 		}
-		if (step.kind === "merge" && step.agent) compiled.push(compileAgentStep(step as RuntimePipelineStep, pack));
+		if (step.kind === "merge" && step.role) compiled.push(compileAgentStep(step as RuntimePipelineStep, pack));
 	}
-	return compiled.length ? compiled : [{ agent: Object.keys(pack.agents)[0], prompt: "$INPUT", maxIterations: 1 }];
+	return compiled.length ? compiled : [{ role: Object.keys(pack.roles)[0], prompt: "$INPUT", maxIterations: 1 }];
 }
 
 function compileAgentStep(step: RuntimePipelineStep, pack: ExecutionRuntimePack): any {
-	const agent = pack.agents[step.agent || ""] || {};
+	const agent = pack.roles[step.role || ""] || {};
 	const prompt = pack.prompts[step.prompt || ""];
 	return {
-		agent: step.agent,
+		role: step.role,
 		prompt: prompt?.template || `$INPUT`,
 		maxIterations: Number(step.overrides?.maxIterations || agent.maxIterations || 1),
 		copyToWorktree: agent.copyToWorktree,

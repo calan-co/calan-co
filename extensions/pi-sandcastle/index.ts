@@ -69,12 +69,12 @@ interface AgentDef {
 type SandcastleSandbox = NonNullable<AgentDef["sandbox"]>;
 
 interface ChainStep {
-	agent: string;
+	role: string;
 	prompt: string;
 }
 
 interface PipelineStep {
-	agent: string;
+	role: string;
 	prompt: string;
 	sandbox?: AgentDef["sandbox"];
 	model?: string;
@@ -366,7 +366,7 @@ pipelines:
     model: claude-sonnet-4-6
     copyToWorktree: [node_modules]
     steps:
-      - agent: worker
+      - role: worker
         prompt: |
           # Context
           
@@ -432,7 +432,7 @@ pipelines:
     model: claude-sonnet-4-6
     copyToWorktree: [node_modules]
     steps:
-      - agent: implementer
+      - role: implementer
         prompt: |
           # Context
           
@@ -488,7 +488,7 @@ pipelines:
           
           <promise>COMPLETE</promise>
         maxIterations: 1
-      - agent: reviewer
+      - role: reviewer
         prompt: |
           # TASK
           
@@ -556,7 +556,7 @@ pipelines:
     model: claude-sonnet-4-6
     copyToWorktree: [node_modules]
     steps:
-      - agent: planner
+      - role: planner
         prompt: |
           # ISSUES
           
@@ -596,7 +596,7 @@ pipelines:
           
           Always emit the \`<plan>\` tags, even when there is nothing to do. If there are no issues to work on at all, output \`<plan>{"issues": []}</plan>\` so the run can exit cleanly.
         maxIterations: 1
-      - agent: implementer
+      - role: implementer
         prompt: |
           # TASK
           
@@ -661,7 +661,7 @@ pipelines:
           
           ONLY WORK ON A SINGLE TASK.
         maxIterations: 100
-      - agent: merger
+      - role: merger
         prompt: |
           # TASK
           
@@ -700,7 +700,7 @@ pipelines:
     model: claude-sonnet-4-6
     copyToWorktree: [node_modules]
     steps:
-      - agent: planner
+      - role: planner
         prompt: |
           # ISSUES
           
@@ -740,7 +740,7 @@ pipelines:
           
           Always emit the \`<plan>\` tags, even when there is nothing to do. If there are no issues to work on at all, output \`<plan>{"issues": []}</plan>\` so the run can exit cleanly.
         maxIterations: 1
-      - agent: implementer
+      - role: implementer
         prompt: |
           # TASK
           
@@ -805,7 +805,7 @@ pipelines:
           
           ONLY WORK ON A SINGLE TASK.
         maxIterations: 100
-      - agent: reviewer
+      - role: reviewer
         prompt: |
           # TASK
           
@@ -863,7 +863,7 @@ pipelines:
           
           Once complete, output <promise>COMPLETE</promise>.
         maxIterations: 1
-      - agent: merger
+      - role: merger
         prompt: |
           # TASK
           
@@ -901,7 +901,7 @@ pipelines:
     sandbox: docker
     model: claude-sonnet-4-6
     steps:
-      - agent: reviewer
+      - role: reviewer
         prompt: |
           Inspect terminal-state backlog work and identify safe archive/reconciliation actions.
 
@@ -1265,7 +1265,7 @@ function formatConfigValue(value: unknown): string {
 function readConfigValue(cfg: SandcastleConfig, path: string): unknown {
 	const parts = splitConfigPath(path);
 	if (parts.length === 1 && isRootConfigKey(parts[0])) return cfg[parts[0]];
-	if ((parts[0] === "roles" || parts[0] === "agents") && parts.length === 3 && isEditableAgentField(parts[2])) {
+	if (parts[0] === "roles" && parts.length === 3 && isEditableAgentField(parts[2])) {
 		return cfg.agents[parts[1]]?.[parts[2]];
 	}
 	if (parts[0] === "chains" && parts.length === 2) return cfg.chains[parts[1]];
@@ -1275,7 +1275,7 @@ function readConfigValue(cfg: SandcastleConfig, path: string): unknown {
 function supportedConfigPath(path: string): boolean {
 	const parts = splitConfigPath(path);
 	if (parts.length === 1) return isRootConfigKey(parts[0]);
-	return (parts[0] === "roles" || parts[0] === "agents") && parts.length === 3 && isEditableAgentField(parts[2]);
+	return parts[0] === "roles" && parts.length === 3 && isEditableAgentField(parts[2]);
 }
 
 function defaultConfigValue(path: string): unknown {
@@ -1283,7 +1283,7 @@ function defaultConfigValue(path: string): unknown {
 	if (parts.length === 1 && isRootConfigKey(parts[0])) {
 		return DEFAULT_CONFIG[parts[0]];
 	}
-	if ((parts[0] === "roles" || parts[0] === "agents") && parts.length === 3 && isEditableAgentField(parts[2])) {
+	if (parts[0] === "roles" && parts.length === 3 && isEditableAgentField(parts[2])) {
 		return DEFAULT_CONFIG.agents[parts[1]]?.[parts[2]];
 	}
 	return undefined;
@@ -1291,7 +1291,7 @@ function defaultConfigValue(path: string): unknown {
 
 function removeConfigValueInText(raw: string, path: string): string {
 	const parts = splitConfigPath(path);
-	if ((parts[0] !== "roles" && parts[0] !== "agents") || parts.length !== 3) return raw;
+	if (parts[0] !== "roles" || parts.length !== 3) return raw;
 	const [, agentName, fieldName] = parts;
 	const lines = raw.replace(/\r/g, "").split("\n");
 	const agentHeader = new RegExp(`^  ${escapeRegExp(agentName)}:\\s*$`);
@@ -1323,7 +1323,7 @@ function setConfigValueInText(raw: string, path: string, value: unknown): string
 				lines[i] = replacement;
 				return lines.join("\n");
 			}
-			if (/^(roles|agents|chains|pipelines):\s*$/.test(lines[i])) {
+			if (/^(roles|chains|pipelines):\s*$/.test(lines[i])) {
 				lines.splice(i, 0, replacement);
 				return lines.join("\n");
 			}
@@ -1332,7 +1332,7 @@ function setConfigValueInText(raw: string, path: string, value: unknown): string
 		return lines.join("\n");
 	}
 
-	if ((parts[0] === "roles" || parts[0] === "agents") && parts.length === 3) {
+	if (parts[0] === "roles" && parts.length === 3) {
 		const [, agentName, fieldName] = parts;
 		const agentHeader = new RegExp(`^  ${escapeRegExp(agentName)}:\\s*$`);
 		let agentIndex = -1;
@@ -1410,7 +1410,7 @@ function deleteTopLevelMapEntry(raw: string, section: string, name: string): str
 
 function updateYamlReferences(raw: string, oldName: string, newName: string): string {
 	let updated = raw;
-	updated = updated.replace(new RegExp(`(agent:\\s*)${yamlMapKeyRegex(oldName)}(?=\\s*$)`, "gm"), `$1${formatScalarForYaml(newName)}`);
+	updated = updated.replace(new RegExp(`(role:\\s*)${yamlMapKeyRegex(oldName)}(?=\\s*$)`, "gm"), `$1${formatScalarForYaml(newName)}`);
 	updated = updated.replace(new RegExp(`\\b${escapeRegExp(oldName)}\\b`, "g"), (match, offset, text) => {
 		const lineStart = text.lastIndexOf("\n", offset) + 1;
 		const lineEnd = text.indexOf("\n", offset);
@@ -1421,11 +1421,11 @@ function updateYamlReferences(raw: string, oldName: string, newName: string): st
 }
 
 function removeYamlReferences(raw: string, name: string): string {
-	return raw.replace(new RegExp(`(agent:\\s*)${yamlMapKeyRegex(name)}(?=\\s*$)`, "gm"), "$1");
+	return raw.replace(new RegExp(`(role:\\s*)${yamlMapKeyRegex(name)}(?=\\s*$)`, "gm"), "$1");
 }
 
-function roleSectionName(raw: string): "roles" | "agents" {
-	return /^agents:\s*$/m.test(raw) && !/^roles:\s*$/m.test(raw) ? "agents" : "roles";
+function roleSectionName(_raw: string): "roles" {
+	return "roles";
 }
 
 function appendAgentText(raw: string, name: string): string {
@@ -1436,7 +1436,7 @@ function appendAgentText(raw: string, name: string): string {
 
 function appendPipelineText(raw: string, name: string): string {
 	if (new RegExp(`^  ${yamlMapKeyRegex(name)}:\\s*$`, "m").test(raw)) throw new Error(`Pipeline '${name}' already exists.`);
-	const block = [`  ${formatYamlMapKey(name)}:`, `    description: ${name} pipeline`, `    steps:`, `      - agent: worker`, `        prompt: |`, `          Complete the requested task.`].join("\n");
+	const block = [`  ${formatYamlMapKey(name)}:`, `    description: ${name} pipeline`, `    steps:`, `      - role: worker`, `        prompt: |`, `          Complete the requested task.`].join("\n");
 	return appendToYamlSection(raw, "pipelines", block);
 }
 
@@ -1488,7 +1488,6 @@ function configuredConfigPaths(cfg: SandcastleConfig): string[] {
 	return [
 		...rootPaths,
 		...Object.keys(cfg.agents).flatMap((agent) => agentFields.map((field) => `roles.${agent}.${field}`)),
-		...Object.keys(cfg.agents).flatMap((agent) => agentFields.map((field) => `agents.${agent}.${field}`)),
 		...Object.keys(cfg.pipelines).flatMap((pipeline) => pipelineFields.map((field) => `pipelines.${pipeline}.${field}`)),
 	].sort();
 }
@@ -1531,17 +1530,17 @@ function validateConfig(cwd: string, cfg: SandcastleConfig): string[] {
 	if (!existsSync(configPath)) issues.push(`Missing config scaffold: ${CONFIG_PATH}`);
 	if (!existsSync(runnerPath)) issues.push(`Missing runner scaffold: ${RUNNER_PATH}`);
 	issues.push(...validateAgainstSchema(cfg, loadConfigSchema()));
-	if (!Object.keys(cfg.agents).length) issues.push("No agents configured.");
+	if (!Object.keys(cfg.agents).length) issues.push("No roles configured.");
 	for (const [name, agent] of Object.entries(cfg.agents)) {
-		if (!agent.description) issues.push(`Agent '${name}' is missing a description.`);
-		// Agent model is optional; unset means inherit defaultModel, and "Agent Default" defers to the provider.
+		if (!agent.description) issues.push(`Role '${name}' is missing a description.`);
+		// Role model is optional; unset means inherit defaultModel, and "Agent Default" defers to the provider.
 		if (agent.sandbox && !SUPPORTED_SANDBOXES.has(agent.sandbox)) {
-			issues.push(`Agent '${name}' uses unsupported sandbox provider '${agent.sandbox}'.`);
+			issues.push(`Role '${name}' uses unsupported sandbox provider '${agent.sandbox}'.`);
 		}
 		if (agent.maxIterations !== undefined && (!Number.isInteger(agent.maxIterations) || agent.maxIterations < 1)) {
-			issues.push(`Agent '${name}' has an invalid maxIterations value.`);
+			issues.push(`Role '${name}' has an invalid maxIterations value.`);
 		}
-		if (agent.systemPrompt && !agent.systemPrompt.trim()) issues.push(`Agent '${name}' has an empty system prompt.`);
+		if (agent.systemPrompt && !agent.systemPrompt.trim()) issues.push(`Role '${name}' has an empty system prompt.`);
 	}
 	for (const [chainName, steps] of Object.entries(cfg.chains)) {
 		if (!Array.isArray(steps) || !steps.length) {
@@ -1549,7 +1548,7 @@ function validateConfig(cwd: string, cfg: SandcastleConfig): string[] {
 			continue;
 		}
 		for (const step of steps) {
-			if (!cfg.agents[step.agent]) issues.push(`Chain '${chainName}' references unknown agent '${step.agent}'.`);
+			if (!cfg.agents[step.role]) issues.push(`Chain '${chainName}' references unknown role '${step.role}'.`);
 			if (!step.prompt || !step.prompt.trim()) issues.push(`Chain '${chainName}' has an empty prompt step.`);
 		}
 	}
@@ -1653,7 +1652,7 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 			setField(cfg, key, parseScalar(top[2]) as SandcastleConfig[typeof key]);
 			continue;
 		}
-		const sectionMatch = line.match(/^(roles|agents|chains|pipelines):\s*$/);
+		const sectionMatch = line.match(/^(roles|chains|pipelines):\s*$/);
 		if (sectionMatch) {
 			section = sectionMatch[1];
 			currentAgent = "";
@@ -1663,7 +1662,7 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 			currentBranchStrategy = null;
 			continue;
 		}
-		if (section === "agents" || section === "roles") {
+		if (section === "roles") {
 			const agentMatch = line.match(/^  (\S.*):\s*$/);
 			if (agentMatch) {
 				currentAgent = parseYamlMapKey(agentMatch[1]);
@@ -1687,9 +1686,9 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 				cfg.chains[currentChain] = [];
 				continue;
 			}
-			const step = line.match(/^\s{4}-\s+agent:\s*(.+)$/);
+			const step = line.match(/^\s{4}-\s+role:\s*(.+)$/);
 			if (step && currentChain) {
-				currentStep = { agent: parseScalar(step[1]), prompt: DEFAULT_STEP_PROMPT };
+				currentStep = { role: parseScalar(step[1]), prompt: DEFAULT_STEP_PROMPT };
 				cfg.chains[currentChain].push(currentStep);
 				continue;
 			}
@@ -1732,9 +1731,9 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 					continue;
 				}
 			}
-			const step = line.match(/^\s{6}-\s+agent:\s*(.+)$/);
+			const step = line.match(/^\s{6}-\s+role:\s*(.+)$/);
 			if (step) {
-				currentPipelineStep = { agent: parseScalar(step[1]), prompt: DEFAULT_STEP_PROMPT };
+				currentPipelineStep = { role: parseScalar(step[1]), prompt: DEFAULT_STEP_PROMPT };
 				cfg.pipelines[currentPipeline].steps.push(currentPipelineStep);
 				continue;
 			}
@@ -2091,7 +2090,7 @@ function registerScRunCommand(
 
 interface PipelineRunStepRecord {
 	index: number;
-	agent: string;
+	role: string;
 	status: "running" | "completed" | "failed";
 	branch?: string;
 	commits: string[];
@@ -2241,10 +2240,10 @@ export async function executePipeline(
 		for (const [index, step] of pipeline.steps.entries()) {
 			const stepRecord: PipelineRunStepRecord = {
 				index,
-				agent: step.agent,
+				role: step.role,
 				status: "running",
 				commits: [],
-				logPath: buildPipelineStepLogPath(logDir, index, step.agent),
+				logPath: buildPipelineStepLogPath(logDir, index, step.role),
 			};
 			record.steps.push(stepRecord);
 			await writePipelineRunRecord(record);
@@ -2271,7 +2270,7 @@ export async function executePipeline(
 			stepRecord.commits = commitShas;
 			record.branch = result.branch || record.branch;
 			stepRecord.logPath = result.logFilePath || stepRecord.logPath;
-			input = summarizePipelineStepResult(pipelineName, step.agent, result.branch, commitShas, stepRecord.logPath);
+			input = summarizePipelineStepResult(pipelineName, step.role, result.branch, commitShas, stepRecord.logPath);
 			await writePipelineRunRecord(record);
 		}
 		record.status = "completed";
@@ -2571,7 +2570,7 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 			const branch = pipeline?.branchStrategy ? `${pipeline.branchStrategy.type || "branch"}${pipeline.branchStrategy.branch ? ` → ${pipeline.branchStrategy.branch}` : ""}` : "default";
 			const stepItems = (pipeline?.steps || []).map((step, index) => ({
 				value: `nav:pipeline-step:${name}:${index}`,
-				label: `step ${index + 1}: ${step.agent}`,
+				label: `step ${index + 1}: ${step.role}`,
 				description: step.prompt ? step.prompt.split(/\n/)[0].slice(0, 80) : "no prompt",
 			}));
 			return {
@@ -2991,7 +2990,7 @@ Backlog views and processing:
 		let input = original;
 		for (const step of chain) {
 			const prompt = step.prompt.replace(/\$INPUT/g, input).replace(/\$ORIGINAL/g, original);
-			const run = await dispatch(cwd, step.agent, prompt, ctx);
+			const run = await dispatch(cwd, step.role, prompt, ctx);
 			await new Promise<void>((resolve) => run.proc?.on("close", () => resolve()));
 			if (run.status !== "done") break;
 			input = `Run ${run.id} completed. Branch: ${run.branch}. Commits: ${(run.commits || []).join(", ") || "none"}. Log: ${run.logPath}. Result: ${run.resultPath}.`;
@@ -3443,7 +3442,7 @@ Backlog views and processing:
 			}
 			try {
 				const record = await executePipeline(ctx.cwd, pipeline, prompt, { ...deps.pipeline, image: deps.pipeline?.image || deps.image });
-				const stepSummary = record.steps.map((step) => `${step.agent}:${step.status}`).join(", ");
+				const stepSummary = record.steps.map((step) => `${step.role}:${step.status}`).join(", ");
 				ctx.ui.notify(
 					`Pipeline ${record.pipeline} completed as ${record.id}. Branch: ${record.branch || record.worktreePath || "unknown"}. Logs: ${record.logDir}. Steps: ${stepSummary || "none"}.`,
 					"success",

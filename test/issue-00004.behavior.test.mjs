@@ -23,7 +23,7 @@ function createTempRepoConfig() {
         'defaultSandbox: docker',
     'defaultModel: claude-opus-4-8',
     '',
-    'agents:',
+    'roles:',
     '  researcher:',
     '    description: Researcher',
     '    sandbox: docker',
@@ -46,11 +46,11 @@ function createTempRepoConfig() {
     '    sandbox: docker',
     '    model: claude-opus-4-8',
     '    steps:',
-    '      - agent: researcher',
+    '      - role: researcher',
     '        prompt: |',
     '          Research the requested work and identify the relevant files.',
     '          $INPUT',
-    '      - agent: builder',
+    '      - role: builder',
     '        prompt: |',
     '          Implement the requested work.',
     '          Original request: $ORIGINAL',
@@ -63,7 +63,7 @@ function createTempRepoConfig() {
     '      branch: sandcastle/broken',
     '    sandbox: docker',
     '    steps:',
-    '      - agent: researcher',
+    '      - role: researcher',
     '        prompt: |',
     '          Trigger a failure.',
   ].join('\n');
@@ -80,7 +80,7 @@ test('parseSimpleYaml keeps chain and pipeline step indentation rules aligned wi
   const parsed = parseSimpleYaml([
     'chains:',
     '  review-flow:',
-    '    - agent: reviewer',
+    '    - role: reviewer',
     '      prompt: |',
     '        Review the branch.',
     '        $INPUT',
@@ -91,14 +91,14 @@ test('parseSimpleYaml keeps chain and pipeline step indentation rules aligned wi
     '      type: branch',
     '      branch: sandcastle/implement',
     '    steps:',
-    '      - agent: builder',
+    '      - role: builder',
     '        prompt: |',
     '          Implement the requested work.',
     '          $INPUT',
   ].join('\n'));
 
   assert.equal(parsed.chains['review-flow'].length, 1);
-  assert.equal(parsed.chains['review-flow'][0].agent, 'reviewer');
+  assert.equal(parsed.chains['review-flow'][0].role, 'reviewer');
   assert.match(parsed.chains['review-flow'][0].prompt, /Review the branch\.\n\$INPUT/);
   assert.equal(parsed.pipelines.implement.steps.length, 1);
   assert.equal(parsed.pipelines.implement.branchStrategy.branch, 'sandcastle/implement');
