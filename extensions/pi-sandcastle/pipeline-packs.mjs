@@ -28,8 +28,9 @@ export function packsToConfig(_packs = undefined, defaults = {}) {
 export function configToYaml(config) {
   const lines = [
     '# Pi Sandcastle delegation config.',
-    '# Agent and pipeline inventory is compiled from the Pi-Sandcastle execution runtime pack.',
+    '# Runtime config for backlog execution.',
     '',
+    'runtimeVersion: 1',
     `defaultSandbox: ${yamlScalar(config.defaultSandbox)}`,
     `defaultModel: ${yamlScalar(config.defaultModel)}`,
     `defaultPipeline: ${yamlScalar(config.defaultPipeline)}`,
@@ -47,6 +48,12 @@ export function configToYaml(config) {
     }
     if (agent.systemPrompt) lines.push(`    systemPrompt: ${yamlBlock(agent.systemPrompt, 6)}`);
   }
+  lines.push('', 'prompts:');
+  for (const [name, prompt] of Object.entries(config.prompts || {})) {
+    lines.push(`  ${name}:`);
+    if (prompt.format !== undefined) lines.push(`    format: ${yamlScalar(prompt.format)}`);
+    if (prompt.template !== undefined) lines.push(`    template: ${yamlBlock(prompt.template, 6)}`);
+  }
   lines.push('', 'pipelines:');
   for (const [name, pipeline] of Object.entries(config.pipelines)) {
     lines.push(`  ${name}:`, `    description: ${yamlScalar(pipeline.description)}`, '    branchStrategy:');
@@ -54,7 +61,7 @@ export function configToYaml(config) {
     if (pipeline.sandbox !== undefined) lines.push(`    sandbox: ${yamlScalar(pipeline.sandbox)}`);
     lines.push(`    model: ${yamlScalar(pipeline.model)}`, `    copyToWorktree: ${yamlScalar(pipeline.copyToWorktree || [])}`, '    steps:');
     for (const step of pipeline.steps || []) {
-      lines.push(`      - role: ${yamlScalar(step.role)}`, `        prompt: ${yamlBlock(step.prompt, 10)}`);
+      lines.push(`      - kind: ${yamlScalar(step.kind || 'runRole')}`, `        role: ${yamlScalar(step.role)}`, `        prompt: ${yamlScalar(step.prompt)}`);
       if (step.maxIterations !== undefined) lines.push(`        maxIterations: ${yamlScalar(step.maxIterations)}`);
       if (step.copyToWorktree !== undefined) lines.push(`        copyToWorktree: ${yamlScalar(step.copyToWorktree)}`);
     }
@@ -69,6 +76,7 @@ export function buildDefaultConfigText(defaults = {}) {
     '# Pi Sandcastle delegation config.',
     '# Runtime inventory is compiled from extensions/pi-sandcastle/runtime-packs/sandcastle-templates.json.',
     '',
+    'runtimeVersion: 1',
     `defaultSandbox: ${yamlScalar(cfg.defaultSandbox)}`,
     `defaultModel: ${yamlScalar(cfg.defaultModel)}`,
     `defaultPipeline: ${yamlScalar(cfg.defaultPipeline)}`,

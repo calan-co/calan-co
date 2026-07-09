@@ -28,14 +28,35 @@ function readJson(path) {
 	return JSON.parse(readFileSync(path, "utf8"));
 }
 
+function toTime(value, fallback = Date.now()) {
+	if (Number.isFinite(value)) return value;
+	if (typeof value === "string" && value.trim()) {
+		const numeric = Number(value);
+		if (Number.isFinite(numeric)) return numeric;
+		const parsed = Date.parse(value);
+		if (Number.isFinite(parsed)) return parsed;
+	}
+	return fallback;
+}
+
+function inferRunKind(run) {
+	if (run.kind) return run.kind;
+	if (Array.isArray(run.steps)) return "pipeline";
+	if (run.resolvedItems || run.itemIds || run.query) return "backlog-process";
+	return "direct-role";
+}
+
 function normalizeRunRecord(cwd, run) {
 	const root = resolve(cwd);
+	const startedAt = toTime(run.startedAt ?? run.createdAt, Date.now());
 	return {
 		...run,
+		kind: inferRunKind(run),
 		repoRoot: run.repoRoot || root,
-		startedAt: Number(run.startedAt || Date.now()),
-		updatedAt: Number(run.updatedAt || run.startedAt || Date.now()),
+		startedAt,
+		updatedAt: toTime(run.updatedAt ?? run.finishedAt ?? run.completedAt ?? run.createdAt ?? run.startedAt, startedAt),
 		status: run.status || "running",
+		agent: run.agent || run.role,
 		commits: Array.isArray(run.commits) ? run.commits : [],
 	};
 }
@@ -67,9 +88,11 @@ export function createFileRunStore() {
 		const repoRoot = resolve(cwd);
 		const runs = [];
 
-		for (const name of readdirSync(dir)) {
-			if (!name.endsWith(".json")) continue;
-			const path = join(dir, name);
+		for (const entry of readdirSync(dir, { withFileTypes: true })) {
+			let path;
+			if (entry.isFile() && entry.name.endsWith(".json")) path = join(dir, entry.name);
+			else if (entry.isDirectory()) path = join(dir, entry.name, "record.json");
+			if (!path || !existsSync(path)) continue;
 
 			try {
 				const run = normalizeRunRecord(cwd, readJson(path));
@@ -84,8 +107,10 @@ export function createFileRunStore() {
 
 	async function readRun(cwd, id) {
 		const path = runFilePath(cwd, id);
-		if (!existsSync(path)) return null;
-		return normalizeRunRecord(cwd, readJson(path));
+		if (existsSync(path)) return normalizeRunRecord(cwd, readJson(path));
+		const nestedPath = join(runsDirPath(cwd), id, "record.json");
+		if (existsSync(nestedPath)) return normalizeRunRecord(cwd, readJson(nestedPath));
+		return null;
 	}
 
 	async function writeRun(cwd, run) {
@@ -216,7 +241,8 @@ function readRunLogs(run) {
 function formatRunSummary(run) {
 	const lines = [
 		`Run ${run.id}: ${run.status}`,
-		`Agent: ${run.agent || "unknown"}`,
+		`Kind: ${run.kind || "run"}`,
+		`Agent: ${run.agent || run.pipeline || "unknown"}`,
 		`Started: ${new Date(run.startedAt).toISOString()}`,
 	];
 	if (run.updatedAt) lines.push(`Updated: ${new Date(run.updatedAt).toISOString()}`);
@@ -231,7 +257,7 @@ function formatRunList(runs) {
 	if (runs.length === 0) return NO_RUNS_MESSAGE;
 	const lines = [`Sandcastle runs (${runs.length})`];
 	for (const run of runs) {
-		const parts = [`${run.id}`, run.status, run.agent || "unknown"];
+		const parts = [`${run.id}`, run.kind || "run", run.status, run.agent || run.pipeline || "unknown"];
 		if (run.branch) parts.push(run.branch);
 		if (run.updatedAt) parts.push(new Date(run.updatedAt).toISOString());
 		lines.push(`- ${parts.join(" · ")}`);

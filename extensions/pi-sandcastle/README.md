@@ -35,7 +35,7 @@ The default runtime pack is `extensions/pi-sandcastle/runtime-packs/sandcastle-t
 - prompts
 - roles
 - pipelines
-- step modules
+- Step Provider kinds
 - providers
 - issue trackers
 - policies
@@ -51,4 +51,4 @@ The schema is `extensions/pi-sandcastle/schema/execution-runtime.schema.json`.
 
 Edit `.pi/sandcastle/config.yaml` for local overrides. Runtime inventory is compiled from the default ExecutionRuntime pack and can be overridden by repo config.
 
-Run artifacts are written under `.pi/sandcastle/results/`, `.pi/sandcastle/jobs/`, `.pi/sandcastle/runs/`, `.pi/sandcastle/pipeline-runs/`, and `.pi/sandcastle/backlog-runs/`.
+Run records are written under `.pi/sandcastle/runs/` with a `kind` field (`direct-role`, `pipeline`, or `backlog-process`). Command-specific views such as `/backlog:runs` filter those unified records. Logs and legacy result artifacts may still appear under `.pi/sandcastle/results/` and `.pi/sandcastle/jobs/`.

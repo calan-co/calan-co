@@ -14,6 +14,7 @@ import {
   resumeBacklogRun,
   selectBacklogRunForResume,
   selectBacklogRunForStatus,
+  backlogRunRecordPath,
   writeBacklogRunRecord,
 } from '../extensions/pi-sandcastle/backlog-runs.mjs';
 
@@ -81,6 +82,35 @@ test('reads and filters backlog runs deterministically', async () => {
     assert.equal(listBacklogRuns(cwd, 'auth').length, 1);
     assert.equal(listBacklogRuns(cwd, 'wi-999').length, 1);
     assert.match(formatBacklogRunList(listBacklogRuns(cwd, 'auth')), /run-1/);
+  });
+});
+
+test('reads backlog process records from unified run records and ignores other run kinds', async () => {
+  await withTempDir(async (cwd) => {
+    await writeJson(path.join(cwd, '.pi/sandcastle/runs/backlog-1.json'), backlogRun({ id: 'backlog-1', kind: 'backlog-process' }));
+    await writeJson(path.join(cwd, '.pi/sandcastle/runs/direct-1.json'), {
+      id: 'direct-1',
+      kind: 'direct-role',
+      agent: 'implementer',
+      prompt: 'do work',
+      status: 'completed',
+      createdAt: 100,
+      updatedAt: 100,
+    });
+    await writeJson(path.join(cwd, '.pi/sandcastle/runs/pipeline-1/record.json'), {
+      id: 'pipeline-1',
+      kind: 'pipeline',
+      pipeline: 'simple-loop',
+      prompt: 'do work',
+      status: 'completed',
+      startedAt: new Date(100).toISOString(),
+      completedAt: new Date(200).toISOString(),
+      steps: [],
+    });
+
+    const records = readBacklogRunRecords(cwd);
+    assert.deepEqual(records.map((record) => record.id), ['backlog-1']);
+    assert.equal(records[0].kind, 'backlog-process');
   });
 });
 
@@ -155,7 +185,7 @@ test('resumes backlog runs through an injected capability and writes the durable
     assert.equal(calls[0].status, 'running');
 
     const saved = JSON.parse(
-      await fs.readFile(path.join(cwd, '.pi/sandcastle/backlog-runs/run-resume.json'), 'utf8'),
+      await fs.readFile(backlogRunRecordPath(cwd, 'run-resume'), 'utf8'),
     );
     assert.equal(saved.status, 'running');
     assert.ok(saved.resumedAt);
@@ -183,7 +213,7 @@ test('returns clear errors for missing and non-resumable backlog runs without mu
     assert.match(missing.message, /No backlog run found/);
 
     const before = await fs.readFile(
-      path.join(cwd, '.pi/sandcastle/backlog-runs/run-nope.json'),
+      backlogRunRecordPath(cwd, 'run-nope'),
       'utf8',
     );
     const nonResumable = await resumeBacklogRun(cwd, 'run-nope', async () => {
@@ -192,7 +222,7 @@ test('returns clear errors for missing and non-resumable backlog runs without mu
     assert.equal(nonResumable.ok, false);
     assert.match(nonResumable.message, /not resumable/);
     const after = await fs.readFile(
-      path.join(cwd, '.pi/sandcastle/backlog-runs/run-nope.json'),
+      backlogRunRecordPath(cwd, 'run-nope'),
       'utf8',
     );
     assert.equal(after, before);

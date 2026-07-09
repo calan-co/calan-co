@@ -4,8 +4,13 @@
   "title": "Pi Sandcastle Config",
   "description": "Repo-local Pi Sandcastle, backlog, and agent configuration.",
   "type": "object",
-  "additionalProperties": true,
+  "additionalProperties": false,
   "properties": {
+    "runtimeVersion": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Execution Runtime config version."
+    },
     "defaultSandbox": {
       "$ref": "#/$defs/sandbox",
       "description": "Default sandbox provider for roles and pipelines."
@@ -40,6 +45,16 @@
       "description": "Reusable execution roles consumed by runtime pipelines and backlog commands.",
       "additionalProperties": { "$ref": "#/$defs/role" }
     },
+    "prompts": {
+      "type": "object",
+      "description": "Reusable task prompts referenced by pipeline steps.",
+      "additionalProperties": { "$ref": "#/$defs/prompt" }
+    },
+    "policies": {
+      "type": "object",
+      "description": "Named reusable runtime policies.",
+      "additionalProperties": { "type": "object", "additionalProperties": true }
+    },
     "pipelines": {
       "type": "object",
       "description": "Deterministic runtime workflows composed from configured roles.",
@@ -64,6 +79,15 @@
     "provider": {
       "type": "string",
       "enum": ["claude-code", "claude", "pi", "codex", "cursor", "opencode", "copilot"]
+    },
+    "prompt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "format": { "type": "string", "enum": ["markdown"] },
+        "template": { "type": "string" }
+      },
+      "required": ["template"]
     },
     "role": {
       "type": "object",
@@ -95,8 +119,17 @@
       "type": "object",
       "additionalProperties": true,
       "properties": {
+        "kind": {
+          "type": "string",
+          "anyOf": [
+            { "enum": ["runRole", "selectWork", "fanOut", "fanIn", "review", "merge", "postProcess", "gate"] },
+            { "pattern": "^[a-z][a-z0-9-]*\\.[A-Za-z][A-Za-z0-9_-]*$" }
+          ]
+        },
         "role": { "type": "string" },
         "prompt": { "type": "string" },
+        "promptOverride": { "type": "string" },
+        "with": { "type": "object", "additionalProperties": true },
         "sandbox": { "$ref": "#/$defs/sandbox" },
         "model": { "type": "string", "minLength": 1 },
         "maxIterations": { "type": "integer", "minimum": 1 },

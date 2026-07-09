@@ -53,6 +53,7 @@ const backlogProcessInputs = [
 
 function assertBacklogRunRecord(record, expected) {
   assert.ok(record);
+  assert.equal(record.kind, 'backlog-process');
   assert.equal(record.pipeline, expected.pipeline);
   assert.equal(record.status, 'done');
   assert.equal(record.resolvedItems.length, expected.resolvedItems);
@@ -121,12 +122,13 @@ for (const { raw } of processInputs) {
   });
 }
 
-const recordDir = join(cwd, '.pi/sandcastle/backlog-runs');
+const recordDir = join(cwd, '.pi/sandcastle/runs');
 const records = fs
   .readdirSync(recordDir)
   .filter((name) => name.endsWith('.json'))
   .sort()
-  .map((name) => JSON.parse(fs.readFileSync(join(recordDir, name), 'utf8')));
+  .map((name) => JSON.parse(fs.readFileSync(join(recordDir, name), 'utf8')))
+  .filter((record) => record.kind === 'backlog-process');
 
 console.log(JSON.stringify({ parsed, calls, records, notifications }, null, 2));
 `;

@@ -1,8 +1,10 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+export const RUNS_DIR = ".pi/sandcastle/runs";
 export const BACKLOG_RUNS_DIR = ".pi/sandcastle/backlog-runs";
 export const BACKLOG_RESULTS_DIR = ".pi/sandcastle/results";
+export const BACKLOG_PROCESS_RUN_KIND = "backlog-process";
 
 const ACTIVE_STATUSES = new Set([
   "active",
@@ -21,7 +23,14 @@ const RESUME_STATUSES = new Set([
 ]);
 
 function toNumber(value, fallback = 0) {
-  return Number.isFinite(value) ? value : fallback;
+  if (Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return numeric;
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return fallback;
 }
 
 function lower(value) {
@@ -73,7 +82,9 @@ function isBacklogLikeRecord(raw) {
   return Boolean(
     raw &&
       typeof raw === "object" &&
-      (raw.pipeline ||
+      (raw.kind === BACKLOG_PROCESS_RUN_KIND ||
+        raw.runKind === BACKLOG_PROCESS_RUN_KIND ||
+        raw.pipeline ||
         raw.query ||
         raw.resolvedItems ||
         raw.items ||
@@ -96,8 +107,8 @@ function compareRecordsByRecency(a, b) {
   return a.id.localeCompare(b.id);
 }
 
-function isBacklogRunsSource(record) {
-  return String(record.sourcePath || "").includes(`/${BACKLOG_RUNS_DIR}/`);
+function isUnifiedRunsSource(record) {
+  return String(record.sourcePath || "").includes(`/${RUNS_DIR}/`);
 }
 
 function normalizeBacklogRunRecord(raw, filePath) {
@@ -108,6 +119,7 @@ function normalizeBacklogRunRecord(raw, filePath) {
   const status = String(raw.status ?? raw.state ?? "unknown");
   const record = {
     ...raw,
+    kind: BACKLOG_PROCESS_RUN_KIND,
     id: String(raw.id ?? raw.runId ?? raw.name ?? filePath),
     query,
     pipeline,
@@ -137,6 +149,13 @@ function normalizeBacklogRunRecord(raw, filePath) {
   return record;
 }
 
+function readJsonRecordFile(filePath) {
+  const raw = readFileSync(filePath, "utf8");
+  const parsed = safeJsonParse(raw, filePath);
+  if (!isBacklogLikeRecord(parsed)) return null;
+  return normalizeBacklogRunRecord(parsed, filePath);
+}
+
 function readJsonRecordsFromDir(dirPath) {
   if (!existsSync(dirPath)) return [];
   const entries = readdirSync(dirPath, { withFileTypes: true });
@@ -144,9 +163,24 @@ function readJsonRecordsFromDir(dirPath) {
   for (const entry of entries) {
     if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
     const filePath = join(dirPath, entry.name);
-    const raw = readFileSync(filePath, "utf8");
-    const parsed = safeJsonParse(raw, filePath);
-    if (!isBacklogLikeRecord(parsed)) continue;
+    const record = readJsonRecordFile(filePath);
+    if (record) records.push(record);
+  }
+  return records;
+}
+
+function readUnifiedRunRecords(cwd) {
+  const dirPath = join(cwd, RUNS_DIR);
+  if (!existsSync(dirPath)) return [];
+  const entries = readdirSync(dirPath, { withFileTypes: true });
+  const records = [];
+  for (const entry of entries) {
+    let filePath;
+    if (entry.isFile() && entry.name.endsWith(".json")) filePath = join(dirPath, entry.name);
+    else if (entry.isDirectory()) filePath = join(dirPath, entry.name, "record.json");
+    if (!filePath || !existsSync(filePath)) continue;
+    const parsed = safeJsonParse(readFileSync(filePath, "utf8"), filePath);
+    if (parsed.kind !== BACKLOG_PROCESS_RUN_KIND && parsed.runKind !== BACKLOG_PROCESS_RUN_KIND) continue;
     records.push(normalizeBacklogRunRecord(parsed, filePath));
   }
   return records;
@@ -169,8 +203,8 @@ function dedupeRecords(records) {
     }
 
     if (nextScore === existingScore) {
-      const existingPreferred = isBacklogRunsSource(existing);
-      const nextPreferred = isBacklogRunsSource(record);
+      const existingPreferred = isUnifiedRunsSource(existing);
+      const nextPreferred = isUnifiedRunsSource(record);
       if (nextPreferred && !existingPreferred) byId.set(record.id, record);
     }
   }
@@ -180,6 +214,7 @@ function dedupeRecords(records) {
 
 export function readBacklogRunRecords(cwd) {
   return dedupeRecords([
+    ...readUnifiedRunRecords(cwd),
     ...readJsonRecordsFromDir(join(cwd, BACKLOG_RUNS_DIR)),
     ...readJsonRecordsFromDir(join(cwd, BACKLOG_RESULTS_DIR)),
   ]);
@@ -334,11 +369,18 @@ export function formatResumeSelection(selection) {
   return `Selected backlog run for resume: ${summarizeBacklogRun(selection.record)}`;
 }
 
+export function backlogRunRecordPath(cwd, runId) {
+  return join(cwd, RUNS_DIR, `${runId}.json`);
+}
+
 export function writeBacklogRunRecord(cwd, record) {
-  const dirPath = join(cwd, BACKLOG_RUNS_DIR);
-  mkdirSync(dirPath, { recursive: true });
-  const filePath = join(dirPath, `${record.id}.json`);
-  writeFileSync(filePath, JSON.stringify(record, null, 2));
+  const normalized = {
+    ...record,
+    kind: BACKLOG_PROCESS_RUN_KIND,
+  };
+  const filePath = backlogRunRecordPath(cwd, normalized.id);
+  mkdirSync(join(cwd, RUNS_DIR), { recursive: true });
+  writeFileSync(filePath, JSON.stringify(normalized, null, 2));
   return filePath;
 }
 

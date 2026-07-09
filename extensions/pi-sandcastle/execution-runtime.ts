@@ -15,7 +15,6 @@ export interface ExecutionRuntimePack {
 	prompts: Record<string, RuntimePrompt>;
 	policies?: Record<string, unknown>;
 	adapters?: Record<string, unknown>;
-	stepModules?: Record<string, RuntimeStepModule>;
 	pipelines: Record<string, RuntimePipeline>;
 }
 
@@ -47,10 +46,11 @@ export interface RuntimePipeline {
 
 export interface RuntimePipelineStep {
 	id: string;
-	kind: "runAgent" | "selectWork" | "fanOut" | "fanIn" | "review" | "merge" | "postProcess" | "gate";
+	kind: string;
 	needs?: string[];
 	role?: string;
 	prompt?: string;
+	promptOverride?: string;
 	issueTracker?: string;
 	limit?: number;
 	over?: string;
@@ -62,8 +62,6 @@ export interface RuntimePipelineStep {
 	overrides?: Record<string, unknown>;
 }
 
-export type RuntimeStepModule = Omit<RuntimePipelineStep, "id"> & { id?: string };
-
 export interface LegacyConfigLike {
 	defaultSandbox?: "docker" | "podman" | "vercel" | "no-sandbox";
 	defaultModel?: string;
@@ -71,6 +69,7 @@ export interface LegacyConfigLike {
 	defaultAgent?: string;
 	issueTracker?: string;
 	imageNamePattern?: string;
+	prompts?: Record<string, RuntimePrompt>;
 	agents: Record<string, any>;
 	chains: Record<string, any[]>;
 	pipelines: Record<string, any>;
@@ -107,18 +106,19 @@ export function validateExecutionRuntimePack(value: unknown): ExecutionRuntimePa
 		if (!Array.isArray(pipeline.steps) || pipeline.steps.length === 0) errors.push(`pipeline '${name}' must define steps`);
 		for (const step of pipeline.steps || []) validateStep(name, step, errors, pack as ExecutionRuntimePack);
 	}
-	for (const [name, module] of Object.entries(pack.stepModules || {})) {
-		validateStep(`stepModules.${name}`, { id: module.id || name, ...module } as RuntimePipelineStep, errors, pack as ExecutionRuntimePack);
-	}
 	if (errors.length) throw new Error(`Invalid execution runtime pack:\n- ${errors.join("\n- ")}`);
 	return pack as ExecutionRuntimePack;
 }
 
+const BUILT_IN_STEP_KINDS = new Set(["runRole", "selectWork", "fanOut", "fanIn", "review", "merge", "postProcess", "gate"]);
+const PROVIDER_QUALIFIED_STEP_KIND = /^[a-z][a-z0-9-]*\.[A-Za-z][A-Za-z0-9_-]*$/;
+
 function validateStep(scope: string, step: RuntimePipelineStep, errors: string[], pack: ExecutionRuntimePack): void {
 	if (!step.id) errors.push(`${scope} step is missing id`);
 	if (!step.kind) errors.push(`${scope}.${step.id || "?"} is missing kind`);
-	if ((step.kind === "runAgent" || step.kind === "review") && !step.role) errors.push(`${scope}.${step.id} must reference a role`);
-	if ((step.kind === "runAgent" || step.kind === "review") && !step.prompt) errors.push(`${scope}.${step.id} must reference a prompt`);
+	else if (!BUILT_IN_STEP_KINDS.has(step.kind) && !PROVIDER_QUALIFIED_STEP_KIND.test(step.kind)) errors.push(`${scope}.${step.id || "?"} references unknown step kind '${step.kind}'`);
+	if ((step.kind === "runRole" || step.kind === "review") && !step.role) errors.push(`${scope}.${step.id} must reference a role`);
+	if ((step.kind === "runRole" || step.kind === "review") && !step.prompt) errors.push(`${scope}.${step.id} must reference a prompt`);
 	if (step.role && step.role !== "default" && !pack.roles?.[step.role]) errors.push(`${scope}.${step.id} references unknown role '${step.role}'`);
 	if (step.prompt && step.prompt !== "default" && !pack.prompts?.[step.prompt]) errors.push(`${scope}.${step.id} references unknown prompt '${step.prompt}'`);
 	if (step.kind === "fanOut") {
@@ -171,6 +171,7 @@ export function runtimeToSandcastleConfig(pack = loadExecutionRuntimePack(), def
 		defaultAgent,
 		issueTracker: defaults.issueTracker || String(pack.defaults?.issueTracker || "github-issues"),
 		imageNamePattern: defaults.imageNamePattern || "sandcastle:<repo-dir-name>",
+		prompts: pack.prompts,
 		agents,
 		chains: {},
 		pipelines,
@@ -180,11 +181,11 @@ export function runtimeToSandcastleConfig(pack = loadExecutionRuntimePack(), def
 export function compileRuntimeSteps(steps: RuntimePipelineStep[], pack = loadExecutionRuntimePack()): any[] {
 	const compiled: any[] = [];
 	for (const step of steps) {
-		if (step.kind === "runAgent" || step.kind === "review") {
+		if (step.kind === "runRole" || step.kind === "review") {
 			compiled.push(compileAgentStep(step, pack));
 			continue;
 		}
-		if (step.kind === "fanOut" && step.step && (step.step.kind === "runAgent" || step.step.kind === "review")) {
+		if (step.kind === "fanOut" && step.step && (step.step.kind === "runRole" || step.step.kind === "review")) {
 			compiled.push({ ...compileAgentStep(step.step, pack), maxIterations: step.concurrency || compileAgentStep(step.step, pack).maxIterations });
 			continue;
 		}
@@ -195,10 +196,10 @@ export function compileRuntimeSteps(steps: RuntimePipelineStep[], pack = loadExe
 
 function compileAgentStep(step: RuntimePipelineStep, pack: ExecutionRuntimePack): any {
 	const agent = pack.roles[step.role || ""] || {};
-	const prompt = pack.prompts[step.prompt || ""];
 	return {
+		kind: step.kind,
 		role: step.role,
-		prompt: prompt?.template || `$INPUT`,
+		prompt: step.prompt || `$INPUT`,
 		maxIterations: Number(step.overrides?.maxIterations || agent.maxIterations || 1),
 		copyToWorktree: agent.copyToWorktree,
 	};

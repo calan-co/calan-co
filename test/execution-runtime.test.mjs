@@ -10,12 +10,11 @@ import {
 } from '../extensions/pi-sandcastle/execution-runtime.ts';
 import { configToYaml, packsToConfig } from '../extensions/pi-sandcastle/pipeline-packs.mjs';
 
-test('execution runtime pack ports prompts, roles, pipelines, and step modules', () => {
+test('execution runtime pack ports prompts, roles, and pipelines', () => {
   const pack = loadExecutionRuntimePack();
   assert.equal(pack.runtimeVersion, 1);
   assert.ok(pack.prompts['simple-loop'].template.includes('$INPUT'));
   assert.equal(pack.roles.implementer.role, 'implementer');
-  assert.equal(pack.stepModules['implement-work'].prompt, 'implement-work');
   assert.equal(pack.pipelines['parallel-planner-with-review'].steps[2].kind, 'fanOut');
   assert.ok(listRuntimeAgents(pack).some((agent) => agent.name === 'reviewer'));
   assert.ok(listRuntimePipelines(pack).some((pipeline) => pipeline.name === 'archive'));
@@ -29,7 +28,7 @@ test('execution runtime validates negative fixtures with useful diagnostics', ()
       runtimeVersion: 1,
       roles: { worker: {} },
       prompts: { bad: { format: 'markdown' } },
-      pipelines: { p: { steps: [{ id: 's', kind: 'runAgent', foo: 'missing', prompt: 'bad' }] } },
+      pipelines: { p: { steps: [{ id: 's', kind: 'runRole', foo: 'missing', prompt: 'bad' }] } },
     }),
     /prompt 'bad' must define template or file.*must reference a role/s,
   );
@@ -68,6 +67,8 @@ test('configToYaml renders compiled runtime roles and pipelines', () => {
   assert.doesNotMatch(yaml, /^    sandbox: docker/m);
   assert.match(yaml, /^pipelines:/m);
   assert.match(yaml, /^  parallel-planner-with-review:/m);
-  assert.match(yaml, /prompt: \|\n          Inspect the configured issue tracker/s);
+  assert.match(yaml, /^prompts:/m);
+  assert.match(yaml, /template: \|\n      Inspect the configured issue tracker/s);
+  assert.match(yaml, /kind: runRole\n        role: planner\n        prompt: plan-work/);
   assert.doesNotMatch(yaml, /^teams:/m);
 });

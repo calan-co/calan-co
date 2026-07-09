@@ -43,13 +43,6 @@
     "policies": {
       "$ref": "#/$defs/policies"
     },
-    "stepModules": {
-      "type": "object",
-      "description": "Reusable pack-internal step templates that compile to pipeline steps.",
-      "additionalProperties": {
-        "$ref": "#/$defs/stepModule"
-      }
-    },
     "adapters": {
       "type": "object",
       "additionalProperties": {
@@ -318,12 +311,6 @@
         "imagePolicy": { "$ref": "#/$defs/referenceOrDefault" }
       }
     },
-    "stepModule": {
-      "allOf": [
-        { "$ref": "#/$defs/pipelineStepBase" },
-        { "required": ["kind"] }
-      ]
-    },
     "pipelineStep": {
       "allOf": [
         { "$ref": "#/$defs/pipelineStepBase" },
@@ -335,7 +322,13 @@
       "additionalProperties": false,
       "properties": {
         "id": { "$ref": "#/$defs/identifier" },
-        "kind": { "type": "string", "enum": ["runAgent", "selectWork", "fanOut", "fanIn", "review", "merge", "postProcess", "gate"] },
+        "kind": {
+          "type": "string",
+          "anyOf": [
+            { "enum": ["runRole", "selectWork", "fanOut", "fanIn", "review", "merge", "postProcess", "gate"] },
+            { "pattern": "^[a-z][a-z0-9-]*\\.[A-Za-z][A-Za-z0-9_-]*$" }
+          ]
+        },
         "needs": {
           "type": "array",
           "items": { "$ref": "#/$defs/identifier" },
@@ -343,6 +336,7 @@
         },
         "role": { "$ref": "#/$defs/referenceOrDefault" },
         "prompt": { "$ref": "#/$defs/referenceOrDefault" },
+        "promptOverride": { "type": "string", "minLength": 1 },
         "issueTracker": { "$ref": "#/$defs/referenceOrDefault" },
         "limit": { "type": "integer", "minimum": 1 },
         "over": { "type": "string", "minLength": 1 },
@@ -358,7 +352,7 @@
       },
       "allOf": [
         {
-          "if": { "properties": { "kind": { "const": "runAgent" } }, "required": ["kind"] },
+          "if": { "properties": { "kind": { "const": "runRole" } }, "required": ["kind"] },
           "then": { "required": ["role", "prompt"] }
         },
         {

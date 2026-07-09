@@ -9,7 +9,7 @@ test('pipeline packs are discovered from the Pi-Sandcastle execution runtime pac
   assert.deepEqual(names, ['archive', 'blank', 'parallel-planner', 'parallel-planner-with-review', 'sequential-reviewer', 'simple-loop']);
   const runtime = loadExecutionRuntimePack();
   assert.ok(runtime.prompts['implement-work'].template.length > 20);
-  assert.equal(runtime.stepModules['plan-work'].role, 'planner');
+  assert.equal(runtime.pipelines['parallel-planner'].steps[0].role, 'planner');
 });
 
 test('pipeline packs map into pi-sandcastle agent and pipeline inventory', () => {

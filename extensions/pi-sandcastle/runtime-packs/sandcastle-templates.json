@@ -206,42 +206,10 @@
       "kind": "sandcastle",
       "module": "@ai-hero/sandcastle",
       "capabilities": [
-        "runAgent",
+        "runRole",
         "buildImage",
         "worktree"
       ]
-    }
-  },
-  "stepModules": {
-    "run-worker": {
-      "kind": "runAgent",
-      "prompt": "simple-loop",
-      "role": "worker"
-    },
-    "plan-work": {
-      "kind": "runAgent",
-      "prompt": "plan-work",
-      "role": "planner"
-    },
-    "implement-work": {
-      "kind": "runAgent",
-      "prompt": "implement-work",
-      "role": "implementer"
-    },
-    "review-work": {
-      "kind": "review",
-      "prompt": "review-work",
-      "role": "reviewer"
-    },
-    "merge-work": {
-      "kind": "merge",
-      "prompt": "merge-work",
-      "role": "merger"
-    },
-    "archive-terminal-work": {
-      "kind": "runAgent",
-      "prompt": "archive-terminal-work",
-      "role": "reviewer"
     }
   },
   "pipelines": {
@@ -253,7 +221,7 @@
       "steps": [
         {
           "id": "run",
-          "kind": "runAgent",
+          "kind": "runRole",
           "prompt": "blank",
           "role": "worker"
         }
@@ -267,7 +235,7 @@
       "steps": [
         {
           "id": "run",
-          "kind": "runAgent",
+          "kind": "runRole",
           "prompt": "simple-loop",
           "role": "worker"
         }
@@ -281,7 +249,7 @@
       "steps": [
         {
           "id": "implement",
-          "kind": "runAgent",
+          "kind": "runRole",
           "prompt": "implement-work",
           "role": "implementer"
         },
@@ -304,7 +272,7 @@
       "steps": [
         {
           "id": "plan",
-          "kind": "runAgent",
+          "kind": "runRole",
           "prompt": "plan-work",
           "role": "planner"
         },
@@ -318,7 +286,7 @@
           "concurrency": 4,
           "step": {
             "id": "implement-one",
-            "kind": "runAgent",
+            "kind": "runRole",
             "prompt": "implement-work",
             "role": "implementer"
           }
@@ -341,7 +309,7 @@
       "steps": [
         {
           "id": "plan",
-          "kind": "runAgent",
+          "kind": "runRole",
           "prompt": "plan-work",
           "role": "planner"
         },
@@ -355,7 +323,7 @@
           "concurrency": 4,
           "step": {
             "id": "implement-one",
-            "kind": "runAgent",
+            "kind": "runRole",
             "prompt": "implement-work",
             "role": "implementer"
           }
@@ -393,7 +361,7 @@
       "steps": [
         {
           "id": "archive",
-          "kind": "runAgent",
+          "kind": "runRole",
           "prompt": "archive-terminal-work",
           "role": "reviewer"
         }

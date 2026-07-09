@@ -111,6 +111,7 @@ test('issue 00003 registers /backlog:run and uses the injected Sandcastle capabi
     const record = JSON.parse(await readFile(recordPath, 'utf8'));
     assert.deepEqual(record, {
       id: 'run-123',
+      kind: 'direct-role',
       agent: 'reviewer',
       prompt: 'Check the docs --not-a-flag',
       promptSummary: 'Check the docs --not-a-flag',

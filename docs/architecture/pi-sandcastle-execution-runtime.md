@@ -12,12 +12,22 @@ In this split:
 
 This preserves the strengths observed from Sandcastle AFK use—robust sandboxed execution, extensibility, tailored prompts, and resilient post-processing—while removing the recurring init/post-processing friction from the user-facing model.
 
+## Run records
+
+All durable execution state is a unified Run Record under `.pi/sandcastle/runs/`. Records carry a `kind` discriminator:
+
+- `direct-role` for `/backlog:run` ad hoc role execution.
+- `pipeline` for `/backlog:pipeline` executions, including per-step records.
+- `backlog-process` for `/backlog:process` records with query, resolved items, selected pipeline, branches, logs, and resume metadata.
+
+Command-specific views filter these Run Records instead of maintaining separate lifecycle stores. Legacy `.pi/sandcastle/backlog-runs/` and `.pi/sandcastle/results/` backlog records may be read for migration, but new backlog process writes target the unified runs directory.
+
 ## Non-goals
 
 - Do not infer deterministic workflow semantics from upstream Sandcastle template folders at runtime.
 - Do not copy generated `.sandcastle/main.ts` as the authoritative pipeline model.
 - Do not make PR lifecycle commands part of this runtime; future PR workflow belongs under `/pr:*`.
-- Do not expose reusable low-level step modules as first-class top-level user config until the top-level runtime objects stabilize.
+- Do not expose Step Provider implementation modules as repo-local Runtime Config.
 
 ## Top-level runtime objects
 
@@ -86,7 +96,7 @@ This keeps the TUI simple while preserving enough flexibility for specialized re
 
 Pipelines should support a small closed set of node kinds before adding generic workflow features:
 
-- `runAgent`: invoke a role through the selected execution adapter.
+- `runRole`: invoke a role through the selected execution adapter.
 - `selectWork`: resolve backlog/issue input into work items.
 - `fanOut`: dispatch independent work items with a concurrency limit.
 - `fanIn`: collect child results and normalize statuses.
@@ -95,7 +105,7 @@ Pipelines should support a small closed set of node kinds before adding generic 
 - `postProcess`: summarize logs, classify failures, and write durable results.
 - `gate`: evaluate deterministic predicates such as required checks or unresolved blockers.
 
-Step modules may exist inside bundled packs, but they should compile to these node kinds rather than becoming user-facing top-level primitives immediately.
+Built-in step kinds are unqualified. Custom Step Providers may register provider-qualified kinds such as `acme.deploy`; unknown unqualified kinds are invalid.
 
 ## YAML sketch
 
@@ -145,20 +155,17 @@ roles:
     role: planner
     provider: default
     model: default
-    sandbox: default
     maxIterations: 1
     systemPrompt: You are the planning role. Produce dependency-aware work selection.
   implementer:
     role: implementer
     provider: default
     model: default
-    sandbox: default
     maxIterations: 100
   reviewer:
     role: reviewer
     provider: default
     model: default
-    sandbox: default
     maxIterations: 1
 
 prompts:
@@ -204,7 +211,7 @@ pipelines:
         issueTracker: default
         limit: 1
       - id: implement
-        kind: runAgent
+        kind: runRole
         needs: [select]
         role: implementer
         prompt: implement-backlog-item
@@ -218,7 +225,7 @@ pipelines:
       branchPolicy: branch-per-run
     steps:
       - id: plan
-        kind: runAgent
+        kind: runRole
         role: planner
         prompt: plan-backlog-iterations
       - id: implement
@@ -227,7 +234,7 @@ pipelines:
         over: $.steps.plan.outputs.items
         concurrency: 4
         step:
-          kind: runAgent
+          kind: runRole
           role: implementer
           prompt: implement-backlog-item
       - id: review
@@ -254,14 +261,14 @@ The first adapter should be thin and explicit:
 ```ts
 interface ExecutionAdapter {
   id: string;
-  runAgent(input: RunAgentInput): Promise<RunAgentResult>;
+  runRole(input: RunRoleInput): Promise<RunRoleResult>;
   buildImage?(input: BuildImageInput): Promise<BuildImageResult>;
   cancel?(runId: string): Promise<void>;
-  resume?(runId: string): Promise<RunAgentResult>;
+  resume?(runId: string): Promise<RunRoleResult>;
 }
 ```
 
-The Sandcastle implementation maps `runAgent` onto `@ai-hero/sandcastle.run()` with provider and sandbox constructors. It must not know about `/backlog:*`, TUI state, config editing, or pipeline planning.
+The Sandcastle implementation maps `runRole` onto `@ai-hero/sandcastle.run()` with provider and sandbox constructors. It must not know about `/backlog:*`, TUI state, config editing, or pipeline planning.
 
 ## Migration path
 

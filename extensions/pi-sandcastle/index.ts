@@ -76,6 +76,8 @@ interface ChainStep {
 interface PipelineStep {
 	role: string;
 	prompt: string;
+	kind?: string;
+	promptOverride?: string;
 	sandbox?: AgentDef["sandbox"];
 	model?: string;
 	maxIterations?: number;
@@ -99,6 +101,11 @@ interface PipelineDef {
 
 type PipelineBranchStrategy = WorktreeBranchStrategy;
 
+interface PromptDef {
+	format?: string;
+	template?: string;
+}
+
 interface SandcastleConfig {
 	defaultSandbox?: AgentDef["sandbox"];
 	defaultModel?: string;
@@ -107,6 +114,7 @@ interface SandcastleConfig {
 	issueTracker?: string;
 	issueTrackerSetupCommand?: string;
 	imageNamePattern?: string;
+	prompts: Record<string, PromptDef>;
 	agents: Record<string, AgentDef>;
 	chains: Record<string, ChainStep[]>;
 	pipelines: Record<string, PipelineDef>;
@@ -135,6 +143,7 @@ interface BacklogPlanResult {
 
 interface BacklogProcessRecord {
 	id: string;
+	kind?: "backlog-process";
 	query: string;
 	resolvedItems: BacklogItem[];
 	pipeline: string;
@@ -222,7 +231,10 @@ const RUNS_DIR = `${CONFIG_DIR}/runs`;
 const LOGS_DIR = `${CONFIG_DIR}/logs`;
 const DEFAULT_STEP_PROMPT = "$INPUT";
 const PIPELINE_RUNS_DIR = RUNS_DIR;
-const BACKLOG_RUNS_DIR = `${CONFIG_DIR}/backlog-runs`;
+const BACKLOG_RUNS_DIR = RUNS_DIR;
+const DIRECT_ROLE_RUN_KIND = "direct-role";
+const PIPELINE_RUN_KIND = "pipeline";
+const BACKLOG_PROCESS_RUN_KIND = "backlog-process";
 const EDITOR_PREF_PATH = `${CONFIG_DIR}/editor`;
 const CONFIG_SCHEMA_PATH = new URL("./schema/sandcastle-config.schema.json", import.meta.url);
 const inFlightImageBuilds = new Map<string, Promise<void>>();
@@ -999,7 +1011,7 @@ function getBacklogRunRecordPath(cwd: string, runId: string): string {
 function writeBacklogRunRecord(cwd: string, record: BacklogProcessRecord): string {
 	ensureBacklogRunScaffold(cwd);
 	const recordPath = getBacklogRunRecordPath(cwd, record.id);
-	writeFileSync(recordPath, JSON.stringify(record, null, 2));
+	writeFileSync(recordPath, JSON.stringify({ ...record, kind: BACKLOG_PROCESS_RUN_KIND }, null, 2));
 	return recordPath;
 }
 
@@ -1323,7 +1335,7 @@ function setConfigValueInText(raw: string, path: string, value: unknown): string
 				lines[i] = replacement;
 				return lines.join("\n");
 			}
-			if (/^(roles|chains|pipelines):\s*$/.test(lines[i])) {
+			if (/^(roles|prompts|chains|pipelines):\s*$/.test(lines[i])) {
 				lines.splice(i, 0, replacement);
 				return lines.join("\n");
 			}
@@ -1567,6 +1579,7 @@ function normalizeConfig(cfg: Partial<SandcastleConfig>): SandcastleConfig {
 		issueTracker: cfg.issueTracker ?? "github-issues",
 		issueTrackerSetupCommand: cfg.issueTrackerSetupCommand,
 		imageNamePattern: cfg.imageNamePattern ?? "sandcastle:<repo-dir-name>",
+		prompts: cfg.prompts || {},
 		agents: cfg.agents || {},
 		chains: cfg.chains || {},
 		pipelines: cfg.pipelines || {},
@@ -1575,10 +1588,15 @@ function normalizeConfig(cfg: Partial<SandcastleConfig>): SandcastleConfig {
 
 const DEFAULT_CONFIG = normalizeConfig(packsToConfig());
 
+function resolvePromptText(cfg: SandcastleConfig, promptRef: string): string {
+	return cfg.prompts[promptRef]?.template || promptRef;
+}
+
 function mergeWithPackDefaults(cfg: SandcastleConfig): SandcastleConfig {
 	return {
 		...DEFAULT_CONFIG,
 		...cfg,
+		prompts: { ...DEFAULT_CONFIG.prompts, ...cfg.prompts },
 		agents: { ...DEFAULT_CONFIG.agents, ...cfg.agents },
 		chains: { ...DEFAULT_CONFIG.chains, ...cfg.chains },
 		pipelines: { ...DEFAULT_CONFIG.pipelines, ...cfg.pipelines },
@@ -1620,10 +1638,11 @@ function setField<T extends object, K extends keyof T>(target: T, key: K, value:
 }
 
 export function parseSimpleYaml(raw: string): SandcastleConfig {
-	const cfg: SandcastleConfig = { agents: {}, chains: {}, pipelines: {} };
+	const cfg: SandcastleConfig = { prompts: {}, agents: {}, chains: {}, pipelines: {} };
 	const lines = raw.replace(/\r/g, "").split("\n");
 	let section = "";
 	let currentAgent = "";
+	let currentPrompt = "";
 	let currentChain = "";
 	let currentPipeline = "";
 	let currentPipelineStep: PipelineStep | null = null;
@@ -1652,14 +1671,32 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 			setField(cfg, key, parseScalar(top[2]) as SandcastleConfig[typeof key]);
 			continue;
 		}
-		const sectionMatch = line.match(/^(roles|chains|pipelines):\s*$/);
+		const sectionMatch = line.match(/^(roles|prompts|chains|pipelines):\s*$/);
 		if (sectionMatch) {
 			section = sectionMatch[1];
 			currentAgent = "";
+			currentPrompt = "";
 			currentChain = "";
 			currentPipeline = "";
 			currentPipelineStep = null;
 			currentBranchStrategy = null;
+			continue;
+		}
+		if (section === "prompts") {
+			const promptMatch = line.match(/^  (\S.*):\s*$/);
+			if (promptMatch) {
+				currentPrompt = parseYamlMapKey(promptMatch[1]);
+				cfg.prompts[currentPrompt] = {};
+				continue;
+			}
+			const field = line.match(/^\s{4}([A-Za-z0-9_-]+):\s*(.*)$/);
+			if (field && currentPrompt) {
+				const prompt = cfg.prompts[currentPrompt];
+				const key = field[1] as keyof PromptDef;
+				blockTarget = assignBlockOrScalar(field[2], 4, (value) => {
+					setField(prompt, key, value as PromptDef[typeof key]);
+				});
+			}
 			continue;
 		}
 		if (section === "roles") {
@@ -1731,9 +1768,15 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 					continue;
 				}
 			}
-			const step = line.match(/^\s{6}-\s+role:\s*(.+)$/);
-			if (step) {
-				currentPipelineStep = { role: parseScalar(step[1]), prompt: DEFAULT_STEP_PROMPT };
+			const roleStep = line.match(/^\s{6}-\s+role:\s*(.+)$/);
+			if (roleStep) {
+				currentPipelineStep = { kind: "runRole", role: parseScalar(roleStep[1]), prompt: DEFAULT_STEP_PROMPT };
+				cfg.pipelines[currentPipeline].steps.push(currentPipelineStep);
+				continue;
+			}
+			const kindStep = line.match(/^\s{6}-\s+kind:\s*(.+)$/);
+			if (kindStep) {
+				currentPipelineStep = { kind: parseScalar(kindStep[1]), role: "", prompt: DEFAULT_STEP_PROMPT };
 				cfg.pipelines[currentPipeline].steps.push(currentPipelineStep);
 				continue;
 			}
@@ -1777,6 +1820,23 @@ function resolveRunInvocation(args: string, cfg: SandcastleConfig): { agentName:
 	}
 
 	return { agentName: resolveDefaultRunAgentName(cfg), prompt: raw };
+}
+
+interface ScRunRecord {
+	id: string;
+	kind?: "direct-role";
+	agent: string;
+	prompt: string;
+	promptSummary?: string;
+	status: "started" | "running" | "completed" | "failed";
+	createdAt: number;
+	updatedAt: number;
+	startedAt?: number;
+	finishedAt?: number;
+	branch?: string;
+	commits?: string[];
+	logPath?: string;
+	error?: string;
 }
 
 function summarizePrompt(prompt: string): string {
@@ -2031,6 +2091,7 @@ function registerScRunCommand(
 			const now = deps.now ?? Date.now;
 			const record: ScRunRecord = {
 				id,
+				kind: DIRECT_ROLE_RUN_KIND,
 				agent: agentName,
 				prompt,
 				promptSummary: summarizePrompt(prompt),
@@ -2100,6 +2161,7 @@ interface PipelineRunStepRecord {
 
 interface PipelineRunRecord {
 	id: string;
+	kind?: "pipeline";
 	pipeline: string;
 	prompt: string;
 	status: "running" | "completed" | "failed";
@@ -2215,6 +2277,7 @@ export async function executePipeline(
 	const loadSandboxProvider = deps.loadSandboxProvider || loadPipelineSandboxProvider;
 	const record: PipelineRunRecord = {
 		id,
+		kind: PIPELINE_RUN_KIND,
 		pipeline: pipelineName,
 		prompt,
 		status: "running",
@@ -2251,7 +2314,7 @@ export async function executePipeline(
 			const sandboxKind = step.sandbox || pipeline.sandbox || cfg.defaultSandbox || DEFAULT_SANDBOX;
 			await ensureSandboxImage(cwd, sandboxKind, deps.image, undefined, cfg);
 			const sandbox = await loadSandboxProvider(sandboxKind);
-			const stepPrompt = resolvePipelineStepPrompt(step.prompt, input, prompt);
+			const stepPrompt = resolvePipelineStepPrompt(step.promptOverride || resolvePromptText(cfg, step.prompt), input, prompt);
 			const result = await worktree.run({
 				agent: makePipelineAgent(step.model || pipeline.model || cfg.defaultModel || DEFAULT_MODEL),
 				sandbox,
@@ -3161,7 +3224,7 @@ Backlog views and processing:
 		getArgumentCompletions: (prefix: string) => completionItems(["docker", "podman"], tokenAfterLastSpace(prefix)),
 		handler: async (args, ctx) => {
 			const providerArg = args.trim().split(/\s+/).filter(Boolean)[0] as "docker" | "podman" | undefined;
-			const cfg = await loadConfig(ctx.cwd).catch(() => ({ defaultSandbox: DEFAULT_SANDBOX, agents: {}, chains: {}, pipelines: {} }) as SandcastleConfig);
+			const cfg = await loadConfig(ctx.cwd).catch(() => ({ defaultSandbox: DEFAULT_SANDBOX, prompts: {}, agents: {}, chains: {}, pipelines: {} }) as SandcastleConfig);
 			const provider = providerArg || imageProviderForSandbox(cfg.defaultSandbox) || "docker";
 			if (provider !== "docker" && provider !== "podman") {
 				ctx.ui.notify("Usage: /backlog:build-image [docker|podman]", "error");
@@ -3253,7 +3316,7 @@ Backlog views and processing:
 					ctx.ui.notify(issues.length ? `Backlog execution config validation failed:\n- ${issues.join("\n- ")}` : "Backlog execution config validation passed.", issues.length ? "error" : "success");
 				}
 				if (action.type === "build-image") {
-					const cfg = await loadConfig(ctx.cwd).catch(() => ({ defaultSandbox: DEFAULT_SANDBOX, agents: {}, chains: {}, pipelines: {} }) as SandcastleConfig);
+					const cfg = await loadConfig(ctx.cwd).catch(() => ({ defaultSandbox: DEFAULT_SANDBOX, prompts: {}, agents: {}, chains: {}, pipelines: {} }) as SandcastleConfig);
 					const provider = imageProviderForSandbox(cfg.defaultSandbox) || "docker";
 					const imageName = defaultSandcastleImageName(ctx.cwd, cfg.imageNamePattern);
 					requireSandcastleCliScaffold(ctx.cwd);
@@ -3414,7 +3477,7 @@ Backlog views and processing:
 						try {
 							cfg = await loadExistingConfig(ctx.cwd);
 						} catch {
-							cfg = { agents: {}, chains: {}, pipelines: {} };
+							cfg = { prompts: {}, agents: {}, chains: {}, pipelines: {} };
 						}
 						const issues = validateConfig(ctx.cwd, cfg);
 						if (issues.length) ctx.ui.notify(`Backlog execution config validation failed:\n- ${issues.join("\n- ")}`, "error");
@@ -3476,6 +3539,7 @@ Backlog views and processing:
 				const runId = createBacklogRunId(startedAt);
 				baseRecord = {
 					id: runId,
+					kind: BACKLOG_PROCESS_RUN_KIND,
 					query,
 					resolvedItems: iteration.items,
 					pipeline,
