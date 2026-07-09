@@ -24,7 +24,7 @@ test('issue 00003 registers /sc:run and uses the injected Sandcastle capability'
     const configDir = join(repoDir, '.pi', 'sandcastle');
     await mkdir(configDir, { recursive: true });
     await writeFile(
-      join(configDir, 'agents.yaml'),
+      join(configDir, 'config.yaml'),
       [
         'agents:',
         '  reviewer:',

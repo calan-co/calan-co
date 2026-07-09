@@ -13,7 +13,7 @@ Then reload Pi from this repo with `/reload`.
 
 ## Sandcastle commands
 
-- `/sc:config setup|show|get|set|reset|validate` — create, inspect, mutate, reset, and validate repo-local Sandcastle config.
+- `/sc:config init|show|get|set|edit|editor|reset|validate` — initialize, inspect, mutate, edit, reset, and validate repo-local Sandcastle config.
 - `/sc:run [agent] <prompt>` — run one configured Sandcastle-backed agent directly.
 - `/sc:pipeline <pipeline> [prompt]` — run a fixed-domain pipeline.
 - `/sc:runs` — list durable Sandcastle runs.
@@ -24,6 +24,7 @@ Then reload Pi from this repo with `/reload`.
 
 ## Backlog commands
 
+- `/backlog:config` — friendly BIOS-style TUI wrapper over raw `/sc:*` configuration commands.
 - `/backlog:list [query]` — list backlog items without mutation.
 - `/backlog:inspect <item-id>` — inspect one backlog item without mutation.
 - `/backlog:plan [query] --iterations N` — plan read-only backlog iterations.
@@ -39,6 +40,6 @@ Then reload Pi from this repo with `/reload`.
 
 ## Config and artifacts
 
-Edit `.pi/sandcastle/agents.yaml` for agents, teams, and chains. The default scaffold includes `researcher`, `builder`, and `reviewer` agents and an `explore-plan-review` chain.
+Edit `.pi/sandcastle/config.yaml` for agents and pipelines. The default scaffold mirrors Sandcastle templates (`simple-loop`, `sequential-reviewer`, `parallel-planner`, and `parallel-planner-with-review`) with `planner`, `worker`, `implementer`, `reviewer`, and `merger` agents.
 
 Run artifacts are written under `.pi/sandcastle/results/`, `.pi/sandcastle/jobs/`, `.pi/sandcastle/runs/`, and `.pi/sandcastle/backlog-runs/`.

@@ -2,8 +2,15 @@
 // Commands: /sc:* and /backlog:* command surfaces for Sandcastle-backed work.
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { SelectList as PiSelectList, matchesKey } from "@earendil-works/pi-tui";
+import type { SelectListTheme as PiSelectListTheme } from "@earendil-works/pi-tui";
 import {
 	claudeCode,
+	codex,
+	copilot,
+	cursor,
+	opencode,
+	pi as piAgent,
 	run as sandcastleRun,
 	type RunOptions,
 	type RunResult,
@@ -17,13 +24,16 @@ import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { noSandbox } from "@ai-hero/sandcastle/sandboxes/no-sandbox";
 import { podman } from "@ai-hero/sandcastle/sandboxes/podman";
 import { vercel } from "@ai-hero/sandcastle/sandboxes/vercel";
-import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
+import { ConfigShadowModel } from "./config-shadow-model.ts";
+import { buildSandcastleImage } from "./build-image.ts";
 import { registerRunManagementCommands } from "./run-management.mjs";
 import { registerBacklogCommands } from "./backlog.mjs";
 import { buildBacklogPlan, formatBacklogPlan } from "./backlog-planner.mjs";
+import { buildDefaultConfigText, packsToConfig } from "./pipeline-packs.mjs";
 import {
 	formatBacklogRunList,
 	formatStatusSelection,
@@ -38,11 +48,18 @@ const ToolType = {
 	},
 };
 
+interface SelectItem {
+	value: string;
+	label: string;
+	description?: string;
+}
+
 interface AgentDef {
 	name: string;
 	description?: string;
 	model?: string;
 	sandbox?: "docker" | "podman" | "vercel" | "no-sandbox";
+	provider?: "claude" | "claude-code" | "pi" | "codex" | "cursor" | "opencode" | "copilot";
 	systemPrompt?: string;
 	maxIterations?: number;
 	branch?: string;
@@ -83,11 +100,14 @@ interface PipelineDef {
 type PipelineBranchStrategy = WorktreeBranchStrategy;
 
 interface SandcastleConfig {
-	defaultTeam?: string;
 	defaultSandbox?: AgentDef["sandbox"];
 	defaultModel?: string;
+	defaultPipeline?: string;
+	defaultAgent?: string;
+	issueTracker?: string;
+	issueTrackerSetupCommand?: string;
+	imageNamePattern?: string;
 	agents: Record<string, AgentDef>;
-	teams: Record<string, string[]>;
 	chains: Record<string, ChainStep[]>;
 	pipelines: Record<string, PipelineDef>;
 }
@@ -156,10 +176,16 @@ interface BacklogProcessPlanDeps {
 	now?: () => number;
 }
 
+interface SandboxImageDeps {
+	inspectImageCreated?: (cwd: string, provider: "docker" | "podman", imageName: string) => Promise<Date | undefined>;
+	buildImage?: (cwd: string, provider: "docker" | "podman", imageName: string) => Promise<void>;
+}
+
 interface PiSandcastleDependencies {
 	backlog?: BacklogProcessPlanDeps;
 	pipeline?: PipelineExecutionDeps;
 	sandcastle?: SandcastleRunCapability;
+	image?: SandboxImageDeps;
 	now?: () => number;
 	randomId?: () => string;
 }
@@ -178,174 +204,31 @@ interface RunState {
 	proc?: SandcastleProcess;
 }
 
-type RootConfigKey = "defaultTeam" | "defaultSandbox" | "defaultModel";
+type RootConfigKey = "defaultSandbox" | "defaultModel" | "defaultPipeline" | "defaultAgent" | "issueTracker" | "issueTrackerSetupCommand" | "imageNamePattern";
 type EditableAgentField = "description" | "model" | "sandbox" | "maxIterations" | "branch";
 
 const CONFIG_DIR = ".pi/sandcastle";
-const CONFIG_PATH = `${CONFIG_DIR}/agents.yaml`;
+const CONFIG_PATH = `${CONFIG_DIR}/config.yaml`;
+const LEGACY_CONFIG_PATH = `${CONFIG_DIR}/agents.yaml`;
 const RUNNER_PATH = `${CONFIG_DIR}/run-job.mjs`;
 const JOBS_DIR = `${CONFIG_DIR}/jobs`;
 const RESULTS_DIR = `${CONFIG_DIR}/results`;
 const SUPPORTED_SANDBOXES = new Set(["docker", "podman", "vercel", "no-sandbox"]);
-const DEFAULT_TEAM = "default";
 const DEFAULT_SANDBOX: NonNullable<AgentDef["sandbox"]> = "docker";
-const DEFAULT_MODEL = "claude-opus-4-8";
-const ROOT_CONFIG_KEYS: RootConfigKey[] = ["defaultTeam", "defaultSandbox", "defaultModel"];
+const DEFAULT_MODEL = "Agent Default";
+const ROOT_CONFIG_KEYS: RootConfigKey[] = ["defaultSandbox", "defaultModel", "defaultPipeline", "defaultAgent", "issueTracker", "issueTrackerSetupCommand", "imageNamePattern"];
 const EDITABLE_AGENT_FIELDS: EditableAgentField[] = ["description", "model", "sandbox", "maxIterations", "branch"];
 const RUNS_DIR = `${CONFIG_DIR}/runs`;
 const LOGS_DIR = `${CONFIG_DIR}/logs`;
 const DEFAULT_STEP_PROMPT = "$INPUT";
 const PIPELINE_RUNS_DIR = RUNS_DIR;
 const BACKLOG_RUNS_DIR = `${CONFIG_DIR}/backlog-runs`;
+const EDITOR_PREF_PATH = `${CONFIG_DIR}/editor`;
+const CONFIG_SCHEMA_PATH = new URL("./schema/sandcastle-config.schema.json", import.meta.url);
+const inFlightImageBuilds = new Map<string, Promise<void>>();
 
-const SAMPLE_CONFIG = `# Pi Sandcastle delegation config.
-# Install runtime once with: npm install --save-dev @ai-hero/sandcastle
-# Optional first-time Sandcastle setup: npx @ai-hero/sandcastle init
 
-defaultTeam: default
-defaultSandbox: docker
-defaultModel: claude-opus-4-8
-
-agents:
-  researcher:
-    description: Read-only scout for codebase reconnaissance.
-    model: claude-opus-4-8
-    sandbox: docker
-    maxIterations: 1
-    systemPrompt: |
-      You are a research subagent. Inspect the repository and report concise,
-      evidence-backed findings. Do not modify files. End with <promise>COMPLETE</promise>.
-  builder:
-    description: Implementation agent that may change files in its sandbox branch.
-    model: claude-opus-4-8
-    sandbox: docker
-    maxIterations: 5
-    systemPrompt: |
-      You are an implementation subagent. Make focused changes, run relevant checks,
-      and commit useful work. End with <promise>COMPLETE</promise>.
-  reviewer:
-    description: Reviewer for diffs, tests, and merge risks.
-    model: claude-opus-4-8
-    sandbox: docker
-    maxIterations: 1
-    systemPrompt: |
-      You are a review subagent. Audit the proposed solution for correctness,
-      risks, missing tests, and merge blockers. End with <promise>COMPLETE</promise>.
-
-teams:
-  default: [researcher, builder, reviewer]
-  research: [researcher, reviewer]
-
-chains:
-  explore-plan-review:
-    - agent: researcher
-      prompt: |
-        Investigate this task and list relevant files, constraints, and likely implementation paths:\n\n$INPUT
-    - agent: builder
-      prompt: |
-        Use the research below to implement the task.\n\nOriginal task:\n$ORIGINAL\n\nResearch:\n$INPUT
-    - agent: reviewer
-      prompt: |
-        Review the implementation result below.\n\nOriginal task:\n$ORIGINAL\n\nImplementation summary:\n$INPUT
-
-pipelines:
-  implement:
-    description: Fixed-domain implementation pipeline.
-    branchStrategy:
-      type: branch
-      branch: sandcastle/implement
-    sandbox: docker
-    model: claude-opus-4-8
-    steps:
-      - agent: researcher
-        prompt: |
-          Inspect the requested work and identify relevant files, constraints, and risks.\n\n$INPUT
-        maxIterations: 1
-      - agent: builder
-        prompt: |
-          Implement the requested work using the research below.\n\nOriginal request:\n$ORIGINAL\n\nResearch and prompt:\n$INPUT
-        maxIterations: 5
-      - agent: reviewer
-        prompt: |
-          Review the implementation and call out correctness risks or missing tests.\n\nOriginal request:\n$ORIGINAL\n\nImplementation summary:\n$INPUT
-        maxIterations: 1
-
-  repair:
-    description: Fixed-domain repair pipeline.
-    branchStrategy:
-      type: branch
-      branch: sandcastle/repair
-    sandbox: docker
-    model: claude-opus-4-8
-    steps:
-      - agent: reviewer
-        prompt: |
-          Inspect the reported failure and identify the smallest safe repair path.\n\n$INPUT
-        maxIterations: 1
-      - agent: builder
-        prompt: |
-          Apply the repair and keep the diff minimal.\n\nOriginal request:\n$ORIGINAL\n\nRepair analysis:\n$INPUT
-        maxIterations: 3
-`;
-
-interface ScRunRecord {
-	id: string;
-	agent: string;
-	prompt: string;
-	promptSummary: string;
-	status: "started" | "running" | "completed" | "failed";
-	createdAt: number;
-	updatedAt: number;
-	startedAt?: number;
-	finishedAt?: number;
-	branch?: string;
-	commits?: string[];
-	logPath?: string;
-	error?: string;
-}
-
-interface SandcastleRunCapability {
-	makeAgent: (model: string) => RunOptions["agent"];
-	makeSandbox: (kind: SandcastleSandbox) => SandboxProvider;
-	run: (options: RunOptions) => Promise<RunResult>;
-}
-
-interface SandcastleRunDeps {
-	sandcastle?: SandcastleRunCapability;
-	now?: () => number;
-	randomId?: () => string;
-}
-
-interface AgentRuntimeSettings {
-	model: string;
-	sandbox: SandcastleSandbox;
-}
-
-interface ScRunSettings extends AgentRuntimeSettings {
-	logPath: string;
-	branchStrategy: RunOptions["branchStrategy"];
-}
-
-function resolveSandboxProvider(kind: SandcastleSandbox): SandboxProvider {
-	switch (kind) {
-		case "podman":
-			return podman();
-		case "vercel":
-			return vercel();
-		case "no-sandbox":
-			return noSandbox();
-		default:
-			return docker();
-	}
-}
-
-const createDefaultSandcastleRunCapability = (): SandcastleRunCapability => ({
-	makeAgent: (model) => claudeCode(model),
-	makeSandbox: (kind) => resolveSandboxProvider(kind),
-	run: sandcastleRun,
-});
-
-const RUNNER = `#!/usr/bin/env node
+const RUNNER = String.raw`#!/usr/bin/env node
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -369,8 +252,13 @@ async function loadSandbox(kind) {
 }
 
 try {
-  const { run, claudeCode } = await importUserPackage("dist/index.js");
+  const { run, claudeCode, codex, pi } = await importUserPackage("dist/index.js");
   const sandbox = await loadSandbox(job.sandbox || "docker");
+  const makeAgent = (provider, model) => {
+    if (provider === "claude") return claudeCode(model);
+    if (provider === "codex") return codex(model);
+    return pi(model);
+  };
   const prompt = (job.systemPrompt ? job.systemPrompt + "\n\n" : "") + "## Delegated task\n\n" + job.prompt;
   const logPath = job.logPath;
   const resultPath = job.resultPath;
@@ -381,7 +269,7 @@ try {
   const result = await run({
     name: job.name || job.id,
     cwd: job.cwd,
-    agent: claudeCode(job.model),
+    agent: makeAgent(job.provider || "pi", job.model),
     sandbox,
     prompt,
     maxIterations: job.maxIterations || 1,
@@ -415,6 +303,610 @@ try {
   emit({ type: "error", id: job?.id, error: message });
   process.exitCode = 1;
 }
+`;
+
+const LEGACY_SAMPLE_CONFIG = `# Pi Sandcastle delegation config.
+# Mirrors the out-of-the-box @ai-hero/sandcastle templates.
+# Install runtime once with: npm install --save-dev @ai-hero/sandcastle
+# Optional first-time Sandcastle setup: npx @ai-hero/sandcastle init
+
+defaultSandbox: docker
+defaultModel: Agent Default
+defaultPipeline: simple-loop
+defaultAgent: claude-code
+issueTracker: github-issues
+# Optional command to configure a custom issue tracker after Sandcastle init.
+# issueTrackerSetupCommand: pi "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"
+imageNamePattern: sandcastle:<repo-dir-name>
+
+agents:
+  planner:
+    description: Deep-reasoning planner for dependency analysis and work selection.
+    model: claude-opus-4-8
+    sandbox: docker
+    maxIterations: 1
+    systemPrompt: |
+      You are the Sandcastle planner agent.
+  worker:
+    description: Simple-loop worker that picks and closes one open task at a time.
+    model: claude-sonnet-4-6
+    sandbox: docker
+    maxIterations: 3
+    systemPrompt: |
+      You are the Sandcastle worker agent.
+  implementer:
+    description: Implementation agent for a selected task or branch.
+    model: claude-sonnet-4-6
+    sandbox: docker
+    maxIterations: 100
+    systemPrompt: |
+      You are the Sandcastle implementer agent.
+  reviewer:
+    description: Reviewer for branch diffs, correctness, tests, and merge blockers.
+    model: claude-sonnet-4-6
+    sandbox: docker
+    maxIterations: 1
+    systemPrompt: |
+      You are the Sandcastle reviewer agent.
+  merger:
+    description: Merger that combines completed branches and resolves conflicts.
+    model: claude-sonnet-4-6
+    sandbox: docker
+    maxIterations: 1
+    systemPrompt: |
+      You are the Sandcastle merger agent.
+
+
+pipelines:
+  simple-loop:
+    description: Sandcastle simple-loop template: one worker picks open issues and closes them.
+    branchStrategy:
+      type: merge-to-head
+    sandbox: docker
+    model: claude-sonnet-4-6
+    copyToWorktree: [node_modules]
+    steps:
+      - agent: worker
+        prompt: |
+          # Context
+          
+          ## Open issues
+          
+          !\`{{LIST_TASKS_COMMAND}}\`
+          
+          The list above has already been filtered to issues ready for work and is the sole source of truth for what work exists. Do not run your own unfiltered query to find more issues — if the list is empty, there is nothing to do.
+          
+          ## Recent RALPH commits (last 10)
+          
+          !\`git log --oneline --grep="RALPH" -10\`
+          
+          # Task
+          
+          You are RALPH — an autonomous coding agent working through issues one at a time.
+          
+          ## Priority order
+          
+          Work on issues in this order:
+          
+          1. **Bug fixes** — broken behaviour affecting users
+          2. **Tracer bullets** — thin end-to-end slices that prove an approach works
+          3. **Polish** — improving existing functionality (error messages, UX, docs)
+          4. **Refactors** — internal cleanups with no user-visible change
+          
+          Pick the highest-priority open issue that is not blocked by another open issue.
+          
+          ## Workflow
+          
+          1. **Explore** — read the issue carefully. Pull in the parent PRD if referenced. Read the relevant source files and tests before writing any code.
+          2. **Plan** — decide what to change and why. Keep the change as small as possible.
+          3. **Execute** — use RGR (Red → Green → Repeat → Refactor): write a failing test first, then write the implementation to pass it.
+          4. **Verify** — run \`npm run typecheck\` and \`npm run test\` before committing. Fix any failures before proceeding.
+          5. **Commit** — make a single git commit. The message MUST:
+             - Start with \`RALPH:\` prefix
+             - Include the task completed and any PRD reference
+             - List key decisions made
+             - List files changed
+             - Note any blockers for the next iteration
+          6. **Close** — close the issue with \`{{CLOSE_TASK_COMMAND}}\` explaining what was done.
+          
+          ## Rules
+          
+          - Work on **one issue per iteration**. Do not attempt multiple issues in a single iteration.
+          - Do not close an issue until you have committed the fix and verified tests pass.
+          - Do not leave commented-out code or TODO comments in committed code.
+          - If you are blocked (missing context, failing tests you cannot fix, external dependency), leave a comment on the issue and move on — do not close it.
+          
+          # Done
+          
+          When all actionable issues are complete (or you are blocked on all remaining ones), or the open-issues block at the top of this prompt is empty, output the completion signal:
+          
+          <promise>COMPLETE</promise>
+        maxIterations: 3
+
+  sequential-reviewer:
+    description: Sandcastle sequential-reviewer template: implement one issue, then review the branch.
+    branchStrategy:
+      type: branch
+      branch: sandcastle/sequential-reviewer
+    sandbox: docker
+    model: claude-sonnet-4-6
+    copyToWorktree: [node_modules]
+    steps:
+      - agent: implementer
+        prompt: |
+          # Context
+          
+          ## Open issues
+          
+          !\`{{LIST_TASKS_COMMAND}}\`
+          
+          The list above has already been filtered to issues ready for work and is the sole source of truth for what work exists. Do not run your own unfiltered query to find more issues — if the list is empty, there is nothing to do.
+          
+          ## Recent RALPH commits (last 10)
+          
+          !\`git log --oneline --grep="RALPH" -10\`
+          
+          # Task
+          
+          You are RALPH — an autonomous coding agent working through issues one at a time.
+          
+          ## Priority order
+          
+          Work on issues in this order:
+          
+          1. **Bug fixes** — broken behaviour affecting users
+          2. **Tracer bullets** — thin end-to-end slices that prove an approach works
+          3. **Polish** — improving existing functionality (error messages, UX, docs)
+          4. **Refactors** — internal cleanups with no user-visible change
+          
+          Pick the highest-priority open issue that is not blocked by another open issue.
+          
+          ## Workflow
+          
+          1. **Explore** — read the issue carefully. Pull in the parent PRD if referenced. Read the relevant source files and tests before writing any code.
+          2. **Plan** — decide what to change and why. Keep the change as small as possible.
+          3. **Execute** — use RGR (Red → Green → Repeat → Refactor): write a failing test first, then write the implementation to pass it.
+          4. **Verify** — run \`npm run typecheck\` and \`npm run test\` before committing. Fix any failures before proceeding.
+          5. **Commit** — make a single git commit. The message MUST:
+             - Start with \`RALPH:\` prefix
+             - Include the task completed and any PRD reference
+             - List key decisions made
+             - List files changed
+             - Note any blockers for the next iteration
+          6. **Close** — close the issue with \`{{CLOSE_TASK_COMMAND}}\` explaining what was done.
+          
+          ## Rules
+          
+          - Work on **one issue per iteration**. Do not attempt multiple issues in a single iteration.
+          - Do not close an issue until you have committed the fix and verified tests pass.
+          - Do not leave commented-out code or TODO comments in committed code.
+          - If you are blocked (missing context, failing tests you cannot fix, external dependency), leave a comment on the issue and move on — do not close it.
+          
+          # Done
+          
+          When all actionable issues are complete (or you are blocked on all remaining ones), or the open-issues block at the top of this prompt is empty, output the completion signal:
+          
+          <promise>COMPLETE</promise>
+        maxIterations: 1
+      - agent: reviewer
+        prompt: |
+          # TASK
+          
+          Review the code changes on branch \`{{BRANCH}}\` and improve code clarity, consistency, and maintainability while preserving exact functionality.
+          
+          # CONTEXT
+          
+          ## Branch diff
+          
+          !\`git diff {{TARGET_BRANCH}}...{{BRANCH}}\`
+          
+          ## Commits on this branch
+          
+          !\`git log {{TARGET_BRANCH}}..{{BRANCH}} --oneline\`
+          
+          # REVIEW PROCESS
+          
+          1. **Understand the change**: Read the diff and commits above to understand the intent.
+          
+          2. **Analyze for improvements**: Look for opportunities to:
+             - Reduce unnecessary complexity and nesting
+             - Eliminate redundant code and abstractions
+             - Improve readability through clear variable and function names
+             - Consolidate related logic
+             - Remove unnecessary comments that describe obvious code
+             - Avoid nested ternary operators - prefer switch statements or if/else chains
+             - Choose clarity over brevity - explicit code is often better than overly compact code
+          
+          3. **Check correctness**:
+             - Does the implementation match the intent? Are edge cases handled?
+             - Are new/changed behaviours covered by tests?
+             - Are there unsafe casts, \`any\` types, or unchecked assumptions?
+             - Does the change introduce injection vulnerabilities, credential leaks, or other security issues?
+          
+          4. **Maintain balance**: Avoid over-simplification that could:
+             - Reduce code clarity or maintainability
+             - Create overly clever solutions that are hard to understand
+             - Combine too many concerns into single functions or components
+             - Remove helpful abstractions that improve code organization
+             - Make the code harder to debug or extend
+          
+          5. **Apply project standards**: Follow the coding standards defined in @.sandcastle/CODING_STANDARDS.md
+          
+          6. **Preserve functionality**: Never change what the code does - only how it does it. All original features, outputs, and behaviors must remain intact.
+          
+          # EXECUTION
+          
+          If you find improvements to make:
+          
+          1. Make the changes directly on this branch
+          2. Run tests and type checking to ensure nothing is broken
+          3. Commit describing the refinements
+          
+          If the code is already clean and well-structured, do nothing.
+          
+          Once complete, output <promise>COMPLETE</promise>.
+        maxIterations: 1
+
+  parallel-planner:
+    description: Sandcastle parallel-planner template: plan unblocked work, implement branches, then merge.
+    branchStrategy:
+      type: branch
+      branch: sandcastle/parallel-planner
+    sandbox: docker
+    model: claude-sonnet-4-6
+    copyToWorktree: [node_modules]
+    steps:
+      - agent: planner
+        prompt: |
+          # ISSUES
+          
+          Here are the open issues in the repo:
+          
+          <issues-json>
+          
+          !\`{{LIST_TASKS_COMMAND}}\`
+          
+          </issues-json>
+          
+          The list above has already been filtered to issues ready for work.
+          
+          # TASK
+          
+          Analyze the open issues and build a dependency graph. For each issue, determine whether it **blocks** or **is blocked by** any other open issue.
+          
+          An issue B is **blocked by** issue A if:
+          
+          - B requires code or infrastructure that A introduces
+          - B and A modify overlapping files or modules, making concurrent work likely to produce merge conflicts
+          - B's requirements depend on a decision or API shape that A will establish
+          
+          An issue is **unblocked** if it has zero blocking dependencies on other open issues.
+          
+          For each unblocked issue, assign a branch name using the exact format \`sandcastle/issue-{id}\` (no slug or other suffix). This must be deterministic so that re-planning the same issue always produces the same branch name and accumulated progress is preserved.
+          
+          # OUTPUT
+          
+          Output your plan as a JSON object wrapped in \`<plan>\` tags:
+          
+          <plan>
+          {"issues": [{"id": "42", "title": "Fix auth bug", "branch": "sandcastle/issue-42"}]}
+          </plan>
+          
+          Include only unblocked issues. If every issue is blocked, include the single highest-priority candidate (the one with the fewest or weakest dependencies).
+          
+          Always emit the \`<plan>\` tags, even when there is nothing to do. If there are no issues to work on at all, output \`<plan>{"issues": []}</plan>\` so the run can exit cleanly.
+        maxIterations: 1
+      - agent: implementer
+        prompt: |
+          # TASK
+          
+          Fix issue {{TASK_ID}}: {{ISSUE_TITLE}}
+          
+          Pull in the issue using \`{{VIEW_TASK_COMMAND}}\`. If it has a parent PRD, pull that in too.
+          
+          Only work on the issue specified.
+          
+          Work on branch {{BRANCH}}. Make commits and run tests.
+          
+          # CONTEXT
+          
+          Here are the last 10 commits:
+          
+          <recent-commits>
+          
+          !\`git log -n 10 --format="%H%n%ad%n%B---" --date=short\`
+          
+          </recent-commits>
+          
+          # EXPLORATION
+          
+          Explore the repo and fill your context window with relevant information that will allow you to complete the task.
+          
+          Pay extra attention to test files that touch the relevant parts of the code.
+          
+          # EXECUTION
+          
+          If applicable, use RGR to complete the task.
+          
+          1. RED: write one test
+          2. GREEN: write the implementation to pass that test
+          3. REPEAT until done
+          4. REFACTOR the code
+          
+          # FEEDBACK LOOPS
+          
+          Before committing, run \`npm run typecheck\` and \`npm run test\` to ensure the tests pass.
+          
+          # COMMIT
+          
+          Make a git commit. The commit message must:
+          
+          1. Start with \`RALPH:\` prefix
+          2. Include task completed + PRD reference
+          3. Key decisions made
+          4. Files changed
+          5. Blockers or notes for next iteration
+          
+          Keep it concise.
+          
+          # THE ISSUE
+          
+          If the task is not complete, leave a comment on the issue with what was done.
+          
+          Do not close the issue - this will be done later.
+          
+          Once complete, output <promise>COMPLETE</promise>.
+          
+          # FINAL RULES
+          
+          ONLY WORK ON A SINGLE TASK.
+        maxIterations: 100
+      - agent: merger
+        prompt: |
+          # TASK
+          
+          Merge the following branches into the current branch:
+          
+          {{BRANCHES}}
+          
+          For each branch:
+          
+          1. Run \`git merge <branch> --no-edit\`
+          2. If there are merge conflicts, resolve them intelligently by reading both sides and choosing the correct resolution
+          3. After resolving conflicts, run \`npm run typecheck\` and \`npm run test\` to verify everything works
+          4. If tests fail, fix the issues before proceeding to the next branch
+          
+          After all branches are merged, make a single commit summarizing the merge.
+          
+          # CLOSE ISSUES
+          
+          For each branch that was merged, close its issue using the following command:
+          
+          \`{{CLOSE_TASK_COMMAND}}\`
+          
+          Here are all the issues:
+          
+          {{ISSUES}}
+          
+          Once you've merged everything you can, output <promise>COMPLETE</promise>.
+        maxIterations: 1
+
+  parallel-planner-with-review:
+    description: Sandcastle parallel-planner-with-review template: plan, implement, review, then merge.
+    branchStrategy:
+      type: branch
+      branch: sandcastle/parallel-planner-with-review
+    sandbox: docker
+    model: claude-sonnet-4-6
+    copyToWorktree: [node_modules]
+    steps:
+      - agent: planner
+        prompt: |
+          # ISSUES
+          
+          Here are the open issues in the repo:
+          
+          <issues-json>
+          
+          !\`{{LIST_TASKS_COMMAND}}\`
+          
+          </issues-json>
+          
+          The list above has already been filtered to issues ready for work.
+          
+          # TASK
+          
+          Analyze the open issues and build a dependency graph. For each issue, determine whether it **blocks** or **is blocked by** any other open issue.
+          
+          An issue B is **blocked by** issue A if:
+          
+          - B requires code or infrastructure that A introduces
+          - B and A modify overlapping files or modules, making concurrent work likely to produce merge conflicts
+          - B's requirements depend on a decision or API shape that A will establish
+          
+          An issue is **unblocked** if it has zero blocking dependencies on other open issues.
+          
+          For each unblocked issue, assign a branch name using the exact format \`sandcastle/issue-{id}\` (no slug or other suffix). This must be deterministic so that re-planning the same issue always produces the same branch name and accumulated progress is preserved.
+          
+          # OUTPUT
+          
+          Output your plan as a JSON object wrapped in \`<plan>\` tags:
+          
+          <plan>
+          {"issues": [{"id": "42", "title": "Fix auth bug", "branch": "sandcastle/issue-42"}]}
+          </plan>
+          
+          Include only unblocked issues. If every issue is blocked, include the single highest-priority candidate (the one with the fewest or weakest dependencies).
+          
+          Always emit the \`<plan>\` tags, even when there is nothing to do. If there are no issues to work on at all, output \`<plan>{"issues": []}</plan>\` so the run can exit cleanly.
+        maxIterations: 1
+      - agent: implementer
+        prompt: |
+          # TASK
+          
+          Fix issue {{TASK_ID}}: {{ISSUE_TITLE}}
+          
+          Pull in the issue using \`{{VIEW_TASK_COMMAND}}\`. If it has a parent PRD, pull that in too.
+          
+          Only work on the issue specified.
+          
+          Work on branch {{BRANCH}}. Make commits and run tests.
+          
+          # CONTEXT
+          
+          Here are the last 10 commits:
+          
+          <recent-commits>
+          
+          !\`git log -n 10 --format="%H%n%ad%n%B---" --date=short\`
+          
+          </recent-commits>
+          
+          # EXPLORATION
+          
+          Explore the repo and fill your context window with relevant information that will allow you to complete the task.
+          
+          Pay extra attention to test files that touch the relevant parts of the code.
+          
+          # EXECUTION
+          
+          If applicable, use RGR to complete the task.
+          
+          1. RED: write one test
+          2. GREEN: write the implementation to pass that test
+          3. REPEAT until done
+          4. REFACTOR the code
+          
+          # FEEDBACK LOOPS
+          
+          Before committing, run \`npm run typecheck\` and \`npm run test\` to ensure the tests pass.
+          
+          # COMMIT
+          
+          Make a git commit. The commit message must:
+          
+          1. Start with \`RALPH:\` prefix
+          2. Include task completed + PRD reference
+          3. Key decisions made
+          4. Files changed
+          5. Blockers or notes for next iteration
+          
+          Keep it concise.
+          
+          # THE ISSUE
+          
+          If the task is not complete, leave a comment on the issue with what was done.
+          
+          Do not close the issue - this will be done later.
+          
+          Once complete, output <promise>COMPLETE</promise>.
+          
+          # FINAL RULES
+          
+          ONLY WORK ON A SINGLE TASK.
+        maxIterations: 100
+      - agent: reviewer
+        prompt: |
+          # TASK
+          
+          Review the code changes on branch \`{{BRANCH}}\` and improve code clarity, consistency, and maintainability while preserving exact functionality.
+          
+          # CONTEXT
+          
+          ## Branch diff
+          
+          !\`git diff {{TARGET_BRANCH}}...{{BRANCH}}\`
+          
+          ## Commits on this branch
+          
+          !\`git log {{TARGET_BRANCH}}..{{BRANCH}} --oneline\`
+          
+          # REVIEW PROCESS
+          
+          1. **Understand the change**: Read the diff and commits above to understand the intent.
+          
+          2. **Analyze for improvements**: Look for opportunities to:
+             - Reduce unnecessary complexity and nesting
+             - Eliminate redundant code and abstractions
+             - Improve readability through clear variable and function names
+             - Consolidate related logic
+             - Remove unnecessary comments that describe obvious code
+             - Avoid nested ternary operators - prefer switch statements or if/else chains
+             - Choose clarity over brevity - explicit code is often better than overly compact code
+          
+          3. **Check correctness**:
+             - Does the implementation match the intent? Are edge cases handled?
+             - Are new/changed behaviours covered by tests?
+             - Are there unsafe casts, \`any\` types, or unchecked assumptions?
+             - Does the change introduce injection vulnerabilities, credential leaks, or other security issues?
+          
+          4. **Maintain balance**: Avoid over-simplification that could:
+             - Reduce code clarity or maintainability
+             - Create overly clever solutions that are hard to understand
+             - Combine too many concerns into single functions or components
+             - Remove helpful abstractions that improve code organization
+             - Make the code harder to debug or extend
+          
+          5. **Apply project standards**: Follow the coding standards defined in @.sandcastle/CODING_STANDARDS.md
+          
+          6. **Preserve functionality**: Never change what the code does - only how it does it. All original features, outputs, and behaviors must remain intact.
+          
+          # EXECUTION
+          
+          If you find improvements to make:
+          
+          1. Make the changes directly on this branch
+          2. Run tests and type checking to ensure nothing is broken
+          3. Commit describing the refinements
+          
+          If the code is already clean and well-structured, do nothing.
+          
+          Once complete, output <promise>COMPLETE</promise>.
+        maxIterations: 1
+      - agent: merger
+        prompt: |
+          # TASK
+          
+          Merge the following branches into the current branch:
+          
+          {{BRANCHES}}
+          
+          For each branch:
+          
+          1. Run \`git merge <branch> --no-edit\`
+          2. If there are merge conflicts, resolve them intelligently by reading both sides and choosing the correct resolution
+          3. After resolving conflicts, run \`npm run typecheck\` and \`npm run test\` to verify everything works
+          4. If tests fail, fix the issues before proceeding to the next branch
+          
+          After all branches are merged, make a single commit summarizing the merge.
+          
+          # CLOSE ISSUES
+          
+          For each branch that was merged, close its issue using the following command:
+          
+          \`{{CLOSE_TASK_COMMAND}}\`
+          
+          Here are all the issues:
+          
+          {{ISSUES}}
+          
+          Once you've merged everything you can, output <promise>COMPLETE</promise>.
+        maxIterations: 1
+
+  archive:
+    description: Doc-Vader archive helper for terminal-state backlog reconciliation.
+    branchStrategy:
+      type: branch
+      branch: sandcastle/archive
+    sandbox: docker
+    model: claude-sonnet-4-6
+    steps:
+      - agent: reviewer
+        prompt: |
+          Inspect terminal-state backlog work and identify safe archive/reconciliation actions.
+
+$INPUT
+        maxIterations: 1
 `;
 
 function tokenizeCommandArgs(raw: string): string[] {
@@ -574,6 +1066,8 @@ function readBacklogItems(cwd: string): BacklogItem[] {
 		.sort((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true }));
 }
 
+const SAMPLE_CONFIG = buildDefaultConfigText();
+
 function matchesBacklogQuery(item: BacklogItem, query: string): boolean {
 	const raw = query.trim().toLowerCase();
 	if (!raw) return true;
@@ -613,20 +1107,79 @@ async function defaultPlanBacklogProcessing(cwd: string, query: string): Promise
 	};
 }
 
-function ensureScaffold(cwd: string): void {
+function hydrateConfigDefaults(raw: string): { text: string; changed: boolean; changes: string[] } {
+	let text = raw;
+	const changes: string[] = [];
+	for (const [key, value] of Object.entries({ defaultPipeline: "simple-loop", defaultAgent: "claude-code", issueTracker: "github-issues" })) {
+		if (!new RegExp(`^${key}:`, "m").test(text)) {
+			text = setConfigValueInText(text, key, value);
+			changes.push(`added ${key}`);
+		}
+	}
+	return { text, changed: text !== raw, changes };
+}
+
+function ensureScaffold(cwd: string, options: { overwrite?: boolean; hydrate?: boolean } = {}): { changes: string[]; overwritten: string[] } {
 	mkdirSync(join(cwd, CONFIG_DIR), { recursive: true });
 	mkdirSync(join(cwd, JOBS_DIR), { recursive: true });
 	mkdirSync(join(cwd, RESULTS_DIR), { recursive: true });
 	mkdirSync(join(cwd, PIPELINE_RUNS_DIR), { recursive: true });
+	const changes: string[] = [];
+	const overwritten: string[] = [];
 	const configPath = join(cwd, CONFIG_PATH);
-	if (!existsSync(configPath)) writeFileSync(configPath, SAMPLE_CONFIG);
+	const legacyConfigPath = join(cwd, LEGACY_CONFIG_PATH);
+	if (!existsSync(configPath) && existsSync(legacyConfigPath) && !options.overwrite) {
+		writeFileSync(configPath, readFileSync(legacyConfigPath, "utf8"));
+		changes.push(`migrated ${LEGACY_CONFIG_PATH} to ${CONFIG_PATH}`);
+	}
+	const hadConfig = existsSync(configPath);
+	if (!hadConfig || options.overwrite) {
+		if (hadConfig && options.overwrite) overwritten.push(CONFIG_PATH);
+		writeFileSync(configPath, SAMPLE_CONFIG);
+		changes.push(`${hadConfig && options.overwrite ? "overwrote" : "wrote"} ${CONFIG_PATH}`);
+	} else if (options.hydrate !== false) {
+		const hydrated = hydrateConfigDefaults(readFileSync(configPath, "utf8"));
+		if (hydrated.changed) {
+			writeFileSync(configPath, hydrated.text);
+			changes.push(...hydrated.changes.map((change) => `${change} in ${CONFIG_PATH}`));
+		}
+	}
 	const runnerPath = join(cwd, RUNNER_PATH);
-	if (!existsSync(runnerPath)) writeFileSync(runnerPath, RUNNER);
+	const hadRunner = existsSync(runnerPath);
+	if (!hadRunner || options.overwrite) {
+		if (hadRunner && options.overwrite) overwritten.push(RUNNER_PATH);
+		writeFileSync(runnerPath, RUNNER);
+		changes.push(`${hadRunner && options.overwrite ? "overwrote" : "wrote"} ${RUNNER_PATH}`);
+	}
+	return { changes, overwritten };
+}
+
+function configPackText(pack: string): string {
+	if (pack === "default" || pack === "sandcastle-defaults") return SAMPLE_CONFIG;
+	return buildDefaultConfigText({ defaultPipeline: pack });
+}
+
+function listConfigPacks(): SelectItem[] {
+	return [
+		{ value: "default", label: "Sandcastle defaults", description: "Out-of-the-box Sandcastle template pipelines plus archive helper" },
+		{ value: "simple-loop", label: "simple-loop", description: "Worker picks and closes issues one by one" },
+		{ value: "sequential-reviewer", label: "sequential-reviewer", description: "Implement then review one issue branch" },
+		{ value: "parallel-planner", label: "parallel-planner", description: "Plan unblocked work, implement, merge" },
+		{ value: "parallel-planner-with-review", label: "parallel-planner-with-review", description: "Plan, implement, review, merge" },
+	];
 }
 
 function ensureScaffoldPath(cwd: string): string {
 	ensureScaffold(cwd);
 	return join(cwd, CONFIG_PATH);
+}
+
+function existingConfigPath(cwd: string): string {
+	const configPath = join(cwd, CONFIG_PATH);
+	if (existsSync(configPath)) return configPath;
+	const legacyConfigPath = join(cwd, LEGACY_CONFIG_PATH);
+	if (existsSync(legacyConfigPath)) return legacyConfigPath;
+	return configPath;
 }
 
 function readConfigText(cwd: string): string {
@@ -635,13 +1188,34 @@ function readConfigText(cwd: string): string {
 }
 
 function readExistingConfigText(cwd: string): string {
-	const configPath = join(cwd, CONFIG_PATH);
-	return readFileSync(configPath, "utf8");
+	return readFileSync(existingConfigPath(cwd), "utf8");
 }
 
 function writeConfigText(cwd: string, text: string): void {
 	ensureScaffold(cwd);
 	writeFileSync(join(cwd, CONFIG_PATH), text);
+}
+
+function getPreferredEditor(cwd: string): string {
+	const editorPath = join(cwd, EDITOR_PREF_PATH);
+	if (existsSync(editorPath)) {
+		const configured = readFileSync(editorPath, "utf8").trim();
+		if (configured) return configured;
+	}
+	return process.env.VISUAL || process.env.EDITOR || (process.platform === "win32" ? "notepad" : "nano");
+}
+
+function setPreferredEditor(cwd: string, editor: string): void {
+	mkdirSync(join(cwd, CONFIG_DIR), { recursive: true });
+	writeFileSync(join(cwd, EDITOR_PREF_PATH), `${editor.trim()}\n`);
+}
+
+function runTerminalEditor(cwd: string, filePath: string, editor?: string): number | null {
+	const command = editor || getPreferredEditor(cwd);
+	const shell = process.env.SHELL || "/bin/sh";
+	const quotedPath = JSON.stringify(filePath);
+	const result = spawnSync(shell, ["-lc", `${command} ${quotedPath}`], { cwd, stdio: "inherit", env: process.env });
+	return result.status;
 }
 
 function splitConfigPath(path: string): string[] {
@@ -658,6 +1232,18 @@ function isRootConfigKey(value: string): value is RootConfigKey {
 
 function isEditableAgentField(value: string): value is EditableAgentField {
 	return EDITABLE_AGENT_FIELDS.includes(value as EditableAgentField);
+}
+
+function formatYamlMapKey(value: string): string {
+	return /^[A-Za-z0-9_-]+$/.test(value) ? value : JSON.stringify(value);
+}
+
+function parseYamlMapKey(value: string): string {
+	return parseScalar(value);
+}
+
+function yamlMapKeyRegex(value: string): string {
+	return `(?:${escapeRegExp(value)}|${escapeRegExp(JSON.stringify(value))})`;
 }
 
 function formatScalarForYaml(value: unknown): string {
@@ -688,7 +1274,6 @@ function readConfigValue(cfg: SandcastleConfig, path: string): unknown {
 	if (parts[0] === "agents" && parts.length === 3 && isEditableAgentField(parts[2])) {
 		return cfg.agents[parts[1]]?.[parts[2]];
 	}
-	if (parts[0] === "teams" && parts.length === 2) return cfg.teams[parts[1]];
 	if (parts[0] === "chains" && parts.length === 2) return cfg.chains[parts[1]];
 	return undefined;
 }
@@ -710,6 +1295,28 @@ function defaultConfigValue(path: string): unknown {
 	return undefined;
 }
 
+function removeConfigValueInText(raw: string, path: string): string {
+	const parts = splitConfigPath(path);
+	if (parts[0] !== "agents" || parts.length !== 3) return raw;
+	const [, agentName, fieldName] = parts;
+	const lines = raw.replace(/\r/g, "").split("\n");
+	const agentHeader = new RegExp(`^  ${escapeRegExp(agentName)}:\\s*$`);
+	const fieldHeader = new RegExp(`^    ${escapeRegExp(fieldName)}:\\s*`);
+	let agentIndex = -1;
+	for (let i = 0; i < lines.length; i++) if (agentHeader.test(lines[i])) { agentIndex = i; break; }
+	if (agentIndex === -1) return raw;
+	for (let i = agentIndex + 1; i < lines.length; i++) {
+		if (/^  \S/.test(lines[i])) break;
+		if (fieldHeader.test(lines[i])) {
+			let end = i + 1;
+			while (end < lines.length && /^      /.test(lines[end])) end++;
+			lines.splice(i, end - i);
+			return lines.join("\n");
+		}
+	}
+	return raw;
+}
+
 function setConfigValueInText(raw: string, path: string, value: unknown): string {
 	const parts = splitConfigPath(path);
 	const lines = raw.replace(/\r/g, "").split("\n");
@@ -722,7 +1329,7 @@ function setConfigValueInText(raw: string, path: string, value: unknown): string
 				lines[i] = replacement;
 				return lines.join("\n");
 			}
-			if (/^(agents|teams|chains):\s*$/.test(lines[i])) {
+			if (/^(agents|chains|pipelines):\s*$/.test(lines[i])) {
 				lines.splice(i, 0, replacement);
 				return lines.join("\n");
 			}
@@ -763,6 +1370,78 @@ function setConfigValueInText(raw: string, path: string, value: unknown): string
 	throw new Error(`Unsupported config path '${path}'.`);
 }
 
+function sectionBounds(lines: string[], section: string): { start: number; end: number } {
+	let start = lines.findIndex((line) => new RegExp(`^${escapeRegExp(section)}:\\s*$`).test(line));
+	if (start === -1) {
+		lines.push("", `${section}:`);
+		start = lines.length - 1;
+	}
+	let end = lines.length;
+	for (let i = start + 1; i < lines.length; i++) {
+		if (/^\S[^:]*:\s*$/.test(lines[i])) { end = i; break; }
+	}
+	return { start, end };
+}
+
+function appendToYamlSection(raw: string, section: string, block: string): string {
+	const lines = raw.replace(/\r/g, "").split("\n");
+	const { end } = sectionBounds(lines, section);
+	lines.splice(end, 0, block);
+	return lines.join("\n");
+}
+
+function renameTopLevelMapEntry(raw: string, section: string, oldName: string, newName: string): string {
+	const lines = raw.replace(/\r/g, "").split("\n");
+	const { start, end } = sectionBounds(lines, section);
+	const header = new RegExp(`^  ${yamlMapKeyRegex(oldName)}:\\s*`);
+	for (let i = start + 1; i < end; i++) {
+		if (header.test(lines[i])) { lines[i] = `  ${formatYamlMapKey(newName)}:`; return lines.join("\n"); }
+	}
+	throw new Error(`${section} entry '${oldName}' not found.`);
+}
+
+function deleteTopLevelMapEntry(raw: string, section: string, name: string): string {
+	const lines = raw.replace(/\r/g, "").split("\n");
+	const { start, end } = sectionBounds(lines, section);
+	const header = new RegExp(`^  ${yamlMapKeyRegex(name)}:\\s*`);
+	for (let i = start + 1; i < end; i++) {
+		if (!header.test(lines[i])) continue;
+		let deleteEnd = i + 1;
+		while (deleteEnd < end && !/^  \S.*:\s*/.test(lines[deleteEnd])) deleteEnd++;
+		lines.splice(i, deleteEnd - i);
+		return lines.join("\n");
+	}
+	throw new Error(`${section} entry '${name}' not found.`);
+}
+
+function updateYamlReferences(raw: string, oldName: string, newName: string): string {
+	let updated = raw;
+	updated = updated.replace(new RegExp(`(agent:\\s*)${yamlMapKeyRegex(oldName)}(?=\\s*$)`, "gm"), `$1${formatScalarForYaml(newName)}`);
+	updated = updated.replace(new RegExp(`\\b${escapeRegExp(oldName)}\\b`, "g"), (match, offset, text) => {
+		const lineStart = text.lastIndexOf("\n", offset) + 1;
+		const lineEnd = text.indexOf("\n", offset);
+		const line = text.slice(lineStart, lineEnd === -1 ? text.length : lineEnd);
+		return /^  \S.*:\s*\[/.test(line) ? newName : match;
+	});
+	return updated;
+}
+
+function removeYamlReferences(raw: string, name: string): string {
+	return raw.replace(new RegExp(`(agent:\\s*)${yamlMapKeyRegex(name)}(?=\\s*$)`, "gm"), "$1");
+}
+
+function appendAgentText(raw: string, name: string): string {
+	if (new RegExp(`^  ${yamlMapKeyRegex(name)}:\\s*$`, "m").test(raw)) throw new Error(`Agent '${name}' already exists.`);
+	const block = [`  ${formatYamlMapKey(name)}:`, `    description: ${name} agent`, `    # model omitted: uses defaultModel`, `    # sandbox omitted: uses defaultSandbox`, `    provider: pi`, `    maxIterations: 1`].join("\n");
+	return appendToYamlSection(raw, "agents", block);
+}
+
+function appendPipelineText(raw: string, name: string): string {
+	if (new RegExp(`^  ${yamlMapKeyRegex(name)}:\\s*$`, "m").test(raw)) throw new Error(`Pipeline '${name}' already exists.`);
+	const block = [`  ${formatYamlMapKey(name)}:`, `    description: ${name} pipeline`, `    steps:`, `      - agent: worker`, `        prompt: |`, `          Complete the requested task.`].join("\n");
+	return appendToYamlSection(raw, "pipelines", block);
+}
+
 function resetConfigText(raw: string, path?: string): string {
 	if (!path) {
 		let updated = raw;
@@ -774,17 +1453,89 @@ function resetConfigText(raw: string, path?: string): string {
 	return setConfigValueInText(raw, path, defaultConfigValue(path));
 }
 
+function loadConfigSchema(): any {
+	return JSON.parse(readFileSync(CONFIG_SCHEMA_PATH, "utf8"));
+}
+
+function resolveSchemaRef(root: any, schema: any): any {
+	const ref = schema?.$ref;
+	if (typeof ref !== "string" || !ref.startsWith("#/$defs/")) return schema;
+	return root.$defs?.[ref.slice("#/$defs/".length)] || schema;
+}
+
+function schemaEnumForPath(path: string): string[] | undefined {
+	const schema = loadConfigSchema();
+	const parts = splitConfigPath(path);
+	let current: any = schema;
+	for (const part of parts) {
+		current = resolveSchemaRef(schema, current);
+		if (current.properties?.[part]) {
+			current = current.properties[part];
+			continue;
+		}
+		if (current.additionalProperties) {
+			current = current.additionalProperties;
+			continue;
+		}
+		return undefined;
+	}
+	current = resolveSchemaRef(schema, current);
+	return Array.isArray(current.enum) ? current.enum.map(String) : undefined;
+}
+
+function configuredConfigPaths(cfg: SandcastleConfig): string[] {
+	const rootPaths = ROOT_CONFIG_KEYS;
+	const agentFields = ["description", "model", "sandbox", "provider", "maxIterations", "branch", "systemPrompt"];
+	const pipelineFields = ["description", "model", "sandbox"];
+	return [
+		...rootPaths,
+		...Object.keys(cfg.agents).flatMap((agent) => agentFields.map((field) => `agents.${agent}.${field}`)),
+		...Object.keys(cfg.pipelines).flatMap((pipeline) => pipelineFields.map((field) => `pipelines.${pipeline}.${field}`)),
+	].sort();
+}
+
+function validateAgainstSchema(value: any, schema: any, root: any = schema, path = "config"): string[] {
+	const resolved = resolveSchemaRef(root, schema);
+	const issues: string[] = [];
+	if (resolved.type === "object") {
+		if (!value || typeof value !== "object" || Array.isArray(value)) return [`${path} must be an object.`];
+		for (const required of resolved.required || []) {
+			if (value[required] === undefined) issues.push(`${path}.${required} is required.`);
+		}
+		for (const [key, entry] of Object.entries(value)) {
+			const childSchema = resolved.properties?.[key] || resolved.additionalProperties;
+			if (childSchema && typeof childSchema === "object") issues.push(...validateAgainstSchema(entry, childSchema, root, `${path}.${key}`));
+		}
+		return issues;
+	}
+	if (resolved.type === "array") {
+		if (!Array.isArray(value)) return [`${path} must be an array.`];
+		if (resolved.minItems !== undefined && value.length < resolved.minItems) issues.push(`${path} must contain at least ${resolved.minItems} item(s).`);
+		if (resolved.items) value.forEach((entry, index) => issues.push(...validateAgainstSchema(entry, resolved.items, root, `${path}[${index}]`)));
+		return issues;
+	}
+	if (resolved.type === "string") {
+		if (typeof value !== "string") return [`${path} must be a string.`];
+		if (resolved.minLength !== undefined && value.length < resolved.minLength) issues.push(`${path} must not be empty.`);
+		if (resolved.pattern && !(new RegExp(resolved.pattern).test(value))) issues.push(`${path} does not match ${resolved.pattern}.`);
+	}
+	if (resolved.type === "integer" && (!Number.isInteger(value))) issues.push(`${path} must be an integer.`);
+	if (resolved.minimum !== undefined && typeof value === "number" && value < resolved.minimum) issues.push(`${path} must be >= ${resolved.minimum}.`);
+	if (Array.isArray(resolved.enum) && !resolved.enum.includes(value)) issues.push(`${path} must be one of: ${resolved.enum.join(", ")}.`);
+	return issues;
+}
+
 function validateConfig(cwd: string, cfg: SandcastleConfig): string[] {
 	const issues: string[] = [];
 	const configPath = join(cwd, CONFIG_PATH);
 	const runnerPath = join(cwd, RUNNER_PATH);
 	if (!existsSync(configPath)) issues.push(`Missing config scaffold: ${CONFIG_PATH}`);
 	if (!existsSync(runnerPath)) issues.push(`Missing runner scaffold: ${RUNNER_PATH}`);
+	issues.push(...validateAgainstSchema(cfg, loadConfigSchema()));
 	if (!Object.keys(cfg.agents).length) issues.push("No agents configured.");
 	for (const [name, agent] of Object.entries(cfg.agents)) {
 		if (!agent.description) issues.push(`Agent '${name}' is missing a description.`);
-		if (!agent.model) issues.push(`Agent '${name}' is missing a model reference.`);
-		if (agent.model && /[\s]/.test(agent.model)) issues.push(`Agent '${name}' has an invalid model reference '${agent.model}'.`);
+		// Agent model is optional; unset means inherit defaultModel, and "Agent Default" defers to the provider.
 		if (agent.sandbox && !SUPPORTED_SANDBOXES.has(agent.sandbox)) {
 			issues.push(`Agent '${name}' uses unsupported sandbox provider '${agent.sandbox}'.`);
 		}
@@ -792,15 +1543,6 @@ function validateConfig(cwd: string, cfg: SandcastleConfig): string[] {
 			issues.push(`Agent '${name}' has an invalid maxIterations value.`);
 		}
 		if (agent.systemPrompt && !agent.systemPrompt.trim()) issues.push(`Agent '${name}' has an empty system prompt.`);
-	}
-	for (const [teamName, members] of Object.entries(cfg.teams)) {
-		if (!Array.isArray(members) || !members.length) {
-			issues.push(`Team '${teamName}' has no members.`);
-			continue;
-		}
-		for (const member of members) {
-			if (!cfg.agents[member]) issues.push(`Team '${teamName}' references unknown agent '${member}'.`);
-		}
 	}
 	for (const [chainName, steps] of Object.entries(cfg.chains)) {
 		if (!Array.isArray(steps) || !steps.length) {
@@ -815,25 +1557,35 @@ function validateConfig(cwd: string, cfg: SandcastleConfig): string[] {
 	if (cfg.defaultSandbox && !SUPPORTED_SANDBOXES.has(cfg.defaultSandbox)) {
 		issues.push(`Default sandbox provider '${cfg.defaultSandbox}' is unsupported.`);
 	}
-	if (cfg.defaultModel && /[\s]/.test(cfg.defaultModel)) {
-		issues.push(`Default model reference '${cfg.defaultModel}' is invalid.`);
-	}
 	return issues;
 }
 
 function normalizeConfig(cfg: Partial<SandcastleConfig>): SandcastleConfig {
 	return {
-		defaultTeam: cfg.defaultTeam ?? DEFAULT_TEAM,
 		defaultSandbox: cfg.defaultSandbox ?? DEFAULT_SANDBOX,
 		defaultModel: cfg.defaultModel ?? DEFAULT_MODEL,
+		defaultPipeline: cfg.defaultPipeline ?? "simple-loop",
+		defaultAgent: cfg.defaultAgent ?? "claude-code",
+		issueTracker: cfg.issueTracker ?? "github-issues",
+		issueTrackerSetupCommand: cfg.issueTrackerSetupCommand,
+		imageNamePattern: cfg.imageNamePattern ?? "sandcastle:<repo-dir-name>",
 		agents: cfg.agents || {},
-		teams: cfg.teams || {},
 		chains: cfg.chains || {},
 		pipelines: cfg.pipelines || {},
 	};
 }
 
-const DEFAULT_CONFIG = normalizeConfig(parseSimpleYaml(SAMPLE_CONFIG));
+const DEFAULT_CONFIG = normalizeConfig(packsToConfig());
+
+function mergeWithPackDefaults(cfg: SandcastleConfig): SandcastleConfig {
+	return {
+		...DEFAULT_CONFIG,
+		...cfg,
+		agents: { ...DEFAULT_CONFIG.agents, ...cfg.agents },
+		chains: { ...DEFAULT_CONFIG.chains, ...cfg.chains },
+		pipelines: { ...DEFAULT_CONFIG.pipelines, ...cfg.pipelines },
+	};
+}
 
 function parseScalar(raw: string): any {
 	const value = raw.trim();
@@ -870,7 +1622,7 @@ function setField<T extends object, K extends keyof T>(target: T, key: K, value:
 }
 
 export function parseSimpleYaml(raw: string): SandcastleConfig {
-	const cfg: SandcastleConfig = { agents: {}, teams: {}, chains: {}, pipelines: {} };
+	const cfg: SandcastleConfig = { agents: {}, chains: {}, pipelines: {} };
 	const lines = raw.replace(/\r/g, "").split("\n");
 	let section = "";
 	let currentAgent = "";
@@ -896,13 +1648,13 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 		}
 		const trimmed = line.trim();
 		if (!trimmed || trimmed.startsWith("#")) continue;
-		const top = trimmed.match(/^(defaultTeam|defaultSandbox|defaultModel):\s*(.*)$/);
+		const top = trimmed.match(/^(defaultSandbox|defaultModel|defaultPipeline|defaultAgent|issueTracker|issueTrackerSetupCommand|imageNamePattern):\s*(.*)$/);
 		if (top) {
-			const key = top[1] as "defaultTeam" | "defaultSandbox" | "defaultModel";
+			const key = top[1] as RootConfigKey;
 			setField(cfg, key, parseScalar(top[2]) as SandcastleConfig[typeof key]);
 			continue;
 		}
-		const sectionMatch = line.match(/^(agents|teams|chains|pipelines):\s*$/);
+		const sectionMatch = line.match(/^(agents|chains|pipelines):\s*$/);
 		if (sectionMatch) {
 			section = sectionMatch[1];
 			currentAgent = "";
@@ -913,9 +1665,9 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 			continue;
 		}
 		if (section === "agents") {
-			const agentMatch = line.match(/^\s{2}([A-Za-z0-9_-]+):\s*$/);
+			const agentMatch = line.match(/^  (\S.*):\s*$/);
 			if (agentMatch) {
-				currentAgent = agentMatch[1];
+				currentAgent = parseYamlMapKey(agentMatch[1]);
 				cfg.agents[currentAgent] = { name: currentAgent };
 				continue;
 			}
@@ -929,15 +1681,10 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 			}
 			continue;
 		}
-		if (section === "teams") {
-			const team = line.match(/^\s{2}([A-Za-z0-9_-]+):\s*(.*)$/);
-			if (team) cfg.teams[team[1]] = parseScalar(team[2]);
-			continue;
-		}
 		if (section === "chains") {
-			const chain = line.match(/^\s{2}([A-Za-z0-9_-]+):\s*$/);
+			const chain = line.match(/^  (\S.*):\s*$/);
 			if (chain) {
-				currentChain = chain[1];
+				currentChain = parseYamlMapKey(chain[1]);
 				cfg.chains[currentChain] = [];
 				continue;
 			}
@@ -956,9 +1703,9 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 			continue;
 		}
 		if (section === "pipelines") {
-			const pipeline = line.match(/^\s{2}([A-Za-z0-9_-]+):\s*$/);
+			const pipeline = line.match(/^  (\S.*):\s*$/);
 			if (pipeline) {
-				currentPipeline = pipeline[1];
+				currentPipeline = parseYamlMapKey(pipeline[1]);
 				cfg.pipelines[currentPipeline] = { steps: [] };
 				currentPipelineStep = null;
 				currentBranchStrategy = null;
@@ -1007,22 +1754,16 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 
 async function loadConfig(cwd: string): Promise<SandcastleConfig> {
 	const raw = readConfigText(cwd);
-	return normalizeConfig(parseSimpleYaml(raw));
+	return mergeWithPackDefaults(normalizeConfig(parseSimpleYaml(raw)));
 }
 
 async function loadExistingConfig(cwd: string): Promise<SandcastleConfig> {
 	const raw = readExistingConfigText(cwd);
-	return normalizeConfig(parseSimpleYaml(raw));
+	return mergeWithPackDefaults(normalizeConfig(parseSimpleYaml(raw)));
 }
 
 function resolveDefaultRunAgentName(cfg: SandcastleConfig): string | undefined {
-	const preferredTeam = cfg.defaultTeam ? cfg.teams[cfg.defaultTeam] : undefined;
-	if (preferredTeam) {
-		for (const agent of preferredTeam) {
-			if (cfg.agents[agent]) return agent;
-		}
-	}
-	return Object.keys(cfg.agents)[0];
+	return Object.entries(cfg.agents).find(([, agent]) => Boolean(agent.model))?.[0] || Object.keys(cfg.agents)[0];
 }
 
 function resolveRunInvocation(args: string, cfg: SandcastleConfig): { agentName: string | undefined; prompt: string } {
@@ -1073,11 +1814,184 @@ function buildRunSummary(record: ScRunRecord): string {
 	return `Run ${record.id} ${record.status}: agent ${record.agent}; branch ${record.branch || "(pending)"}; commits ${commits}; log ${record.logPath || "(pending)"}`;
 }
 
+const AGENT_DEFAULT_MODELS: Record<string, string> = {
+	claude: "claude-opus-4-8",
+	"claude-code": "claude-opus-4-8",
+	pi: "claude-sonnet-4-6",
+	codex: "gpt-5.4",
+	cursor: "composer-2",
+	opencode: "opencode/big-pickle",
+	copilot: "claude-sonnet-4.5",
+};
+
+function resolveModelForProvider(model: string | undefined, provider: string | undefined): string {
+	if (!model || model === DEFAULT_MODEL) return AGENT_DEFAULT_MODELS[provider || "pi"] || AGENT_DEFAULT_MODELS.pi;
+	return model;
+}
+
 function resolveAgentRuntimeSettings(agent: AgentDef, cfg: SandcastleConfig): AgentRuntimeSettings {
+	const provider = agent.provider || cfg.defaultAgent || "claude-code";
 	return {
-		model: agent.model || cfg.defaultModel || DEFAULT_MODEL,
+		model: resolveModelForProvider(agent.model || cfg.defaultModel, provider),
 		sandbox: agent.sandbox || cfg.defaultSandbox || DEFAULT_SANDBOX,
+		provider,
 	};
+}
+
+function resolveSandboxProvider(kind: SandcastleSandbox): SandboxProvider {
+	if (kind === "podman") return podman();
+	if (kind === "vercel") return vercel();
+	if (kind === "no-sandbox") return noSandbox();
+	return docker();
+}
+
+const createDefaultSandcastleRunCapability = (): SandcastleRunCapability => ({
+	makeAgent: (model, provider = "pi") => {
+		if (provider === "claude" || provider === "claude-code") return claudeCode(model);
+		if (provider === "codex") return codex(model);
+		if (provider === "cursor") return cursor(model);
+		if (provider === "opencode") return opencode(model);
+		if (provider === "copilot") return copilot(model);
+		return piAgent(model);
+	},
+	makeSandbox: (kind) => resolveSandboxProvider(kind),
+	run: sandcastleRun,
+});
+
+function defaultSandcastleImageName(cwd: string, pattern = "sandcastle:<repo-dir-name>"): string {
+	const dirName = cwd.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "local";
+	const sanitized = dirName.toLowerCase().replace(/[^a-z0-9_.-]/g, "-");
+	return pattern.replace(/<repo-dir-name>/g, sanitized || "local");
+}
+
+function imageProviderForSandbox(sandbox: AgentDef["sandbox"]): "docker" | "podman" | undefined {
+	if (sandbox === "docker" || sandbox === "podman") return sandbox;
+	return undefined;
+}
+
+function latestMtimeMs(path: string): number | undefined {
+	if (!existsSync(path)) return undefined;
+	const stat = statSync(path);
+	let latest = stat.mtimeMs;
+	if (!stat.isDirectory()) return latest;
+	for (const entry of readdirSync(path, { withFileTypes: true })) {
+		const child = latestMtimeMs(join(path, entry.name));
+		if (child !== undefined && child > latest) latest = child;
+	}
+	return latest;
+}
+
+function runProcess(cwd: string, command: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+	return new Promise((resolve, reject) => {
+		const proc = spawn(command, args, { cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+		let stdout = "";
+		let stderr = "";
+		proc.stdout?.setEncoding("utf8");
+		proc.stderr?.setEncoding("utf8");
+		proc.stdout?.on("data", (chunk) => { stdout += String(chunk); });
+		proc.stderr?.on("data", (chunk) => { stderr += String(chunk); });
+		proc.on("error", reject);
+		proc.on("close", (code) => {
+			if (code === 0) resolve({ stdout, stderr });
+			else reject(new Error(`${command} ${args.join(" ")} failed with code ${code}: ${stderr || stdout}`.trim()));
+		});
+	});
+}
+
+async function inspectImageCreated(cwd: string, provider: "docker" | "podman", imageName: string): Promise<Date | undefined> {
+	try {
+		const result = await runProcess(cwd, provider, ["image", "inspect", imageName, "--format", "{{.Created}}"]);
+		const created = new Date(result.stdout.trim());
+		return Number.isNaN(created.getTime()) ? undefined : created;
+	} catch {
+		return undefined;
+	}
+}
+
+function missingSandcastleCliScaffoldMessage(): string {
+	return [
+		"Sandcastle CLI scaffold is missing: .sandcastle/.",
+		"Initialize it with /sc:config init or /backlog:config. The extension runs non-interactive sandcastle init using values from .pi/sandcastle/config.yaml.",
+	].join("\n");
+}
+
+async function ensureSandcastleCliScaffold(cwd: string, cfg: SandcastleConfig, options: { reinitialize?: boolean } = {}): Promise<{ changes: string[] }> {
+	const scaffoldPath = join(cwd, ".sandcastle");
+	if (existsSync(scaffoldPath)) {
+		if (!options.reinitialize) return { changes: [] };
+		rmSync(scaffoldPath, { recursive: true, force: true });
+	}
+	const sandbox = imageProviderForSandbox(cfg.defaultSandbox) || "docker";
+	const args = [
+		"init",
+		"--template", cfg.defaultPipeline || "simple-loop",
+		"--agent", cfg.defaultAgent || "claude-code",
+		"--sandbox", sandbox,
+		"--issue-tracker", cfg.issueTracker || "github-issues",
+		"--create-label", "false",
+		"--build-image", "false",
+		"--install-template-deps", "true",
+	];
+	if (cfg.defaultModel && cfg.defaultModel !== DEFAULT_MODEL) args.splice(5, 0, "--model", cfg.defaultModel);
+	await runProcess(cwd, "sandcastle", args);
+	if ((cfg.issueTracker || "github-issues") === "custom" && cfg.issueTrackerSetupCommand) await runProcess(cwd, process.env.SHELL || "sh", ["-lc", cfg.issueTrackerSetupCommand]);
+	return { changes: [options.reinitialize ? "reinitialized .sandcastle/" : "wrote .sandcastle/"] };
+}
+
+function requireSandcastleCliScaffold(cwd: string): void {
+	if (!existsSync(join(cwd, ".sandcastle"))) throw new Error(missingSandcastleCliScaffoldMessage());
+}
+
+async function buildSandboxImage(cwd: string, provider: "docker" | "podman", imageName: string): Promise<void> {
+	requireSandcastleCliScaffold(cwd);
+	await buildSandcastleImage({ cwd, provider, imageName });
+}
+
+async function buildSandboxImageOnce(
+	cwd: string,
+	provider: "docker" | "podman",
+	imageName: string,
+	build: (cwd: string, provider: "docker" | "podman", imageName: string) => Promise<void>,
+): Promise<void> {
+	const key = `${cwd}\0${provider}\0${imageName}`;
+	const existing = inFlightImageBuilds.get(key);
+	if (existing) return existing;
+	const next = build(cwd, provider, imageName).finally(() => inFlightImageBuilds.delete(key));
+	inFlightImageBuilds.set(key, next);
+	return next;
+}
+
+async function quietlyBuildConfiguredImage(cwd: string, cfg: Partial<SandcastleConfig>, deps: SandboxImageDeps | undefined): Promise<void> {
+	const provider = imageProviderForSandbox(cfg.defaultSandbox);
+	if (!provider || !existsSync(join(cwd, ".sandcastle"))) return;
+	const imageName = defaultSandcastleImageName(cwd, cfg.imageNamePattern);
+	try {
+		await buildSandboxImageOnce(cwd, provider, imageName, deps?.buildImage || buildSandboxImage);
+	} catch {
+		// Silent by design: config saves should not become image-build UX unless the user explicitly runs /sc:build-image.
+	}
+}
+
+async function ensureSandboxImage(
+	cwd: string,
+	sandbox: AgentDef["sandbox"],
+	deps: SandboxImageDeps | undefined,
+	onBuild?: (reason: "missing" | "stale", imageName: string) => void,
+	cfg?: Partial<SandcastleConfig>,
+): Promise<void> {
+	const provider = imageProviderForSandbox(sandbox);
+	if (!provider) return;
+	if (!existsSync(join(cwd, ".sandcastle"))) return;
+	const imageName = defaultSandcastleImageName(cwd, cfg?.imageNamePattern);
+	const inspect = deps?.inspectImageCreated || inspectImageCreated;
+	const build = deps?.buildImage || buildSandboxImage;
+	const created = await inspect(cwd, provider, imageName);
+	const latestConfigMtime = latestMtimeMs(join(cwd, ".sandcastle"));
+	const stale = created && latestConfigMtime !== undefined && latestConfigMtime > created.getTime();
+	if (!created || stale) {
+		onBuild?.(created ? "stale" : "missing", imageName);
+		await buildSandboxImageOnce(cwd, provider, imageName, build);
+	}
 }
 
 function resolveScRunSettings(cwd: string, id: string, agent: AgentDef, cfg: SandcastleConfig): ScRunSettings {
@@ -1096,11 +2010,12 @@ function registerScRunCommand(
 ) {
 	pi.registerCommand("sc:run", {
 		description: "Run one Sandcastle-backed agent directly: /sc:run [agent] [prompt]",
+		getArgumentCompletions: (prefix: string) => completionItems(["planner", "worker", "implementer", "reviewer", "merger"], tokenAfterLastSpace(prefix)),
 		handler: async (args, ctx) => {
 			const cfg = await loadConfig(ctx.cwd);
 			const { agentName, prompt } = resolveRunInvocation(args, cfg);
 			if (!agentName) {
-				ctx.ui.notify("No Sandcastle agents are configured. Run /sc:config setup, then edit .pi/sandcastle/agents.yaml.", "error");
+				ctx.ui.notify("No Sandcastle agents are configured. Run /sc:config init, then edit .pi/sandcastle/config.yaml.", "error");
 				return;
 			}
 			if (!prompt) {
@@ -1137,8 +2052,11 @@ function registerScRunCommand(
 			}, now);
 
 			try {
+				await ensureSandboxImage(ctx.cwd, runSettings.sandbox, deps.image, (reason, imageName) => {
+					ctx.ui.notify(`Sandcastle image ${imageName} is ${reason}; rebuilding before /sc:run.`, "info");
+				}, cfg);
 				const result = await sandcastle.run({
-					agent: sandcastle.makeAgent(runSettings.model),
+					agent: sandcastle.makeAgent(runSettings.model, runSettings.provider),
 					sandbox: sandcastle.makeSandbox(runSettings.sandbox),
 					cwd: ctx.cwd,
 					prompt,
@@ -1202,6 +2120,7 @@ interface PipelineExecutionDeps {
 	createWorktree?: typeof createWorktree;
 	claudeCode?: typeof claudeCode;
 	loadSandboxProvider?: (kind: AgentDef["sandbox"] | undefined) => Promise<any>;
+	image?: SandboxImageDeps;
 	now?: () => number;
 }
 
@@ -1292,7 +2211,9 @@ export async function executePipeline(
 	const logDir = join(runDir, "logs");
 	const branchStrategy = resolvePipelineBranchStrategy(pipelineName, pipeline);
 	const createWorktreeImpl = deps.createWorktree || createWorktree;
-	const claudeCodeImpl = deps.claudeCode || claudeCode;
+	const makePipelineAgent = deps.claudeCode
+		? (model: string) => deps.claudeCode!(model)
+		: (model: string) => piAgent(model);
 	const loadSandboxProvider = deps.loadSandboxProvider || loadPipelineSandboxProvider;
 	const record: PipelineRunRecord = {
 		id,
@@ -1329,12 +2250,12 @@ export async function executePipeline(
 			record.steps.push(stepRecord);
 			await writePipelineRunRecord(record);
 
-			const sandbox = await loadSandboxProvider(
-				step.sandbox || pipeline.sandbox || cfg.defaultSandbox,
-			);
+			const sandboxKind = step.sandbox || pipeline.sandbox || cfg.defaultSandbox || DEFAULT_SANDBOX;
+			await ensureSandboxImage(cwd, sandboxKind, deps.image, undefined, cfg);
+			const sandbox = await loadSandboxProvider(sandboxKind);
 			const stepPrompt = resolvePipelineStepPrompt(step.prompt, input, prompt);
 			const result = await worktree.run({
-				agent: claudeCodeImpl(step.model || pipeline.model || cfg.defaultModel || DEFAULT_MODEL),
+				agent: makePipelineAgent(step.model || pipeline.model || cfg.defaultModel || DEFAULT_MODEL),
 				sandbox,
 				prompt: stepPrompt,
 				maxIterations: step.maxIterations || 1,
@@ -1374,9 +2295,9 @@ export async function executePipeline(
 	}
 }
 
-function renderWidget(runs: Map<string, RunState>, team: string): string[] {
+function renderWidget(runs: Map<string, RunState>): string[] {
 	const active = [...runs.values()].sort((a, b) => b.startedAt - a.startedAt).slice(0, 8);
-	const lines = [`Sandcastle team: ${team || "(none)"} · runs: ${runs.size}`];
+	const lines = [`Sandcastle runs: ${runs.size}`];
 	for (const run of active) {
 		const age = Math.round((Date.now() - run.startedAt) / 1000);
 		const commits = run.commits?.length ? ` · ${run.commits.length} commit(s)` : "";
@@ -1385,22 +2306,544 @@ function renderWidget(runs: Map<string, RunState>, team: string): string[] {
 	return lines;
 }
 
+function completionItems(values: Array<string | SelectItem>, prefix: string): SelectItem[] | null {
+	const items = values.map((value) => typeof value === "string" ? { value, label: value } : value);
+	const filtered = items.filter((item) => item.value.startsWith(prefix) || item.label.startsWith(prefix));
+	return filtered.length ? filtered : null;
+}
+
+function pipelineCompletionItems(prefix: string): SelectItem[] | null {
+	return completionItems(["simple-loop", "sequential-reviewer", "parallel-planner", "parallel-planner-with-review", "archive"], prefix);
+}
+
+function flagCompletionItems(flags: string[], prefix: string): SelectItem[] | null {
+	return completionItems(flags, prefix);
+}
+
+function scConfigTopLevelItems(): SelectItem[] {
+	return [
+		{ value: "init", label: "init", description: "hydrate missing config and runner files" },
+		{ value: "init --force", label: "init --force", description: "overwrite config and runner with defaults" },
+		{ value: "show", label: "show", description: "display effective config" },
+		{ value: "edit", label: "edit", description: "open config in terminal editor" },
+		{ value: "editor", label: "editor", description: "show preferred editor" },
+		{ value: "get", label: "get", description: "read a schema-backed config path" },
+		{ value: "set", label: "set", description: "set a supported config path" },
+		{ value: "reset", label: "reset", description: "reset a supported config path" },
+		{ value: "validate", label: "validate", description: "validate repo-local config" },
+	];
+}
+
+function nestedConfigPathItems(pathPrefix: string): SelectItem[] {
+	const leaves = configuredConfigPaths(DEFAULT_CONFIG);
+	const nodes = new Set<string>();
+	for (const leaf of leaves) {
+		const parts = leaf.split(".");
+		for (let index = 1; index < parts.length; index++) nodes.add(`${parts.slice(0, index).join(".")}.`);
+	}
+	const values = [...new Set([...nodes, ...leaves])].sort();
+	return values
+		.filter((value) => value.startsWith(pathPrefix) && value !== pathPrefix)
+		.map((value) => {
+			const trimmed = value.endsWith(".") ? value.slice(0, -1) : value;
+			return { value, label: value.endsWith(".") ? `${trimmed.split(".").pop()}.` : trimmed.split(".").pop() || value, description: value.endsWith(".") ? "config section" : value };
+		});
+}
+
+function scConfigPathCompletions(subcommand: string, pathPrefix: string): SelectItem[] | null {
+	const items = nestedConfigPathItems(pathPrefix).map((item) => ({ ...item, value: `${subcommand} ${item.value}` }));
+	return completionItems(items, `${subcommand} ${pathPrefix}`);
+}
+
+function scConfigCompletionItems(prefix: string): SelectItem[] | null {
+	const trimmedStart = prefix.trimStart();
+	const hasTrailingSpace = /\s$/.test(trimmedStart);
+	const parts = trimmedStart.split(/\s+/).filter(Boolean);
+	if (parts.length === 0 || (parts.length === 1 && !hasTrailingSpace)) {
+		return completionItems(scConfigTopLevelItems(), parts[0] || "");
+	}
+	const [subcommand, path = "", valuePrefix = ""] = parts;
+	if (["get", "reset"].includes(subcommand) && parts.length <= 2) {
+		return scConfigPathCompletions(subcommand, path);
+	}
+	if (subcommand === "set") {
+		if (parts.length <= 2 && !hasTrailingSpace) return scConfigPathCompletions("set", path);
+		const enums = schemaEnumForPath(path);
+		if (enums?.length) return completionItems(enums.map((entry) => ({ value: `set ${path} ${entry}`, label: entry })), `set ${path} ${valuePrefix}`);
+	}
+	if (subcommand === "editor" && parts.length <= 2) {
+		return completionItems(["nvim", "vim", "nano", "code --wait", "emacs"].map((editor) => ({ value: `editor ${editor}`, label: editor })), `editor ${parts[1] || ""}`);
+	}
+	return null;
+}
+
+function tokenAfterLastSpace(value: string): string {
+	const match = value.match(/(?:^|\s)(\S*)$/);
+	return match?.[1] || "";
+}
+
+function isTuiForceQuit(data: string): boolean {
+	return data === "\x11" || data.toLowerCase() === "ctrl+q" || data.toLowerCase() === "control+q";
+}
+
+function isTuiEscape(data: string): boolean {
+	return matchesKey(data, "escape") || data === "\x1b\x1b" || data.toLowerCase() === "escape";
+}
+
+function isDefaultableConfigPath(path: string): boolean {
+	const parts = splitConfigPath(path);
+	return parts.length === 3 && ["agents", "pipelines"].includes(parts[0]) && ["model", "sandbox"].includes(parts[2]);
+}
+
+function effectiveDefaultForPath(cfg: SandcastleConfig, path: string): string | undefined {
+	const field = splitConfigPath(path)[2];
+	if (field === "model") return cfg.defaultModel || DEFAULT_MODEL;
+	if (field === "sandbox") return cfg.defaultSandbox || DEFAULT_SANDBOX;
+	return undefined;
+}
+
+function selectableValuesForPath(cfg: SandcastleConfig, path: string): string[] {
+	const values = schemaEnumForPath(path)
+		|| (path === "defaultPipeline" ? ["blank", "simple-loop", "sequential-reviewer", "parallel-planner", "parallel-planner-with-review"] : undefined)
+		|| (path === "defaultAgent" ? ["claude-code", "pi", "codex", "cursor", "opencode", "copilot"] : undefined)
+		|| (path === "issueTracker" ? ["github-issues", "custom", "beads"] : undefined);
+	const withDefault = isDefaultableConfigPath(path) ? ["default", ...(values || [])] : (values || []);
+	return [...new Set(withDefault)];
+}
+
+function allowsCustomValueForPath(path: string): boolean {
+	return !["defaultPipeline", "defaultAgent", "issueTracker"].includes(path);
+}
+
+function coerceConfigValue(path: string, rawValue: string): unknown {
+	const field = splitConfigPath(path).at(-1);
+	if (field === "maxIterations") {
+		const value = Number(rawValue);
+		if (!Number.isInteger(value) || value < 1) throw new Error(`${path} must be a positive integer.`);
+		return value;
+	}
+	return rawValue;
+}
+
+type BacklogConfigAction =
+	| { type: "init" }
+	| { type: "edit" }
+	| { type: "validate" }
+	| { type: "build-image" }
+	| { type: "sandcastle-init" }
+	| { type: "set-editor"; editor: string }
+	| { type: "set-config"; path: string; value: string }
+	| { type: "add-agent"; name: string }
+	| { type: "rename-agent"; oldName: string; newName: string }
+	| { type: "delete-agent"; name: string }
+	| { type: "add-pipeline"; name: string }
+	| { type: "rename-pipeline"; oldName: string; newName: string }
+	| { type: "delete-pipeline"; name: string }
+	| { type: "apply-pack"; pack: string }
+	| { type: "batch"; actions: BacklogConfigAction[] }
+	| { type: "cancel" };
+
+function friendlyConfigLabel(pathOrField: string): string {
+	const field = pathOrField.split(".").pop() || pathOrField;
+	const labels: Record<string, string> = {
+		defaultSandbox: "Sandbox",
+		defaultModel: "Model",
+		defaultPipeline: "Default Pipeline",
+		defaultAgent: "Default Agent",
+		issueTracker: "Issue Tracker",
+		issueTrackerSetupCommand: "Issue Tracker Setup Command",
+		imageNamePattern: "Image Name Pattern",
+		description: "Description",
+		model: "Model",
+		sandbox: "Sandbox",
+		provider: "Provider",
+		maxIterations: "Max Iterations",
+		branch: "Branch",
+		systemPrompt: "System Prompt",
+	};
+	return labels[field] || field.replace(/([A-Z])/g, " $1").replace(/^./, (char) => char.toUpperCase());
+}
+
+function summarizeValue(value: unknown): string {
+	if (Array.isArray(value)) return value.join(", ") || "<empty>";
+	if (value === undefined) return "<unset>";
+	return formatConfigValue(value).replace(/\n/g, "\\n");
+}
+
+function describeConfigAction(action: BacklogConfigAction, before: SandcastleConfig, after: SandcastleConfig): string {
+	if (action.type === "set-config") return `${friendlyConfigLabel(action.path)}: ${summarizeValue(readConfigValue(before, action.path))} → ${summarizeValue(readConfigValue(after, action.path))}`;
+	if (action.type.startsWith("rename-")) return `${action.type.replace("rename-", "Rename ")}: ${(action as any).oldName} → ${(action as any).newName}`;
+	if (action.type.startsWith("add-")) return `${action.type.replace("add-", "Add ")}: ${(action as any).name}`;
+	if (action.type.startsWith("delete-")) return `${action.type.replace("delete-", "Delete ")}: ${(action as any).name}`;
+	return action.type;
+}
+
+async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | null> {
+	const loadedCfg = await loadConfig(ctx.cwd).catch(() => DEFAULT_CONFIG);
+	let model = new ConfigShadowModel(loadedCfg);
+	let cfg: SandcastleConfig = model.value as SandcastleConfig;
+	let unsubscribeModel = model.onChange(() => { cfg = model.value as SandcastleConfig; });
+	return ctx.ui.custom<BacklogConfigAction | null>((tui: any, theme: any, _kb: any, done: (value: BacklogConfigAction | null) => void) => {
+		type Screen = { title: string; subtitle?: string; items: SelectItem[] };
+		let route: string[] = ["main"];
+		let selected = 0;
+		let editPath: string | null = null;
+		let editBuffer = "";
+		let editChoices: string[] = [];
+		let editChoiceIndex = 0;
+		let editCustom = false;
+		let editAllowCustom = true;
+		let textAction: BacklogConfigAction["type"] | null = null;
+		let textPayload: Record<string, string> = {};
+		let textTitle = "";
+		let textPristine = false;
+		let pendingPack = "default";
+		let dirty = false;
+		const pendingActions: BacklogConfigAction[] = [];
+
+		const pathValue = (path: string): string => {
+			const value = readConfigValue(cfg, path);
+			return value === undefined ? "" : formatConfigValue(value).replace(/\n/g, "\\n");
+		};
+		const valueDescription = (path: string) => {
+			const value = pathValue(path);
+			if (value) return value;
+			if (isDefaultableConfigPath(path)) return `default (${effectiveDefaultForPath(cfg, path) || "unset"})`;
+			return "unset";
+		};
+		const field = (path: string, label = friendlyConfigLabel(path)): SelectItem => ({ value: `field:${path}`, label, description: valueDescription(path) });
+		const open = (name: string) => { route = [...route, name]; selected = 0; tui.requestRender(); };
+		const replace = (name: string) => { route = [...route.slice(0, -1), name]; selected = 0; tui.requestRender(); };
+		const current = () => route[route.length - 1] || "main";
+
+		const mainScreen = (): Screen => ({
+			title: "BACKLOG CONFIG BIOS",
+			subtitle: "Section editor over .pi/sandcastle/config.yaml",
+			items: [
+				{ value: "nav:defaults", label: "Defaults", description: "Set the default values to be used for this repo" },
+				{ value: "nav:agents", label: "Agents", description: "Create and configure reusable Sandcastle execution identities" },
+				{ value: "nav:pipelines", label: "Pipelines", description: "Configure deterministic workflows and their steps" },
+				{ value: "nav:actions", label: "Actions", description: "init, validate, build image, config packs, raw edit" },
+				{ value: "cancel", label: "Exit", description: "Close this configuration editor" },
+			],
+		});
+
+		const defaultsScreen = (): Screen => ({
+			title: "DEFAULTS",
+			subtitle: "Common fallback settings used by agents and pipelines",
+			items: [field("defaultSandbox"), field("defaultModel"), field("defaultPipeline"), field("defaultAgent"), field("issueTracker"), field("issueTrackerSetupCommand"), field("imageNamePattern")],
+		});
+
+		const agentsScreen = (): Screen => ({
+			title: "AGENTS",
+			subtitle: "Choose an agent to edit its fields",
+			items: [
+				{ value: "text:add-agent", label: "New agent", description: "Create an agent with default model/sandbox" },
+				...Object.entries(cfg.agents).map(([name, agent]) => ({ value: `nav:agent:${name}`, label: name, description: agent.description || agent.model || "configured agent" })),
+			],
+		});
+
+		const agentScreen = (name: string): Screen => ({
+			title: `AGENT / ${name}`,
+			subtitle: "Editable fields for this Sandcastle agent",
+			items: [
+				{ value: `text:rename-agent:${name}`, label: "Rename agent", description: name },
+				{ value: `delete-agent:${name}`, label: "Delete agent", description: "Remove this agent from the config" },
+				field(`agents.${name}.description`),
+				field(`agents.${name}.model`),
+				field(`agents.${name}.sandbox`),
+				field(`agents.${name}.provider`),
+				field(`agents.${name}.maxIterations`),
+				field(`agents.${name}.branch`),
+				field(`agents.${name}.systemPrompt`),
+			],
+		});
+
+		const pipelinesScreen = (): Screen => ({
+			title: "PIPELINES",
+			subtitle: "Choose a pipeline for detailed inspection/editing",
+			items: [
+				{ value: "text:add-pipeline", label: "New pipeline", description: "Create a simple worker pipeline" },
+				...Object.entries(cfg.pipelines).map(([name, pipeline]) => ({ value: `nav:pipeline:${name}`, label: name, description: pipeline.description || `${pipeline.steps?.length || 0} step(s)` })),
+			],
+		});
+
+		const pipelineScreen = (name: string): Screen => {
+			const pipeline = cfg.pipelines[name];
+			const branch = pipeline?.branchStrategy ? `${pipeline.branchStrategy.type || "branch"}${pipeline.branchStrategy.branch ? ` → ${pipeline.branchStrategy.branch}` : ""}` : "default";
+			const stepItems = (pipeline?.steps || []).map((step, index) => ({
+				value: `nav:pipeline-step:${name}:${index}`,
+				label: `step ${index + 1}: ${step.agent}`,
+				description: step.prompt ? step.prompt.split(/\n/)[0].slice(0, 80) : "no prompt",
+			}));
+			return {
+				title: `PIPELINE / ${name}`,
+				subtitle: `branch strategy: ${branch}`,
+				items: [
+					{ value: `text:rename-pipeline:${name}`, label: "Rename pipeline", description: name },
+					{ value: `delete-pipeline:${name}`, label: "Delete pipeline", description: "Remove this pipeline from the config" },
+					{ value: `info:pipeline:${name}:description`, label: "Description", description: pipeline?.description || "unset" },
+					{ value: `info:pipeline:${name}:model`, label: "Model", description: pipeline?.model || `default (${cfg.defaultModel || DEFAULT_MODEL})` },
+					{ value: `info:pipeline:${name}:sandbox`, label: "Sandbox", description: pipeline?.sandbox || `default (${cfg.defaultSandbox || DEFAULT_SANDBOX})` },
+					...stepItems,
+					{ value: "action:edit", label: "Open detailed raw editor", description: "Use configured terminal editor for advanced pipeline edits" },
+				],
+			};
+		};
+
+		const pipelineStepScreen = (pipelineName: string, indexText: string): Screen => {
+			const stepIndex = Number(indexText);
+			const step = cfg.pipelines[pipelineName]?.steps?.[stepIndex];
+			return {
+				title: `PIPELINE / ${pipelineName} / STEP ${stepIndex + 1}`,
+				subtitle: "Detailed step view; raw editor is available for complex prompt edits",
+				items: [
+					{ value: "noop", label: "agent", description: step?.agent || "unset" },
+					{ value: "noop", label: "model", description: step?.model || `default (${cfg.defaultModel || DEFAULT_MODEL})` },
+					{ value: "noop", label: "sandbox", description: step?.sandbox || `default (${cfg.defaultSandbox || DEFAULT_SANDBOX})` },
+					{ value: "noop", label: "maxIterations", description: String(step?.maxIterations || "default") },
+					{ value: "noop", label: "prompt", description: step?.prompt ? step.prompt.split(/\n/)[0].slice(0, 100) : "unset" },
+					{ value: "action:edit", label: "Open raw editor", description: "Edit this pipeline in YAML" },
+				],
+			};
+		};
+
+		const actionsScreen = (): Screen => ({
+			title: "ACTIONS",
+			subtitle: "Operational commands around config editing",
+			items: [
+				{ value: "action:init", label: "Initialize / hydrate config", description: "Run /sc:config init without overwriting edits" },
+				{ value: "nav:packs", label: "Apply config pack", description: "Choose a template pack; confirmation required" },
+				{ value: "action:edit", label: "Edit raw config", description: `Open ${CONFIG_PATH} in ${getPreferredEditor(ctx.cwd)}` },
+				{ value: "nav:editors", label: "Preferred editor", description: "Choose a common terminal editor" },
+				{ value: "action:validate", label: "Validate config", description: "Run /sc:config validate" },
+				{ value: "action:sandcastle-init", label: "Initialize Sandcastle CLI scaffold", description: "Run non-interactive sandcastle init using this config" },
+				{ value: "action:build", label: "Build sandbox image", description: "Run /sc:build-image using defaultSandbox" },
+			],
+		});
+
+		const screen = (): Screen => {
+			const key = current();
+			if (key === "main") return mainScreen();
+			if (key === "defaults") return defaultsScreen();
+			if (key === "agents") return agentsScreen();
+			if (key.startsWith("agent:")) return agentScreen(key.slice("agent:".length));
+			if (key === "pipelines") return pipelinesScreen();
+			if (key.startsWith("pipeline:")) return pipelineScreen(key.slice("pipeline:".length));
+			if (key.startsWith("pipeline-step:")) {
+				const [, pipelineName, indexText] = key.split(":");
+				return pipelineStepScreen(pipelineName, indexText);
+			}
+			if (key === "actions") return actionsScreen();
+			if (key === "packs") return { title: "CONFIG PACKS", subtitle: "Applying a pack overwrites config.yaml", items: listConfigPacks().map((item) => ({ ...item, value: `pack:${item.value}` })) };
+			if (key === "confirm-pack") return { title: "CONFIRM OVERWRITE", subtitle: `Pack: ${pendingPack}`, items: [{ value: "action:apply-pack", label: `Apply ${pendingPack}`, description: "Overwrite .pi/sandcastle/config.yaml" }, { value: "back", label: "Back", description: "Return to config packs" }] };
+			if (key === "editors") return { title: "EDITOR SETUP", subtitle: "Choose preferred terminal editor", items: ["nvim", "vim", "nano", "code --wait", "emacs"].map((editor) => ({ value: `editor:${editor}`, label: editor, description: editor === getPreferredEditor(ctx.cwd) ? "current" : undefined })) };
+			if (key === "confirm-exit") return { title: "UNSAVED CHANGES", subtitle: `${pendingActions.length} pending change(s)`, items: [{ value: "save-exit", label: "Save changes", description: "Apply pending config changes" }, { value: "discard-exit", label: "Exit without saving", description: "Discard pending changes" }, { value: "back", label: "Back", description: "Return to editor" }, ...pendingActions.map((action, index) => ({ value: `change:${index}`, label: `Change ${index + 1}`, description: describeConfigAction(action, loadedCfg, cfg) }))] };
+			if (key.startsWith("confirm-delete-change:")) {
+				const index = Number(key.slice("confirm-delete-change:".length));
+				const action = pendingActions[index];
+				return { title: "ROLL BACK CHANGE", subtitle: action ? describeConfigAction(action, loadedCfg, cfg) : "Unknown change", items: [{ value: `delete-change:${index}`, label: "Delete this pending change", description: "Roll back this change and recompute dependent config state" }, { value: "back", label: "Back", description: "Return to unsaved changes" }] };
+			}
+			return mainScreen();
+		};
+
+		const beginTextAction = (type: BacklogConfigAction["type"], title: string, payload: Record<string, string> = {}, initial = "") => {
+			textAction = type;
+			textPayload = payload;
+			textTitle = title;
+			editBuffer = initial;
+			textPristine = !!initial;
+			tui.requestRender();
+		};
+
+		const applyActionToModel = (action: BacklogConfigAction) => {
+			if (action.type === "set-config") model.setConfigValue(action.path, coerceConfigValue(action.path, action.value));
+			if (action.type === "add-agent") model.addAgent(action.name);
+			if (action.type === "rename-agent") model.renameAgent(action.oldName, action.newName);
+			if (action.type === "delete-agent") model.deleteAgent(action.name);
+			if (action.type === "add-pipeline") model.addPipeline(action.name);
+			if (action.type === "rename-pipeline") model.renamePipeline(action.oldName, action.newName);
+			if (action.type === "delete-pipeline") model.deletePipeline(action.name);
+		};
+
+		const rebuildModelFromPendingActions = () => {
+			unsubscribeModel();
+			model = new ConfigShadowModel(loadedCfg);
+			cfg = model.value as SandcastleConfig;
+			unsubscribeModel = model.onChange(() => { cfg = model.value as SandcastleConfig; });
+			for (const action of pendingActions) applyActionToModel(action);
+			cfg = model.value as SandcastleConfig;
+			dirty = pendingActions.length > 0;
+		};
+
+		const removePendingAction = (index: number) => {
+			if (index < 0 || index >= pendingActions.length) return;
+			pendingActions.splice(index, 1);
+			rebuildModelFromPendingActions();
+			if (pendingActions.length === 0) route = ["main"];
+			else route = ["main", "confirm-exit"];
+			selected = 0;
+			tui.requestRender();
+		};
+
+		const choose = () => {
+			const active = screen();
+			const item = active.items[selected];
+			if (!item) return;
+			const value = String(item.value);
+			if (value.startsWith("nav:")) return open(value.slice(4));
+			if (value.startsWith("field:")) {
+				editPath = value.slice("field:".length);
+				editBuffer = pathValue(editPath);
+				editChoices = selectableValuesForPath(cfg, editPath);
+				editChoiceIndex = 0;
+				editAllowCustom = allowsCustomValueForPath(editPath);
+				editCustom = editChoices.length === 0;
+				textPristine = editCustom && !!editBuffer;
+				tui.requestRender();
+				return;
+			}
+			if (value.startsWith("text:add-agent")) return beginTextAction("add-agent", "NEW AGENT");
+			if (value.startsWith("text:add-pipeline")) return beginTextAction("add-pipeline", "NEW PIPELINE");
+			if (value.startsWith("text:rename-agent:")) return beginTextAction("rename-agent", "RENAME AGENT", { oldName: value.slice("text:rename-agent:".length) }, value.slice("text:rename-agent:".length));
+			if (value.startsWith("text:rename-pipeline:")) return beginTextAction("rename-pipeline", "RENAME PIPELINE", { oldName: value.slice("text:rename-pipeline:".length) }, value.slice("text:rename-pipeline:".length));
+			if (value.startsWith("delete-agent:")) { const name = value.slice("delete-agent:".length); model.deleteAgent(name); route = ["main", "agents"]; return queueAction({ type: "delete-agent", name }); }
+			if (value.startsWith("delete-pipeline:")) { const name = value.slice("delete-pipeline:".length); model.deletePipeline(name); route = ["main", "pipelines"]; return queueAction({ type: "delete-pipeline", name }); }
+			if (value.startsWith("pack:")) { pendingPack = value.slice(5); return replace("confirm-pack"); }
+			if (value.startsWith("editor:")) return done({ type: "set-editor", editor: value.slice(7) });
+			if (value === "action:init") return done({ type: "init" });
+			if (value === "action:edit") return done({ type: "edit" });
+			if (value === "action:validate") return done({ type: "validate" });
+			if (value === "action:sandcastle-init") return done({ type: "sandcastle-init" });
+			if (value === "action:build") return done({ type: "build-image" });
+			if (value === "action:apply-pack") return done({ type: "apply-pack", pack: pendingPack });
+			if (value === "save-exit") return done({ type: "batch", actions: pendingActions });
+			if (value === "discard-exit") return done({ type: "cancel" });
+			if (value.startsWith("change:")) return open(`confirm-delete-change:${value.slice("change:".length)}`);
+			if (value.startsWith("delete-change:")) return removePendingAction(Number(value.slice("delete-change:".length)));
+			if (value === "back") return back();
+			if (value === "cancel") return dirty ? open("confirm-exit") : done({ type: "cancel" });
+		};
+
+		const back = () => {
+			if (editPath || textAction) { editPath = null; textAction = null; editBuffer = ""; editChoices = []; editCustom = false; editAllowCustom = true; textPristine = false; tui.requestRender(); return; }
+			if (current() === "confirm-exit" || current().startsWith("confirm-delete-change:")) { route = route.slice(0, -1); selected = 0; tui.requestRender(); return; }
+			if (route.length <= 1) dirty ? open("confirm-exit") : done({ type: "cancel" });
+			else { route = route.slice(0, -1); selected = 0; tui.requestRender(); }
+		};
+
+		const setLocalConfigValue = (path: string, value: string) => {
+			model.setConfigValue(path, coerceConfigValue(path, value));
+		};
+
+		const queueAction = (action: BacklogConfigAction) => {
+			pendingActions.push(action);
+			dirty = model.isDirty() || pendingActions.length > 0;
+			editPath = null; textAction = null; editBuffer = ""; editChoices = []; editCustom = false; textPristine = false;
+			tui.requestRender();
+		};
+
+		const submitEdit = () => {
+			if (textAction) {
+				const name = editBuffer.trim();
+				if (!name) return;
+				if (textAction === "add-agent") { model.addAgent(name); return queueAction({ type: "add-agent", name }); }
+				if (textAction === "add-pipeline") { model.addPipeline(name); return queueAction({ type: "add-pipeline", name }); }
+				if (textAction === "rename-agent") {
+					model.renameAgent(textPayload.oldName, name);
+					route = ["main", "agents"];
+					return queueAction({ type: "rename-agent", oldName: textPayload.oldName, newName: name });
+				}
+				if (textAction === "rename-pipeline") { model.renamePipeline(textPayload.oldName, name); route = ["main", "pipelines"]; return queueAction({ type: "rename-pipeline", oldName: textPayload.oldName, newName: name }); }
+			}
+			if (!editPath) return;
+			const value = editCustom || !editChoices.length ? editBuffer : editChoices[editChoiceIndex];
+			setLocalConfigValue(editPath, value);
+			queueAction({ type: "set-config", path: editPath, value });
+		};
+
+		const line = (text: string, width: number) => text.length > width ? `${text.slice(0, Math.max(0, width - 1))}…` : text;
+		const selectTheme = (theme?: any): PiSelectListTheme => ({
+			selectedPrefix: (text: string) => theme?.fg ? theme.fg("accent", text) : text,
+			selectedText: (text: string) => theme?.fg ? theme.fg("accent", text) : text,
+			description: (text: string) => theme?.fg ? theme.fg("muted", text) : text,
+			scrollInfo: (text: string) => theme?.fg ? theme.fg("dim", text) : text,
+			noMatch: (text: string) => theme?.fg ? theme.fg("muted", text) : text,
+		});
+		const buildSelectList = (active: Screen, theme?: any) => {
+			const list = new PiSelectList(active.items.map((item) => ({ value: String(item.value), label: item.label, description: item.description })), 14, selectTheme(theme));
+			list.setSelectedIndex(selected);
+			list.onSelectionChange = (item) => { selected = Math.max(0, active.items.findIndex((candidate) => String(candidate.value) === item.value)); };
+			list.onSelect = () => choose();
+			list.onCancel = () => back();
+			return list;
+		};
+		return {
+			render: (width: number) => {
+				const border = theme.fg("accent", "═".repeat(Math.max(1, width)));
+				if (editPath || textAction) {
+					const title = textAction ? textTitle : `EDIT ${friendlyConfigLabel(editPath || "")}`;
+					const rendered = [border, theme.fg("accent", theme.bold(` ${title}`)), theme.fg("dim", "Enter saves • Esc cancels • Backspace edits"), ""];
+					if (editPath && editChoices.length && !editCustom) {
+						const renderedChoices = editAllowCustom ? [...editChoices, "custom…"] : editChoices;
+						for (const [index, choice] of renderedChoices.entries()) {
+							const label = choice === "default" && editPath ? `default (${effectiveDefaultForPath(cfg, editPath) || "unset"})` : choice;
+							rendered.push(`${index === editChoiceIndex ? theme.fg("accent", "▶ ") : "  "}${index === editChoiceIndex ? theme.fg("accent", label) : label}`);
+						}
+					} else {
+						rendered.push(line(editBuffer || theme.fg("muted", "<empty>"), width));
+					}
+					rendered.push("", border);
+					return rendered.map((entry) => line(entry, width));
+				}
+				const active = screen();
+				selected = Math.min(selected, Math.max(0, active.items.length - 1));
+				const rendered = [border, theme.fg("accent", theme.bold(` ${active.title}`)), theme.fg("dim", active.subtitle || ""), theme.fg("dim", ` path: ${route.join(" > ")}`), ""];
+				rendered.push(...buildSelectList(active, theme).render(width));
+				rendered.push("", theme.fg("dim", " ↑↓ navigate • enter select/edit • esc back/close • ctrl+q force quit"), border);
+				return rendered.map((entry) => line(entry, width));
+			},
+			invalidate: () => {},
+			handleInput: (data: string) => {
+				if (isTuiForceQuit(data)) { done({ type: "cancel" }); return; }
+				if (editPath || textAction) {
+					if (isTuiEscape(data)) back();
+					else if (editPath && editChoices.length && !editCustom && data === "\x1b[A") editChoiceIndex = Math.max(0, editChoiceIndex - 1);
+					else if (editPath && editChoices.length && !editCustom && data === "\x1b[B") editChoiceIndex = Math.min(editChoices.length - (editAllowCustom ? 0 : 1), editChoiceIndex + 1);
+					else if (data === "\r" || data === "\n") {
+						if (editPath && editAllowCustom && editChoices.length && !editCustom && editChoiceIndex === editChoices.length) { editCustom = true; editBuffer = ""; }
+						else submitEdit();
+					}
+					else if (!editChoices.length || editCustom || textAction) {
+						if (data === "\x7f" || data === "\b") { editBuffer = editBuffer.slice(0, -1); textPristine = false; }
+						else if (data >= " " && data !== "\x7f") { if (textPristine) editBuffer = ""; textPristine = false; editBuffer += data; }
+					}
+					tui.requestRender();
+					return;
+				}
+				const active = screen();
+				buildSelectList(active).handleInput(data);
+				tui.requestRender();
+			},
+		};
+	}, { overlay: true, overlayOptions: { width: "80%", maxHeight: "80%", minWidth: 60, anchor: "center", margin: 1 } });
+}
+
 export default function piSandcastle(
 	pi: ExtensionAPI,
 	deps: PiSandcastleDependencies = {},
 ) {
 	const runs = new Map<string, RunState>();
-	let activeTeam = "default";
 	let widgetCtx: { ui: { setWidget: (id: string, lines: string[] | undefined) => void; notify: (message: string, type?: string) => void } } | undefined;
 	const sandcastle = deps.sandcastle ?? createDefaultSandcastleRunCapability();
 	const backlogDeps = deps.backlog || {};
 
 	function refreshWidget() {
-		widgetCtx?.ui.setWidget("pi-sandcastle", renderWidget(runs, activeTeam));
+		widgetCtx?.ui.setWidget("pi-sandcastle", renderWidget(runs));
 	}
 
 	function helpText(): string {
-		return `Sandcastle commands\n\nSetup and configuration:\n  /sc:config setup\n    Create the local config/runner scaffold.\n\n  /sc:config show|get|set|reset|validate\n    Inspect and maintain repo-local Sandcastle config.\n\nExecution:\n  /sc:run [agent] <prompt>\n    Run one Sandcastle-backed agent directly.\n\n  /sc:pipeline <pipeline> [prompt]\n    Run a fixed-domain pipeline directly.\n\nRun management:\n  /sc:runs\n    Show durable Sandcastle runs.\n\n  /sc:status [run-id]\n    Inspect a current, latest, or specified Sandcastle run.\n\n  /sc:logs [run-id]\n    Show the stored log path for a run.\n\n  /sc:cancel [run-id]\n    Cancel active Sandcastle work.\n\n  /sc:resume [run-id]\n    Resume resumable Sandcastle work.\n\nBacklog views and processing:\n  /backlog:list [query]\n    List backlog items without mutation.\n\n  /backlog:inspect <item-id>\n    Inspect one backlog item without mutation.\n\n  /backlog:plan [query] --iterations N\n    Plan read-only backlog iterations.\n\n  /backlog:next [query]\n    Plan the next backlog iteration.\n\n  /backlog:process [query] --pipeline <pipeline>\n    Start durable backlog processing.\n\n  /backlog:runs|status|resume\n    Manage durable backlog processing runs.`;
+		return `Sandcastle commands\n\nSetup and configuration:\n  /backlog:config\n    Open the friendly BIOS-style config wrapper.\n\n  /sc:config init\n    Initialize/hydrate the local config/runner scaffold.\n\n  /sc:config show|get|set|edit|editor|reset|validate\n    Inspect and maintain repo-local Sandcastle config.\n\nExecution:\n  /sc:build-image [docker|podman]\n    Build the repo's Sandcastle sandbox image.\n\n  /sc:run [agent] <prompt>\n    Run one Sandcastle-backed agent directly.\n\n  /sc:pipeline <pipeline> [prompt]\n    Run a fixed-domain pipeline directly.\n\nRun management:\n  /sc:runs\n    Show durable Sandcastle runs.\n\n  /sc:status [run-id]\n    Inspect a current, latest, or specified Sandcastle run.\n\n  /sc:logs [run-id]\n    Show the stored log path for a run.\n\n  /sc:cancel [run-id]\n    Cancel active Sandcastle work.\n\n  /sc:resume [run-id]\n    Resume resumable Sandcastle work.\n\nBacklog views and processing:\n  /backlog:list [query]\n    List backlog items without mutation.\n\n  /backlog:inspect <item-id>\n    Inspect one backlog item without mutation.\n\n  /backlog:plan [query] --iterations N\n    Plan read-only backlog iterations.\n\n  /backlog:next [query]\n    Plan the next backlog iteration.\n\n  /backlog:process [query] --pipeline <pipeline>\n    Start durable backlog processing.\n\n  /backlog:runs|status|resume\n    Manage durable backlog processing runs.`;
 	}
 
 	function getBacklogResumeCapability(ctx: any): ((record: unknown) => Promise<unknown> | unknown) | undefined {
@@ -1426,7 +2869,7 @@ export default function piSandcastle(
 		const cfg = await loadConfig(cwd);
 		const agent = cfg.agents[agentName];
 		if (!agent) throw new Error(`Unknown Sandcastle agent '${agentName}'. Run /sc:config show to inspect configured agents.`);
-		const id = `${Date.now().toString(36)}-${agentName}`;
+		const id = `${Date.now().toString(36)}-${randomUUID().slice(0, 8)}-${agentName}`;
 		const resultPath = join(cwd, RESULTS_DIR, `${id}.json`);
 		const logPath = join(cwd, RESULTS_DIR, `${id}.log`);
 		const branch = agent.branch || `sandcastle/${agentName}/${id}`;
@@ -1438,6 +2881,7 @@ export default function piSandcastle(
 			agent: agentName,
 			cwd,
 			model: runtime.model,
+			provider: runtime.provider,
 			sandbox: runtime.sandbox,
 			systemPrompt: agent.systemPrompt || "",
 			prompt: task,
@@ -1452,6 +2896,20 @@ export default function piSandcastle(
 		const state: RunState = { id, agent: agentName, task, status: "running", startedAt: Date.now(), lastLine: "starting", logPath, resultPath, branch };
 		runs.set(id, state);
 		refreshWidget();
+
+		try {
+			await ensureSandboxImage(cwd, runtime.sandbox, deps.image, (reason, imageName) => {
+				state.lastLine = `building ${reason} image ${imageName}`;
+				ctx?.ui?.notify(`Sandcastle image ${imageName} is ${reason}; rebuilding before dispatch.`, "info");
+				refreshWidget();
+			}, cfg);
+		} catch (error) {
+			state.status = "error";
+			state.lastLine = error instanceof Error ? error.message.slice(0, 120) : String(error).slice(0, 120);
+			refreshWidget();
+			ctx?.ui?.notify(`Sandcastle ${agentName} error: ${id}`, "error");
+			return state;
+		}
 
 		const proc = spawn("node", [join(cwd, RUNNER_PATH), jobPath], { cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
 		state.proc = proc;
@@ -1511,22 +2969,16 @@ export default function piSandcastle(
 
 	async function delegateDefault(cwd: string, task: string, ctx?: any): Promise<void> {
 		const cfg = await loadConfig(cwd);
-		if (cfg.chains["explore-plan-review"]) {
-			await runChain(cwd, "explore-plan-review", task, ctx);
-			return;
-		}
-		const team = cfg.teams[activeTeam] || [];
-		const agent = team.includes("researcher") ? "researcher" : team[0] || Object.keys(cfg.agents)[0];
-		if (!agent) throw new Error("No Sandcastle agents configured. Run /sc:config setup, then edit .pi/sandcastle/agents.yaml.");
+		const agent = cfg.agents.planner ? "planner" : Object.keys(cfg.agents)[0];
+		if (!agent) throw new Error("No Sandcastle agents configured. Run /sc:config init, then edit .pi/sandcastle/config.yaml.");
 		await dispatch(cwd, agent, task, ctx);
 	}
 
 	async function delegateOpenWork(cwd: string, focus: string, ctx?: any): Promise<void> {
 		const task = `Inspect available open work for this repository and recommend what to pick up next.\n\nLook for, in order when available:\n1. GitHub issues and PRs via gh (for example: gh issue list, gh pr list).\n2. Local backlog/work-item directories, docs, TODO/FIXME comments, and project planning files.\n3. Failing or skipped tests that indicate unfinished work.\n\nFocus: ${focus || "general project work"}\n\nOutput:\n- Ranked open work items with source/link/file evidence.\n- Suggested first item to delegate next.\n- A ready-to-run /sc:run command for the top item.\n\nDo not modify files. End with <promise>COMPLETE</promise>.`;
 		const cfg = await loadConfig(cwd);
-		const team = cfg.teams[activeTeam] || [];
-		const agent = team.includes("researcher") ? "researcher" : team[0] || Object.keys(cfg.agents)[0];
-		if (!agent) throw new Error("No Sandcastle agents configured. Run /sc:config setup, then edit .pi/sandcastle/agents.yaml.");
+		const agent = cfg.agents.planner ? "planner" : Object.keys(cfg.agents)[0];
+		if (!agent) throw new Error("No Sandcastle agents configured. Run /sc:config init, then edit .pi/sandcastle/config.yaml.");
 		await dispatch(cwd, agent, task, ctx);
 	}
 
@@ -1547,16 +2999,24 @@ export default function piSandcastle(
 	}
 
 	function selectAgentForPipeline(pipeline: string, cfg: SandcastleConfig): string {
+		if (!cfg.pipelines[pipeline]) {
+			const available = Object.keys(cfg.pipelines).sort();
+			throw new Error(`No configured backlog pipeline '${pipeline}'. Run /sc:config init to hydrate default pipelines or choose one of: ${available.length ? available.join(", ") : "(none configured)"}.`);
+		}
 		switch (pipeline) {
 			case "review":
-				return selectConfiguredAgent(cfg, ["reviewer", "builder"], "builder");
+				return selectConfiguredAgent(cfg, ["reviewer", "implementer"], "implementer");
 			case "research":
 			case "inspect":
-				return selectConfiguredAgent(cfg, ["researcher"], "researcher");
+				return selectConfiguredAgent(cfg, ["planner"], "planner");
+			case "archive":
+				return selectConfiguredAgent(cfg, ["reviewer", "implementer"], "reviewer");
 			case "fix":
+			case "repair":
 			case "implement":
+			case "explore-plan-review":
 			default:
-				return selectConfiguredAgent(cfg, ["builder"], "builder");
+				return selectConfiguredAgent(cfg, ["implementer", "worker"], "implementer");
 		}
 	}
 
@@ -1584,6 +3044,25 @@ export default function piSandcastle(
 		return results;
 	}
 
+	async function dispatchBacklogItemsWithLimit(
+		cwd: string,
+		agentName: string,
+		record: BacklogProcessRecord,
+		limit: number,
+		ctx?: any,
+	): Promise<BacklogItemDispatchResult[]> {
+		const results = new Array<BacklogItemDispatchResult>(record.resolvedItems.length);
+		let next = 0;
+		const workers = Array.from({ length: Math.min(limit, record.resolvedItems.length) }, async () => {
+			while (next < record.resolvedItems.length) {
+				const index = next++;
+				results[index] = await dispatchBacklogItem(cwd, agentName, record, record.resolvedItems[index], ctx);
+			}
+		});
+		await Promise.all(workers);
+		return results;
+	}
+
 	async function executeBacklogProcessing(
 		cwd: string,
 		record: BacklogProcessRecord,
@@ -1606,7 +3085,7 @@ export default function piSandcastle(
 		const agentName = selectAgentForPipeline(record.pipeline, cfg);
 		const shouldRunInParallel = parallel && record.resolvedItems.length > 1;
 		const dispatched = shouldRunInParallel
-			? await Promise.all(record.resolvedItems.map((item) => dispatchBacklogItem(cwd, agentName, record, item, ctx)))
+			? await dispatchBacklogItemsWithLimit(cwd, agentName, record, 4, ctx)
 			: await dispatchBacklogItemsSequentially(cwd, agentName, record, ctx);
 
 		const status = dispatched.every((entry) => entry.status === "done") ? "done" : "error";
@@ -1621,8 +3100,7 @@ export default function piSandcastle(
 	pi.on("session_start", async (_event, ctx) => {
 		widgetCtx = ctx as any;
 		try {
-			const cfg = await loadConfig(ctx.cwd);
-			activeTeam = cfg.defaultTeam || activeTeam;
+			await loadConfig(ctx.cwd);
 			refreshWidget();
 		} catch (error) {
 			ctx.ui.notify(`pi-sandcastle config error: ${error instanceof Error ? error.message : String(error)}`, "error");
@@ -1632,15 +3110,10 @@ export default function piSandcastle(
 	pi.on("before_agent_start", async (event, ctx) => {
 		try {
 			const cfg = await loadConfig(ctx.cwd);
-			const team = cfg.teams[activeTeam] || [];
-			if (team.length === 0) return;
-			const agentLines = team.map((name) => {
-				const agent = cfg.agents[name];
-				return `- ${name}: ${agent?.description || "configured delegation agent"}`;
-			}).join("\n");
-			const chainLines = Object.keys(cfg.chains).map((name) => `- ${name}`).join("\n") || "- none";
+			const agentLines = Object.entries(cfg.agents).map(([name, agent]) => `- ${name}: ${agent?.description || "configured delegation agent"}`).join("\n");
+			if (!agentLines) return;
 			return {
-				systemPrompt: `${event.systemPrompt}\n\n## Pi Sandcastle delegation mode\nActive Sandcastle team: ${activeTeam}\nAvailable agents:\n${agentLines}\nAvailable chains:\n${chainLines}\n\nPrefer delegate_agent for delegable research, implementation, review, and parallel AFK work. Dispatch prompts must be self-contained and include expected output/artifacts. Do not dispatch agents outside the active team unless the user explicitly asks. Use /backlog:list and /backlog:inspect to inspect work, /sc:run to start agent work, and /sc:runs to inspect progress.`,
+				systemPrompt: `${event.systemPrompt}\n\n## Pi Sandcastle delegation mode\nAvailable agents:\n${agentLines}\n\nPrefer delegate_agent for delegable research, implementation, review, and AFK work. Dispatch prompts must be self-contained and include expected output/artifacts. Use /backlog:list and /backlog:inspect to inspect work, /sc:run to start agent work, and /sc:runs to inspect progress.`,
 			};
 		} catch {
 			return;
@@ -1653,8 +3126,140 @@ export default function piSandcastle(
 
 	registerRunManagementCommands(pi);
 
+	pi.registerCommand("sc:build-image", {
+		description: "Build the repo's Sandcastle sandbox image: /sc:build-image [docker|podman]",
+		getArgumentCompletions: (prefix: string) => completionItems(["docker", "podman"], tokenAfterLastSpace(prefix)),
+		handler: async (args, ctx) => {
+			const providerArg = args.trim().split(/\s+/).filter(Boolean)[0] as "docker" | "podman" | undefined;
+			const cfg = await loadConfig(ctx.cwd).catch(() => ({ defaultSandbox: DEFAULT_SANDBOX, agents: {}, chains: {}, pipelines: {} }) as SandcastleConfig);
+			const provider = providerArg || imageProviderForSandbox(cfg.defaultSandbox) || "docker";
+			if (provider !== "docker" && provider !== "podman") {
+				ctx.ui.notify("Usage: /sc:build-image [docker|podman]", "error");
+				return;
+			}
+			const imageName = defaultSandcastleImageName(ctx.cwd, cfg.imageNamePattern);
+			try {
+				ensureScaffold(ctx.cwd, { hydrate: true });
+				requireSandcastleCliScaffold(ctx.cwd);
+				ctx.ui.notify(`Building Sandcastle ${provider} image ${imageName}...`, "info");
+				await buildSandboxImageOnce(ctx.cwd, provider, imageName, deps.image?.buildImage || buildSandboxImage);
+				ctx.ui.notify(`Built Sandcastle ${provider} image ${imageName}.`, "success");
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			}
+		},
+	});
+
+	pi.registerCommand("backlog:config", {
+		description: "Open the friendly backlog/Sandcastle configuration BIOS",
+		handler: async (_args, ctx) => {
+			if (ctx.mode !== "tui" || !ctx.ui?.custom) {
+				ctx.ui.notify("/backlog:config requires TUI mode. Use /sc:config for raw commands.", "error");
+				return;
+			}
+			const action = await showBacklogConfigTui(ctx);
+			if (!action || action.type === "cancel") return;
+			try {
+				const actions = action.type === "batch" ? action.actions : [action];
+				for (const action of actions) {
+				if (action.type === "init") {
+					const result = ensureScaffold(ctx.cwd, { hydrate: true });
+					const cfg = await loadConfig(ctx.cwd);
+					const cliResult = await ensureSandcastleCliScaffold(ctx.cwd, cfg);
+					await quietlyBuildConfiguredImage(ctx.cwd, cfg, deps.image);
+					const changes = [...result.changes, ...cliResult.changes];
+					ctx.ui.notify(`Initialized Sandcastle config: ${changes.length ? changes.join("; ") : "no changes needed"}.`, "success");
+				}
+				if (action.type === "apply-pack") {
+					ensureScaffold(ctx.cwd, { hydrate: false });
+					writeFileSync(join(ctx.cwd, CONFIG_PATH), configPackText(action.pack));
+					const cfg = await loadConfig(ctx.cwd);
+					await ensureSandcastleCliScaffold(ctx.cwd, cfg, { reinitialize: true });
+					await quietlyBuildConfiguredImage(ctx.cwd, cfg, deps.image);
+					ctx.ui.notify(`Applied config pack '${action.pack}' to ${CONFIG_PATH}.`, "success");
+				}
+				if (action.type === "set-editor") {
+					setPreferredEditor(ctx.cwd, action.editor);
+					ctx.ui.notify(`Preferred Sandcastle config editor set to: ${action.editor}`, "success");
+				}
+				if (action.type === "set-config") {
+					if (!supportedConfigPath(action.path)) throw new Error(`Unsupported config path '${action.path}'.`);
+					ensureScaffold(ctx.cwd, { hydrate: true });
+					const configPath = join(ctx.cwd, CONFIG_PATH);
+					const raw = readFileSync(configPath, "utf8");
+					const updated = action.value === "default" && isDefaultableConfigPath(action.path)
+						? removeConfigValueInText(raw, action.path)
+						: setConfigValueInText(raw, action.path, coerceConfigValue(action.path, action.value));
+					writeFileSync(configPath, updated);
+					const cfg = await loadConfig(ctx.cwd);
+					if (ROOT_CONFIG_KEYS.includes(action.path as RootConfigKey)) {
+						await ensureSandcastleCliScaffold(ctx.cwd, cfg, { reinitialize: true });
+						await quietlyBuildConfiguredImage(ctx.cwd, cfg, deps.image);
+					}
+					ctx.ui.notify(`Updated ${action.path}.`, "success");
+				}
+				if (["add-agent", "rename-agent", "delete-agent", "add-pipeline", "rename-pipeline", "delete-pipeline"].includes(action.type)) {
+					ensureScaffold(ctx.cwd, { hydrate: true });
+					const configPath = join(ctx.cwd, CONFIG_PATH);
+					const raw = readFileSync(configPath, "utf8");
+					let updated = raw;
+					if (action.type === "add-agent") updated = appendAgentText(raw, action.name);
+					if (action.type === "rename-agent") updated = updateYamlReferences(renameTopLevelMapEntry(raw, "agents", action.oldName, action.newName), action.oldName, action.newName);
+					if (action.type === "delete-agent") updated = removeYamlReferences(deleteTopLevelMapEntry(raw, "agents", action.name), action.name);
+					if (action.type === "add-pipeline") updated = appendPipelineText(raw, action.name);
+					if (action.type === "rename-pipeline") updated = renameTopLevelMapEntry(raw, "pipelines", action.oldName, action.newName);
+					if (action.type === "delete-pipeline") updated = deleteTopLevelMapEntry(raw, "pipelines", action.name);
+					writeFileSync(configPath, updated);
+					ctx.ui.notify(`Updated ${CONFIG_PATH}.`, "success");
+				}
+				if (action.type === "validate") {
+					const cfg = await loadExistingConfig(ctx.cwd);
+					const issues = validateConfig(ctx.cwd, cfg);
+					ctx.ui.notify(issues.length ? `Sandcastle config validation failed:\n- ${issues.join("\n- ")}` : "Sandcastle config validation passed.", issues.length ? "error" : "success");
+				}
+				if (action.type === "build-image") {
+					const cfg = await loadConfig(ctx.cwd).catch(() => ({ defaultSandbox: DEFAULT_SANDBOX, agents: {}, chains: {}, pipelines: {} }) as SandcastleConfig);
+					const provider = imageProviderForSandbox(cfg.defaultSandbox) || "docker";
+					const imageName = defaultSandcastleImageName(ctx.cwd, cfg.imageNamePattern);
+					requireSandcastleCliScaffold(ctx.cwd);
+					await buildSandboxImageOnce(ctx.cwd, provider, imageName, deps.image?.buildImage || buildSandboxImage);
+					ctx.ui.notify(`Built Sandcastle ${provider} image ${imageName}.`, "success");
+				}
+				if (action.type === "sandcastle-init") {
+					const cfg = await loadConfig(ctx.cwd);
+					const result = await ensureSandcastleCliScaffold(ctx.cwd, cfg, { reinitialize: true });
+					await quietlyBuildConfiguredImage(ctx.cwd, cfg, deps.image);
+					ctx.ui.notify(`Initialized Sandcastle CLI scaffold: ${result.changes.join("; ")}.`, "success");
+				}
+				if (action.type === "edit") {
+					const configPath = ensureScaffoldPath(ctx.cwd);
+					const exitCode = await ctx.ui.custom<number | null>((tui: any, _theme: any, _kb: any, done: (value: number | null) => void) => {
+						tui.stop();
+						process.stdout.write("\x1b[2J\x1b[H");
+						const status = runTerminalEditor(ctx.cwd, configPath);
+						tui.start();
+						tui.requestRender(true);
+						done(status);
+						return { render: () => [], invalidate: () => {} };
+					});
+					ctx.ui.notify(exitCode === 0 ? `Edited ${CONFIG_PATH}.` : `Editor exited with code ${exitCode}.`, exitCode === 0 ? "success" : "error");
+				}
+				}
+				if (actions.length > 1) {
+					const cfg = await loadConfig(ctx.cwd);
+					const cliResult = await ensureSandcastleCliScaffold(ctx.cwd, cfg, { reinitialize: true });
+					await quietlyBuildConfiguredImage(ctx.cwd, cfg, deps.image);
+					ctx.ui.notify(`Saved ${actions.length} Sandcastle config change(s); ${cliResult.changes.join("; ")}.`, "success");
+				}
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			}
+		},
+	});
+
 	pi.registerCommand("sc:config", {
-		description: "Show, set up, edit, reset, or validate Sandcastle repo config",
+		description: "Show, init, edit, reset, or validate Sandcastle repo config",
+		getArgumentCompletions: (prefix: string) => scConfigCompletionItems(prefix),
 		handler: async (args, ctx) => {
 			const input = args.trim();
 			const [subcommand = "show", ...rest] = input ? input.split(/\s+/) : ["show"];
@@ -1665,9 +3270,45 @@ export default function piSandcastle(
 						ctx.ui.notify(JSON.stringify(cfg, null, 2), "info");
 						break;
 					}
-					case "setup": {
-						ensureScaffold(ctx.cwd);
-						ctx.ui.notify(`Created/verified ${CONFIG_PATH} and ${RUNNER_PATH}`, "success");
+					case "init": {
+						const overwrite = rest.includes("--force") || rest.includes("--overwrite");
+						const result = ensureScaffold(ctx.cwd, { overwrite, hydrate: true });
+						const cfg = await loadConfig(ctx.cwd);
+						const cliResult = await ensureSandcastleCliScaffold(ctx.cwd, cfg, { reinitialize: overwrite });
+						await quietlyBuildConfiguredImage(ctx.cwd, cfg, deps.image);
+						const changes = [...result.changes, ...cliResult.changes];
+						const changeSummary = changes.length ? changes.join("; ") : "no changes needed";
+						const overwriteSummary = result.overwritten.length ? ` Overwrote: ${result.overwritten.join(", ")}.` : "";
+						ctx.ui.notify(`Sandcastle config init complete: ${changeSummary}.${overwriteSummary}`, "success");
+						break;
+					}
+					case "edit": {
+						const configPath = ensureScaffoldPath(ctx.cwd);
+						const editor = rest.join(" ").trim() || undefined;
+						if (ctx.mode === "tui" && ctx.ui?.custom) {
+							const exitCode = await ctx.ui.custom<number | null>((tui: any, _theme: any, _kb: any, done: (value: number | null) => void) => {
+								tui.stop();
+								process.stdout.write("\x1b[2J\x1b[H");
+								const status = runTerminalEditor(ctx.cwd, configPath, editor);
+								tui.start();
+								tui.requestRender(true);
+								done(status);
+								return { render: () => [], invalidate: () => {} };
+							});
+							ctx.ui.notify(exitCode === 0 ? `Edited ${CONFIG_PATH}.` : `Editor exited with code ${exitCode}.`, exitCode === 0 ? "success" : "error");
+						} else {
+							ctx.ui.notify(`Open ${configPath} in your editor, or run in TUI mode for /sc:config edit.`, "info");
+						}
+						break;
+					}
+					case "editor": {
+						const editor = rest.join(" ").trim();
+						if (!editor) {
+							ctx.ui.notify(getPreferredEditor(ctx.cwd), "info");
+							break;
+						}
+						setPreferredEditor(ctx.cwd, editor);
+						ctx.ui.notify(`Preferred Sandcastle config editor set to: ${editor}`, "success");
 						break;
 					}
 					case "get": {
@@ -1699,6 +3340,11 @@ export default function piSandcastle(
 						const current = readConfigText(ctx.cwd);
 						const updated = setConfigValueInText(current, path, parseScalar(rawValue));
 						writeConfigText(ctx.cwd, updated);
+						if (ROOT_CONFIG_KEYS.includes(path as RootConfigKey)) {
+							const cfg = await loadConfig(ctx.cwd);
+							await ensureSandcastleCliScaffold(ctx.cwd, cfg, { reinitialize: true });
+							await quietlyBuildConfiguredImage(ctx.cwd, cfg, deps.image);
+						}
 						ctx.ui.notify(`Updated ${path}.`, "success");
 						break;
 					}
@@ -1715,6 +3361,11 @@ export default function piSandcastle(
 						const current = readConfigText(ctx.cwd);
 						const updated = resetConfigText(current, path);
 						writeConfigText(ctx.cwd, updated);
+						if (!path || ROOT_CONFIG_KEYS.includes(path as RootConfigKey)) {
+							const cfg = await loadConfig(ctx.cwd);
+							await ensureSandcastleCliScaffold(ctx.cwd, cfg, { reinitialize: true });
+							await quietlyBuildConfiguredImage(ctx.cwd, cfg, deps.image);
+						}
 						ctx.ui.notify(path ? `Reset ${path} to defaults.` : "Reset supported config paths to defaults.", "success");
 						break;
 					}
@@ -1723,7 +3374,7 @@ export default function piSandcastle(
 						try {
 							cfg = await loadExistingConfig(ctx.cwd);
 						} catch {
-							cfg = { agents: {}, teams: {}, chains: {} };
+							cfg = { agents: {}, chains: {}, pipelines: {} };
 						}
 						const issues = validateConfig(ctx.cwd, cfg);
 						if (issues.length) ctx.ui.notify(`Sandcastle config validation failed:\n- ${issues.join("\n- ")}`, "error");
@@ -1731,7 +3382,7 @@ export default function piSandcastle(
 						break;
 					}
 					default:
-						ctx.ui.notify(`Unknown /sc:config subcommand '${subcommand}'. Use show, setup, get, set, reset, or validate.`, "error");
+						ctx.ui.notify(`Unknown /sc:config subcommand '${subcommand}'. Use show, init, edit, editor, get, set, reset, or validate.`, "error");
 				}
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -1742,6 +3393,7 @@ export default function piSandcastle(
 
 	pi.registerCommand("sc:pipeline", {
 		description: "Run a fixed-domain pipeline: /sc:pipeline <pipeline> [prompt]",
+		getArgumentCompletions: (prefix: string) => pipelineCompletionItems(tokenAfterLastSpace(prefix)),
 		handler: async (args, ctx) => {
 			const { pipeline, prompt } = parsePipelineCommandArgs(args);
 			if (!pipeline) {
@@ -1749,7 +3401,7 @@ export default function piSandcastle(
 				return;
 			}
 			try {
-				const record = await executePipeline(ctx.cwd, pipeline, prompt, deps.pipeline);
+				const record = await executePipeline(ctx.cwd, pipeline, prompt, { ...deps.pipeline, image: deps.pipeline?.image || deps.image });
 				const stepSummary = record.steps.map((step) => `${step.agent}:${step.status}`).join(", ");
 				ctx.ui.notify(
 					`Pipeline ${record.pipeline} completed as ${record.id}. Branch: ${record.branch || record.worktreePath || "unknown"}. Logs: ${record.logDir}. Steps: ${stepSummary || "none"}.`,
@@ -1763,6 +3415,11 @@ export default function piSandcastle(
 
 	pi.registerCommand("backlog:process", {
 		description: "Start durable backlog processing: /backlog:process [query] --pipeline <pipeline>",
+		getArgumentCompletions: (prefix: string) => {
+			const pipelineMatch = prefix.match(/(?:^|\s)(?:--pipeline\s+|-p\s+)(\S*)$/);
+			if (pipelineMatch) return pipelineCompletionItems(pipelineMatch[1] || "");
+			return flagCompletionItems(["--pipeline", "-p"], tokenAfterLastSpace(prefix));
+		},
 		handler: async (args, ctx) => {
 			let baseRecord: BacklogProcessRecord | undefined;
 			try {
@@ -1821,6 +3478,7 @@ export default function piSandcastle(
 
 	pi.registerCommand("backlog:plan", {
 		description: "Plan read-only backlog iterations: /backlog:plan [query] --iterations N",
+		getArgumentCompletions: (prefix: string) => flagCompletionItems(["--iterations", "--iterations=2", "--all", "--include-terminal"], tokenAfterLastSpace(prefix)),
 		handler: async (args, ctx) => notifyBacklogPlan(args, ctx),
 	});
 
@@ -1865,7 +3523,7 @@ export default function piSandcastle(
 		parameters: ToolType.Object({
 			type: "object",
 			properties: {
-				agent: { type: "string", description: "Configured agent name from .pi/sandcastle/agents.yaml" },
+				agent: { type: "string", description: "Configured agent name from .pi/sandcastle/config.yaml" },
 				task: { type: "string", description: "Self-contained delegated task prompt" },
 			},
 			required: ["agent", "task"],
@@ -1873,14 +3531,7 @@ export default function piSandcastle(
 		}),
 		async execute(_toolCallId, params, _signal, onUpdate, ctx) {
 			const { agent, task } = params as { agent: string; task: string };
-			const cfg = await loadConfig(ctx.cwd);
-			const team = cfg.teams[activeTeam] || [];
-			if (team.length > 0 && !team.includes(agent)) {
-				return {
-					isError: true,
-					content: [{ type: "text", text: `Agent '${agent}' is not in active team '${activeTeam}'. Team members: ${team.join(", ")}. Update the active team configuration before dispatching.` }],
-				};
-			}
+			await loadConfig(ctx.cwd);
 			onUpdate?.({ content: [{ type: "text", text: `Dispatching ${agent} via Sandcastle...` }] });
 			const run = await dispatch(ctx.cwd, agent, task, ctx);
 			return {

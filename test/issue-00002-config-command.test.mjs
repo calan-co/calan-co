@@ -5,6 +5,7 @@ import test from 'node:test';
 test('issue 00002 registers /sc:config and manages repo-local config', () => {
   const script = String.raw`
     import assert from 'node:assert/strict';
+    import { execFileSync as execFileSyncInner } from 'node:child_process';
     import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
     import { tmpdir } from 'node:os';
     import { join } from 'node:path';
@@ -25,7 +26,7 @@ test('issue 00002 registers /sc:config and manages repo-local config', () => {
 
     const cwd = mkdtempSync(join(tmpdir(), 'pi-sandcastle-config-'));
     const configDir = join(cwd, '.pi', 'sandcastle');
-    const configPath = join(configDir, 'agents.yaml');
+    const configPath = join(configDir, 'config.yaml');
     const runnerPath = join(configDir, 'run-job.mjs');
     mkdirSync(configDir, { recursive: true });
     const ctx = {
@@ -40,7 +41,6 @@ test('issue 00002 registers /sc:config and manages repo-local config', () => {
     writeFileSync(
       configPath,
       [
-        'defaultTeam: default',
         'defaultSandbox: docker',
         'defaultModel: custom-model',
         '',
@@ -53,7 +53,6 @@ test('issue 00002 registers /sc:config and manages repo-local config', () => {
         '    systemPrompt: |',
         '      Keep this edit.',
         '',
-        'teams:',
         '  default: [researcher]',
         '',
         'chains:',
@@ -72,33 +71,52 @@ test('issue 00002 registers /sc:config and manages repo-local config', () => {
       return notifications.map(({ message, type }) => ({ message, type }));
     };
 
-    const setupNotifications = await invoke('setup');
+    const configCompletions = commands.get('sc:config').getArgumentCompletions;
+    assert.ok(configCompletions);
+    assert.deepEqual(
+      configCompletions('get ').map((item) => item.value).filter((value) => ['get defaultModel', 'get defaultSandbox', 'get defaultAgent'].includes(value)).sort(),
+      ['get defaultAgent', 'get defaultModel', 'get defaultSandbox'],
+    );
+    assert.deepEqual(
+      configCompletions('get agents.implementer.').map((item) => item.label).sort(),
+      ['branch', 'description', 'maxIterations', 'model', 'provider', 'sandbox', 'systemPrompt'],
+    );
+    assert.deepEqual(
+      configCompletions('set defaultSandbox ').map((item) => item.label),
+      ['docker', 'podman', 'vercel', 'no-sandbox'],
+    );
+
+    const setupNotifications = await invoke('init');
     assert.equal(setupNotifications[0].type, 'success');
     assert.equal(readFileSync(configPath, 'utf8').includes('extraRoot: keep-me'), true);
+    assert.doesNotMatch(readFileSync(configPath, 'utf8'), /^pipelines:/m);
+    assert.match(readFileSync(configPath, 'utf8'), /^defaultPipeline:/m);
     assert.equal(existsSync(runnerPath), true);
+    execFileSyncInner(process.execPath, ['--check', runnerPath], { encoding: 'utf8' });
+
+    const forceNotifications = await invoke('init --force');
+    assert.equal(forceNotifications[0].type, 'success');
+    assert.match(forceNotifications[0].message, /Overwrote:/);
+    assert.equal(readFileSync(configPath, 'utf8').includes('extraRoot: keep-me'), false);
 
     const showNotifications = await invoke('');
     assert.equal(showNotifications[0].type, 'info');
-    assert.match(showNotifications[0].message, /"defaultTeam": "default"/);
-    assert.match(showNotifications[0].message, /"defaultModel": "custom-model"/);
-
-    const getNotifications = await invoke('get defaultTeam');
-    assert.deepEqual(getNotifications, [{ message: 'default', type: 'info' }]);
+    assert.doesNotMatch(showNotifications[0].message, /"defaultTeam"/);
+    assert.match(showNotifications[0].message, /"defaultModel": "Agent Default"/);
 
     const setNotifications = await invoke('set defaultModel claude-opus-4-8');
     assert.deepEqual(setNotifications, [{ message: 'Updated defaultModel.', type: 'success' }]);
     assert.match(readFileSync(configPath, 'utf8'), /defaultModel: claude-opus-4-8/);
-    assert.match(readFileSync(configPath, 'utf8'), /extraRoot: keep-me/);
 
     const resetNotifications = await invoke('reset defaultModel');
     assert.deepEqual(resetNotifications, [{ message: 'Reset defaultModel to defaults.', type: 'success' }]);
-    assert.match(readFileSync(configPath, 'utf8'), /defaultModel: claude-opus-4-8/);
+    assert.match(readFileSync(configPath, 'utf8'), /defaultModel: Agent Default/);
 
-    writeFileSync(configPath, readFileSync(configPath, 'utf8').replace('sandbox: docker', 'sandbox: spaceship'));
+    writeFileSync(configPath, readFileSync(configPath, 'utf8').replace('defaultSandbox: docker', 'defaultSandbox: spaceship'));
     rmSync(runnerPath);
     const validateNotifications = await invoke('validate');
     assert.equal(validateNotifications[0].type, 'error');
-    assert.match(validateNotifications[0].message, /unsupported sandbox provider 'spaceship'/i);
+    assert.match(validateNotifications[0].message, /sandbox provider 'spaceship' is unsupported/i);
     assert.match(validateNotifications[0].message, /Missing runner scaffold: \.pi\/sandcastle\/run-job\.mjs/);
 
     console.log(JSON.stringify({
@@ -106,7 +124,6 @@ test('issue 00002 registers /sc:config and manages repo-local config', () => {
       notifications: {
         setup: setupNotifications,
         show: showNotifications,
-        get: getNotifications,
         set: setNotifications,
         reset: resetNotifications,
         validate: validateNotifications,
@@ -126,5 +143,5 @@ test('issue 00002 registers /sc:config and manages repo-local config', () => {
   const result = JSON.parse(output);
   assert.equal(result.commandRegistered, true);
   assert.equal(result.notifications.setup[0].type, 'success');
-  assert.equal(result.notifications.get[0].message, 'default');
+  assert.equal(result.notifications.show[0].type, 'info');
 });

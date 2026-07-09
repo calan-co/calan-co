@@ -52,6 +52,15 @@ test('parsePlanArgs keeps query text separate from documented iteration flags', 
 
   assert.equal(parsed.query, 'auth bugs --dry-run');
   assert.equal(parsed.iterations, 3);
+  assert.equal(parsed.includeTerminal, false);
+});
+
+test('parsePlanArgs supports explicit terminal-state inclusion', () => {
+  const parsed = parsePlanArgs('archive --all --iterations=2');
+
+  assert.equal(parsed.query, 'archive');
+  assert.equal(parsed.iterations, 2);
+  assert.equal(parsed.includeTerminal, true);
 });
 
 test('buildBacklogPlan groups by dependency depth and preserves read-only behavior', async (t) => {
@@ -103,7 +112,7 @@ test('buildBacklogPlan groups by dependency depth and preserves read-only behavi
   assert.equal(plan.groups.length, 2);
   assert.equal(plan.groups[0].items[0].numericId, '00001');
   assert.match(rendered, /Iteration 1/);
-  assert.match(rendered, /Dependency notes:/);
+  assert.match(rendered, /\| ID\s+\| Title/);
   assert.match(rendered, /Overall recommended pipelines:/);
   assert.deepEqual(nextPlan, directPlan);
 });
@@ -161,6 +170,40 @@ test('buildBacklogPlan keeps dependency layers intact across iterations', async 
     plan.groups[1].items.map((item) => item.numericId),
     ['00004'],
   );
+});
+
+test('buildBacklogPlan excludes terminal work by default and recommends archive when included', async (t) => {
+  const repo = await makeBacklogRepo([
+    {
+      fileName: '00020-active.md',
+      content: backlogItem({
+        id: '00020',
+        title: 'Active work',
+        summary: 'Implementation work',
+        status: 'ready',
+      }),
+    },
+    {
+      fileName: '00021-closed.md',
+      content: backlogItem({
+        id: '00021',
+        title: 'Closed work',
+        summary: 'Finished work to archive',
+        status: 'done',
+      }),
+    },
+  ]);
+  cleanupRepo(t, repo);
+
+  const activeOnly = await buildBacklogPlan(repo, '');
+  const withTerminal = await buildBacklogPlan(repo, '--all');
+
+  assert.equal(activeOnly.matchedCount, 1);
+  assert.equal(activeOnly.excludedTerminalCount, 1);
+  assert.deepEqual(activeOnly.groups[0].items.map((item) => item.numericId), ['00020']);
+  assert.equal(withTerminal.matchedCount, 2);
+  assert.ok(withTerminal.recommendedPipelines.includes('archive'));
+  assert.equal(withTerminal.groups.flatMap((group) => group.items).find((item) => item.numericId === '00021').pipeline, 'archive');
 });
 
 test('buildBacklogPlan respects query filtering without mutating the tree', async (t) => {

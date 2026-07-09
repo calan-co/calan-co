@@ -20,8 +20,7 @@ function createFakePi() {
 
 function createTempRepoConfig() {
   return [
-    'defaultTeam: default',
-    'defaultSandbox: docker',
+        'defaultSandbox: docker',
     'defaultModel: claude-opus-4-8',
     '',
     'agents:',
@@ -34,7 +33,6 @@ function createTempRepoConfig() {
     '    sandbox: docker',
     '    model: claude-opus-4-8',
     '',
-    'teams:',
     '  default: [researcher, builder]',
     '',
     'chains:',
@@ -74,7 +72,7 @@ function createTempRepoConfig() {
 async function createRepo() {
   const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-sandcastle-'));
   await fs.mkdir(path.join(repoRoot, '.pi/sandcastle'), { recursive: true });
-  await fs.writeFile(path.join(repoRoot, '.pi/sandcastle/agents.yaml'), createTempRepoConfig(), 'utf8');
+  await fs.writeFile(path.join(repoRoot, '.pi/sandcastle/config.yaml'), createTempRepoConfig(), 'utf8');
   return repoRoot;
 }
 
@@ -202,7 +200,7 @@ test('/sc:pipeline rejects unknown pipelines with available options', async () =
 
   assert.equal(createWorktreeCalls, 0);
   assert.match(notifications.at(-1).message, /Unknown pipeline 'missing'/);
-  assert.match(notifications.at(-1).message, /Available pipelines: broken, implement/);
+  assert.match(notifications.at(-1).message, /Available pipelines: .*broken.*implement/);
 });
 
 test('/sc:pipeline records failed steps and stops after the first error', async () => {

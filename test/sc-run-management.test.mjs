@@ -69,6 +69,7 @@ test('piSandcastle registers only the updated /sc:* and /backlog:* slash-command
 
   const commands = JSON.parse(output.trim());
   assert.deepEqual(commands, [
+    'backlog:config',
     'backlog:inspect',
     'backlog:list',
     'backlog:next',
@@ -77,6 +78,7 @@ test('piSandcastle registers only the updated /sc:* and /backlog:* slash-command
     'backlog:resume',
     'backlog:runs',
     'backlog:status',
+    'sc:build-image',
     'sc:cancel',
     'sc:config',
     'sc:logs',

@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@ai-hero/sandcastle": "^0.12.0",
+    "@earendil-works/pi-tui": "^0.80.3",
     "@sinclair/typebox": "^0.34.49",
     "zod": "^4.4.3"
   },

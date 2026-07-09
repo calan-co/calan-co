@@ -1,10 +1,11 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const COMPLETED_STATUSES = new Set(['done', 'complete', 'completed', 'closed', 'merged', 'shipped']);
+const TERMINAL_STATUSES = new Set(['done', 'complete', 'completed', 'closed', 'merged', 'shipped', 'cancelled', 'canceled', 'archived', 'superseded']);
 const ANALYSIS_PIPELINE = 'research';
-const IMPLEMENTATION_PIPELINE = 'explore-plan-review';
-const PLAN_USAGE = 'Usage: /backlog:plan [query] --iterations <n>';
+const IMPLEMENTATION_PIPELINE = 'simple-loop';
+const ARCHIVE_PIPELINE = 'archive';
+const PLAN_USAGE = 'Usage: /backlog:plan [query] --iterations <n> [--all]';
 const RISK_HINT_PATTERN = /(process|resume|pipeline|run|branch|state|selection|durable)/;
 const ANALYSIS_RISK_PATTERN = /(plan|next|list|inspect|read-only|readonly|docs|documentation|prd)/;
 const ANALYSIS_PIPELINE_PATTERN = /(plan|next|list|inspect|read-only|readonly|docs|documentation|prd|research)/;
@@ -39,6 +40,7 @@ export function parsePlanArgs(rawArgs) {
   const tokens = splitCommandArgs(String(rawArgs ?? '').trim());
   const queryTokens = [];
   let iterations = 1;
+  let includeTerminal = false;
 
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i];
@@ -59,12 +61,17 @@ export function parsePlanArgs(rawArgs) {
       iterations = Number(value);
       continue;
     }
+    if (token === '--all' || token === '--include-terminal') {
+      includeTerminal = true;
+      continue;
+    }
     queryTokens.push(token);
   }
 
   return {
     query: queryTokens.join(' ').trim(),
     iterations: Math.max(1, Math.floor(iterations)),
+    includeTerminal,
   };
 }
 
@@ -216,7 +223,14 @@ function estimateRisk(item) {
   return risk;
 }
 
+function isTerminalStatus(status) {
+  return TERMINAL_STATUSES.has(String(status ?? '').toLowerCase());
+}
+
 function recommendPipeline(item) {
+  if (isTerminalStatus(item.status)) {
+    return ARCHIVE_PIPELINE;
+  }
   const text = describeItemText(item);
   if (ANALYSIS_PIPELINE_PATTERN.test(text)) {
     return ANALYSIS_PIPELINE;
@@ -318,7 +332,7 @@ export async function loadBacklogItems(cwd) {
   for (const item of items) {
     const internal = item.dependsOn.map((id) => index.get(id)).filter(Boolean);
     item.unresolvedDependencies = internal
-      .filter((dependency) => !COMPLETED_STATUSES.has(String(dependency.status).toLowerCase()))
+      .filter((dependency) => !isTerminalStatus(dependency.status))
       .map((dependency) => dependency.numericId);
     item.missingDependencies = item.dependsOn.filter((id) => !index.has(id));
     item.searchText = buildSearchText(item);
@@ -425,13 +439,16 @@ function makeGroup(depthRange, items) {
 }
 
 export async function buildBacklogPlan(cwd, rawArgs, overrides = {}) {
-  const { query, iterations } = parsePlanArgs(rawArgs);
+  const { query, iterations, includeTerminal } = parsePlanArgs(rawArgs);
   const requestedIterations = Math.max(1, Math.floor(overrides.iterations ?? iterations));
+  const shouldIncludeTerminal = Boolean(overrides.includeTerminal ?? includeTerminal);
   const allItems = await loadBacklogItems(cwd);
+  const activeItems = shouldIncludeTerminal ? allItems : allItems.filter((item) => !isTerminalStatus(item.status));
+  const excludedTerminalCount = allItems.length - activeItems.length;
   const queryTokens = splitCommandArgs(query).map((token) => token.toLowerCase()).filter(Boolean);
   const filtered = queryTokens.length === 0
-    ? allItems
-    : allItems.filter((item) => queryTokens.every((token) => item.searchText.includes(token)));
+    ? activeItems
+    : activeItems.filter((item) => queryTokens.every((token) => item.searchText.includes(token)));
 
   const index = new Map(allItems.map((item) => [item.numericId, item]));
   const memo = new Map();
@@ -456,6 +473,8 @@ export async function buildBacklogPlan(cwd, rawArgs, overrides = {}) {
       groups: [],
       dependencyNotes: ['- none'],
       recommendedPipelines: [],
+      includeTerminal: shouldIncludeTerminal,
+      excludedTerminalCount,
     };
   }
 
@@ -473,14 +492,32 @@ export async function buildBacklogPlan(cwd, rawArgs, overrides = {}) {
     groups,
     dependencyNotes,
     recommendedPipelines: overallPipelines,
+    includeTerminal: shouldIncludeTerminal,
+    excludedTerminalCount,
   };
+}
+
+function formatTable(rows) {
+  if (rows.length === 0) return '';
+  const widths = rows[0].map((_, index) => Math.max(...rows.map((row) => String(row[index] ?? '').length)));
+  return rows
+    .map((row, rowIndex) => {
+      const rendered = `| ${row.map((cell, index) => String(cell ?? '').padEnd(widths[index])).join(' | ')} |`;
+      if (rowIndex !== 0) return rendered;
+      const separator = `| ${widths.map((width) => '-'.repeat(width)).join(' | ')} |`;
+      return `${rendered}\n${separator}`;
+    })
+    .join('\n');
 }
 
 export function formatBacklogPlan(plan) {
   const lines = [];
-  lines.push(plan.query ? `Backlog plan for query: ${JSON.stringify(plan.query)}` : 'Backlog plan for all backlog items');
+  lines.push(plan.query ? `Backlog plan for query: ${JSON.stringify(plan.query)}` : 'Backlog plan for active backlog items');
   lines.push(`Requested iterations: ${plan.requestedIterations}`);
   lines.push(`Matched items: ${plan.matchedCount}`);
+  if (!plan.includeTerminal && plan.excludedTerminalCount > 0) {
+    lines.push(`Excluded terminal items: ${plan.excludedTerminalCount} (use --all to include)`);
+  }
   lines.push('');
 
   if (plan.groups.length === 0) {
@@ -491,27 +528,19 @@ export function formatBacklogPlan(plan) {
     const group = plan.groups[index];
     lines.push(`## Iteration ${index + 1}`);
     lines.push(`Rationale: ${group.rationale}`);
-    lines.push(`Dependency notes:`);
-    lines.push(...group.dependencyNotes);
     lines.push(`Recommended pipelines: ${group.recommendedPipelines.length > 0 ? group.recommendedPipelines.join(', ') : 'none'}`);
-    lines.push('Items:');
-
-    for (const item of group.items) {
-      lines.push(`- \`${item.numericId}\` ${item.title}`);
-      lines.push(`  - Status: ${item.status}`);
-      lines.push(`  - Depth: ${item.depth}`);
-      lines.push(`  - Risk: ${item.risk}`);
-      lines.push(`  - Pipeline fit: ${item.pipeline}`);
-      if (item.dependsOn.length > 0) {
-        lines.push(`  - Depends on: ${item.dependsOn.join(', ')}`);
-      }
-      if (item.unresolvedDependencies.length > 0) {
-        lines.push(`  - Blocked by: ${item.unresolvedDependencies.join(', ')}`);
-      }
-      if (item.missingDependencies.length > 0) {
-        lines.push(`  - Missing references: ${item.missingDependencies.join(', ')}`);
-      }
-    }
+    lines.push(formatTable([
+      ['ID', 'Title', 'Status', 'Depth', 'Risk', 'Pipeline', 'Blocked by'],
+      ...group.items.map((item) => [
+        item.numericId,
+        item.title,
+        item.status,
+        item.depth,
+        item.risk,
+        item.pipeline,
+        item.unresolvedDependencies.concat(item.missingDependencies.map((id) => `missing:${id}`)).join(', ') || '-',
+      ]),
+    ]));
 
     if (index < plan.groups.length - 1) {
       lines.push('');

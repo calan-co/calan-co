@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://calan.co/pi-extensions/schemas/pi-sandcastle/sandcastle-config.schema.json",
+  "title": "Pi Sandcastle Config",
+  "description": "Repo-local Pi Sandcastle, backlog, and agent configuration.",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "defaultSandbox": {
+      "$ref": "#/$defs/sandbox",
+      "description": "Default sandbox provider for agents and pipelines."
+    },
+    "defaultModel": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Default model reference used when an agent or pipeline does not override it. Use 'Agent Default' to defer to the selected agent provider."
+    },
+    "defaultPipeline": {
+      "type": "string",
+      "enum": ["blank", "simple-loop", "sequential-reviewer", "parallel-planner", "parallel-planner-with-review"]
+    },
+    "defaultAgent": {
+      "type": "string",
+      "enum": ["claude-code", "pi", "codex", "cursor", "opencode", "copilot"]
+    },
+    "issueTracker": {
+      "type": "string",
+      "enum": ["github-issues", "custom", "beads"]
+    },
+    "issueTrackerSetupCommand": {
+      "type": "string",
+      "minLength": 1
+    },
+    "imageNamePattern": {
+      "type": "string",
+      "minLength": 1
+    },
+    "agents": {
+      "type": "object",
+      "description": "Reusable execution identities consumed by Sandcastle pipelines and backlog commands.",
+      "additionalProperties": { "$ref": "#/$defs/agent" }
+    },
+    "pipelines": {
+      "type": "object",
+      "description": "Deterministic Sandcastle workflows composed from configured agents.",
+      "additionalProperties": { "$ref": "#/$defs/pipeline" }
+    },
+    "chains": {
+      "type": "object",
+      "description": "Deprecated compatibility field for older configs. Prefer pipelines.",
+      "deprecated": true,
+      "additionalProperties": {
+        "type": "array",
+        "items": { "$ref": "#/$defs/chainStep" }
+      }
+    }
+  },
+  "required": [] ,
+  "$defs": {
+    "sandbox": {
+      "type": "string",
+      "enum": ["docker", "podman", "vercel", "no-sandbox"]
+    },
+    "provider": {
+      "type": "string",
+      "enum": ["claude-code", "claude", "pi", "codex", "cursor", "opencode", "copilot"]
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "description": { "type": "string" },
+        "model": { "type": "string", "minLength": 1 },
+        "sandbox": { "$ref": "#/$defs/sandbox" },
+        "provider": { "$ref": "#/$defs/provider" },
+        "systemPrompt": { "type": "string" },
+        "maxIterations": { "type": "integer", "minimum": 1 },
+        "branch": { "type": "string" },
+        "copyToWorktree": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "branchStrategy": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "type": { "type": "string", "enum": ["branch", "merge-to-head"] },
+        "branch": { "type": "string" },
+        "baseBranch": { "type": "string" }
+      }
+    },
+    "pipelineStep": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "agent": { "type": "string" },
+        "prompt": { "type": "string" },
+        "sandbox": { "$ref": "#/$defs/sandbox" },
+        "model": { "type": "string", "minLength": 1 },
+        "maxIterations": { "type": "integer", "minimum": 1 },
+        "copyToWorktree": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "required": ["agent", "prompt"]
+    },
+    "pipeline": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "description": { "type": "string" },
+        "branchStrategy": { "$ref": "#/$defs/branchStrategy" },
+        "sandbox": { "$ref": "#/$defs/sandbox" },
+        "model": { "type": "string", "minLength": 1 },
+        "copyToWorktree": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "steps": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/pipelineStep" },
+          "minItems": 1
+        }
+      },
+      "required": ["steps"]
+    },
+    "chainStep": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "agent": { "type": "string" },
+        "prompt": { "type": "string" }
+      },
+      "required": ["agent", "prompt"]
+    }
+  }
+}

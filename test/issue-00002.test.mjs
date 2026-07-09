@@ -3,15 +3,15 @@ import { defineIssueDocumentTest } from './issue-document-test-helpers.mjs';
 const issueFileUrl = new URL('../backlog/00002-sandcastle-config-scaffolding-and-validation.md', import.meta.url);
 const prdFileUrl = new URL('../docs/prd/sandcastle-backlog-processing.md', import.meta.url);
 const configCommandUserStoryPattern =
-  /1\.\s+As a Pi user, I want one Sandcastle config command, so that setup, viewing, getting, setting, resetting, and validating config are organized consistently\./;
+  /1\.\s+As a Pi user, I want one Sandcastle config command, so that init, viewing, getting, setting, resetting, and validating config are organized consistently\./;
 const configAcceptanceCriteriaChecks = [
   {
     criterion: 'After reload, /sc:config is registered by the dev extension and /sc:config show displays effective repo config.',
     message: 'issue 00002 should require command registration and default show behavior',
   },
   {
-    criterion: '/sc:config setup creates missing .pi/sandcastle scaffold files and does not overwrite existing edited files without an explicit reset/force path.',
-    message: 'issue 00002 should require setup idempotency',
+    criterion: '/sc:config init creates missing .pi/sandcastle scaffold files and does not overwrite existing edited files without an explicit reset/force path.',
+    message: 'issue 00002 should require init idempotency',
   },
   {
     criterion: '/sc:config get <path> returns one value, and missing/unsupported paths return clear user-facing errors.',

@@ -83,9 +83,9 @@ const requiredDocsSnippets = [
     snippet: '.pi/sandcastle/results',
   },
   {
-    message: 'issue 00010 should document /sc:config setup semantics',
+    message: 'issue 00010 should document /sc:config init semantics',
     snippet:
-      '`/sc:config setup` hydrates missing repo-local files and prompt templates without overwriting existing edits.',
+      '`/sc:config init` hydrates missing repo-local files and prompt templates without overwriting existing edits.',
   },
   {
     message: 'issue 00010 should document fixed pipeline execution',
