@@ -5,6 +5,7 @@ Public monorepo for Calan & Co Pi extensions.
 ## Extensions
 
 - [`pi-sandcastle`](extensions/pi-sandcastle/README.md) — Pi-native delegation controls backed by Sandcastle sandboxes.
+- [`pi-rewind`](extensions/pi-rewind/README.md) — Shadow-Git-backed workspace checkpoints for Pi `/tree` and `/fork` rewind.
 
 ## Development
 
