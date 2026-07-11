@@ -410,6 +410,49 @@ export function validateHonchoSourceBeforeDelete(params: { expectedMessages: Reb
   return details;
 }
 
+export function buildHonchoDryRunReport(params: { expectedMessages: RebuildMessage[]; sourceMessages: any[]; targetMessages: any[]; sourceExists: boolean; targetExists: boolean; createTarget?: boolean; mergeTarget?: boolean }): { lines: string[]; validation: HonchoValidationDetails; overlapCount: number; transcriptMissingFromSource: number; would: string } {
+  const aligned = alignMigratedPayloadToSource(params.expectedMessages, params.sourceMessages);
+  const migrating = aligned.messages.map(normalizeExpectedMessage);
+  const source = params.sourceMessages.map(normalizeHonchoMessage);
+  const target = params.targetMessages.map(normalizeHonchoMessage);
+  const targetPeerContent = new Set(target.map(normalizedPeerContentFingerprint));
+  const overlapCount = migrating.filter((message) => targetPeerContent.has(normalizedPeerContentFingerprint(message))).length;
+  const expectedTarget = params.targetExists ? [...target, ...migrating] : migrating;
+  const validation = validateHonchoSourceBeforeDelete({ expectedMessages: aligned.messages, sourceMessages: params.sourceMessages, targetMessages: expectedTarget, expectedTargetMessages: expectedTarget });
+  if (!params.sourceExists) validation.abortReasons.push("source Honcho session does not exist");
+  if (params.targetExists && !params.mergeTarget) validation.abortReasons.push("target exists; execution requires --merge or interactive approval");
+  if (!params.targetExists && !params.createTarget) validation.abortReasons.push("target missing; execution requires --create or interactive approval");
+  if (overlapCount > 0) validation.abortReasons.push(`target already contains ${overlapCount} migrated message(s); execution would refuse to duplicate them`);
+  const sourceMatchedCount = aligned.matchedSourceIndexes.length;
+  const sourceResidualCount = Math.max(0, source.length - sourceMatchedCount);
+  validation.sourceTotalCount = source.length;
+  validation.sourceOwnedPresentCount = sourceMatchedCount;
+  validation.sourceMissingCount = aligned.missingCount;
+  validation.sourceResidualCount = sourceResidualCount;
+  const would = validation.abortReasons.length > 0 ? "leave source unchanged (execution would abort)" : sourceResidualCount > 0 ? `partition source Honcho, preserving ${sourceResidualCount} residual message(s)` : "delete source Honcho after target validation";
+  return {
+    validation,
+    overlapCount,
+    transcriptMissingFromSource: aligned.missingCount,
+    would,
+    lines: [
+      `Source Honcho exists: ${params.sourceExists ? "yes" : "no"}`,
+      `Target Honcho exists: ${params.targetExists ? "yes" : "no"}`,
+      `Source Honcho messages: ${source.length}`,
+      `Target Honcho messages: ${target.length}`,
+      `Pi transcript migratable messages: ${params.expectedMessages.length}`,
+      `Transcript messages matched in source Honcho: ${sourceMatchedCount}`,
+      `Transcript messages missing from source Honcho: ${aligned.missingCount}`,
+      `Target overlap / duplicate risk: ${overlapCount}`,
+      `Execution approval needed: ${params.targetExists ? (params.mergeTarget ? "none (--merge supplied)" : "--merge") : (params.createTarget ? "none (--create supplied)" : "--create")}`,
+      `Source action if executed: ${would}`,
+      `Expected final target count: ${expectedTarget.length}`,
+      `Expected final target hash: ${contentHash(expectedTarget)}`,
+      `Abort reasons: ${validation.abortReasons.length > 0 ? validation.abortReasons.join("; ") : "none"}`,
+    ],
+  };
+}
+
 
 type SessionEntry = {
   type: string;
@@ -1073,9 +1116,32 @@ async function executeMoveCommand(parsed: ParsedMoveCommand, ctx: any, options: 
   const dryRunMigrationId = `dry-run_${hash(`${sessionFile}:${destFile}`)}`;
   const rebuildMessages = buildWholeSessionRebuildMessages({ header, entries, sessionFile, migrationId: dryRunMigrationId, config: cfg });
 
+  if (fromHonchoKey === toHonchoKey) throw new Error(`Source and target Honcho session keys are identical: ${fromHonchoKey}`);
+  const { Honcho } = await import(HONCHO_SDK);
+  const honcho = new Honcho({
+    apiKey: runtime.apiKey,
+    baseURL: runtime.baseURL,
+    workspaceId: runtime.workspaceId,
+    environment: runtime.environment,
+  });
+
   if (parsed.dryRun) {
+    let honchoLines: string[];
+    try {
+      const [sourceExists, targetExists] = await Promise.all([
+        honchoSessionExists(honcho, fromHonchoKey),
+        honchoSessionExists(honcho, toHonchoKey),
+      ]);
+      const [sourceMessages, targetMessages] = await Promise.all([
+        sourceExists ? fetchHonchoMessages(honcho, fromHonchoKey) : Promise.resolve([]),
+        targetExists ? fetchHonchoMessages(honcho, toHonchoKey) : Promise.resolve([]),
+      ]);
+      honchoLines = buildHonchoDryRunReport({ expectedMessages: rebuildMessages, sourceMessages, targetMessages, sourceExists, targetExists, createTarget: parsed.createTarget, mergeTarget: parsed.mergeTarget }).lines;
+    } catch (error) {
+      honchoLines = [`Honcho read-only inspection failed: ${error instanceof Error ? error.message : String(error)}`];
+    }
     ctx.ui.notify([
-      "Dry run: whole-session move plan (no files or memory sessions mutated).",
+      "Dry run: whole-session move preflight (no Pi or Honcho mutations).",
       `current: ${isCurrent ? "yes" : "no"}`,
       `Pi: ${sessionFile}`,
       ` -> ${destFile}`,
@@ -1085,20 +1151,15 @@ async function executeMoveCommand(parsed: ParsedMoveCommand, ctx: any, options: 
       `Honcho baseURL: ${runtime.baseURL ?? "(default)"}`,
       `Memory: ${fromHonchoKey}`,
       ` -> ${toHonchoKey}`,
-      `Rebuild messages: ${rebuildMessages.length}`,
-      `Rebuild hash: ${hashRebuildMessages(rebuildMessages)}`,
+      `Transcript rebuild messages: ${rebuildMessages.length}`,
+      `Transcript rebuild hash: ${hashRebuildMessages(rebuildMessages)}`,
+      "",
+      "Honcho read-only comparison:",
+      ...honchoLines,
     ].join("\n"), "info");
     return;
   }
 
-  if (fromHonchoKey === toHonchoKey) throw new Error(`Source and target Honcho session keys are identical: ${fromHonchoKey}`);
-  const { Honcho } = await import(HONCHO_SDK);
-  const honcho = new Honcho({
-    apiKey: runtime.apiKey,
-    baseURL: runtime.baseURL,
-    workspaceId: runtime.workspaceId,
-    environment: runtime.environment,
-  });
   if (!(await honchoSessionExists(honcho, fromHonchoKey))) throw new Error(`Source Honcho session does not exist: ${fromHonchoKey}`);
   const targetExists = await honchoSessionExists(honcho, toHonchoKey);
   if (targetExists && !parsed.mergeTarget) {

@@ -90,6 +90,25 @@ async function testTargetExistsRefuses() {
   assert.equal(honcho.sessionsMap.has('source'), true);
 }
 
+async function testDryRunReportIncludesHonchoComparisonData() {
+  const transcript = sampleMessages();
+  const report = mod.buildHonchoDryRunReport({
+    expectedMessages: transcript,
+    sourceExists: true,
+    targetExists: true,
+    mergeTarget: true,
+    sourceMessages: [{ peerId: transcript[0].peerId, content: transcript[0].content, createdAt: transcript[0].createdAt }],
+    targetMessages: [{ peerId: 'pi', content: 'existing target', createdAt: '2026-01-01T00:00:00.000Z' }],
+  });
+  const text = report.lines.join('\n');
+  assert.match(text, /Source Honcho exists: yes/);
+  assert.match(text, /Target Honcho exists: yes/);
+  assert.match(text, /Pi transcript migratable messages: 2/);
+  assert.match(text, /Transcript messages matched in source Honcho: 1/);
+  assert.match(text, /Transcript messages missing from source Honcho: 1/);
+  assert.match(text, /Execution approval needed: none \(--merge supplied\)/);
+}
+
 async function testSourceMissingTranscriptMessageUsesPiPayloadAndDoesNotBlock() {
   const transcript = sampleMessages();
   const sourceMessages = [{ peerId: transcript[0].peerId, content: transcript[0].content, createdAt: '2026-01-01T00:10:00.000Z' }];
@@ -194,6 +213,7 @@ async function main() {
   await testDuplicateTargetFingerprintSourceRemains();
   await testPostMigrationSourceMessageMissingFromTargetSourceRemains();
   await testTargetExistsRefuses();
+  await testDryRunReportIncludesHonchoComparisonData();
   await testSourceMissingTranscriptMessageUsesPiPayloadAndDoesNotBlock();
   await testMergeExistingTargetPreservesTargetAndPartitionsSource();
   await testManifestTransitions();
