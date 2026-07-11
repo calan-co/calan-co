@@ -1117,7 +1117,20 @@ async function executeMoveCommand(parsed: ParsedMoveCommand, ctx: any, options: 
   await ensureDirectoryForMove(targetDir, ctx, parsed.dryRun);
   const targetPiWorkspace = piWorkspaceDir(targetDir);
   if (!parsed.dryRun && !existsSync(targetPiWorkspace)) await mkdir(targetPiWorkspace, { recursive: true });
-  if (existsSync(destFile)) throw new Error(`Target Pi session file already exists: ${destFile}`);
+  if (existsSync(destFile)) {
+    const sameFile = await realpath(sessionFile).catch(() => sessionFile) === await realpath(destFile).catch(() => destFile);
+    if (sameFile) {
+      const message = `Session is already at target path: ${destFile}`;
+      if (isCurrent && typeof ctx.switchSession === "function") {
+        const result = await ctx.switchSession(destFile, { withSession: async (newCtx: any) => newCtx.ui.notify(message, "info") });
+        if (result?.cancelled) ctx.ui.notify(`${message}\nSwitch was cancelled. Resume manually with: pi --session ${destFile}`, "warning");
+        return;
+      }
+      ctx.ui.notify(message, "info");
+      return;
+    }
+    throw new Error(`Target Pi session file already exists: ${destFile}`);
+  }
 
   const cfg = JSON.parse(await readFile(HONCHO_CONFIG, "utf8")) as HonchoConfig;
   const runtime = honchoRuntimeConfig(cfg);
