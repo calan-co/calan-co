@@ -18,11 +18,25 @@
   },
   "dependencies": {
     "@ai-hero/sandcastle": "^0.12.0",
+    "@earendil-works/pi-ai": "0.80.5",
     "@earendil-works/pi-tui": "^0.80.3",
     "@sinclair/typebox": "^0.34.49",
+    "@sting8k/pi-vcc": "^0.4.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "tsx": "^4.23.0"
+  },
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/handoff/index.ts",
+      "extensions/pi-autoname/index.ts",
+      "extensions/pi-rewind/index.ts",
+      "extensions/pi-sandcastle/index.ts",
+      "extensions/session-move/index.ts"
+    ]
   }
 }
