@@ -1186,8 +1186,9 @@ async function executeMoveCommand(parsed: ParsedMoveCommand, ctx: any, options: 
     return;
   }
 
-  if (!(await honchoSessionExists(honcho, fromHonchoKey))) throw new Error(`Source Honcho session does not exist: ${fromHonchoKey}`);
+  const sourceExists = await honchoSessionExists(honcho, fromHonchoKey);
   const targetExists = await honchoSessionExists(honcho, toHonchoKey);
+  if (!sourceExists && !(targetExists && parsed.mergeTarget)) throw new Error(`Source Honcho session does not exist: ${fromHonchoKey}`);
   if (targetExists && !parsed.mergeTarget) {
     if (!ctx.hasUI) throw new Error(`Target Honcho session exists: ${toHonchoKey}. Re-run with --merge to approve preserving existing target messages and adding this session.`);
     const mergeOk = await ctx.ui.confirm("Merge into existing Honcho session?", `Target Honcho session exists:\n${toHonchoKey}\n\nExisting messages will be preserved and moved messages will be added only after duplicate checks pass.`);
@@ -1219,7 +1220,7 @@ async function executeMoveCommand(parsed: ParsedMoveCommand, ctx: any, options: 
   try {
     const migrationStartedAt = new Date().toISOString();
     const transcriptMessages = buildWholeSessionRebuildMessages({ header, entries, sessionFile, migrationId: migration.migrationId, config: cfg });
-    const sourceMessagesBeforeTargetWrite = await fetchHonchoMessages(honcho, fromHonchoKey);
+    const sourceMessagesBeforeTargetWrite = await fetchHonchoMessagesIfExists(honcho, fromHonchoKey) ?? [];
     const aligned = alignMigratedPayloadToSource(transcriptMessages, sourceMessagesBeforeTargetWrite);
     const messages = aligned.messages;
     const sourceBackupFile = join(migration.migrationDir, "source-honcho-backup.json");
@@ -1360,6 +1361,15 @@ async function fetchHonchoMessages(honcho: any, key: string): Promise<any[]> {
   return pageToArray(await (await honcho.session(key)).messages({ size: 100 }));
 }
 
+async function fetchHonchoMessagesIfExists(honcho: any, key: string): Promise<any[] | null> {
+  try {
+    return await fetchHonchoMessages(honcho, key);
+  } catch (error) {
+    if (error instanceof Error && /not found/i.test(error.message)) return null;
+    throw error;
+  }
+}
+
 async function addHonchoMessages(honcho: any, session: any, messages: NormalizedHonchoMessage[]): Promise<void> {
   const peerCache = new Map<string, any>();
   const getPeer = async (id: string) => {
@@ -1377,7 +1387,11 @@ async function addHonchoMessages(honcho: any, session: any, messages: Normalized
 }
 
 async function sourceSessionBase(honcho: any, sourceKey: string): Promise<{ metadata: Record<string, unknown>; configuration: Record<string, unknown> }> {
-  const source = await honcho.session(sourceKey);
+  let source: any;
+  try { source = await honcho.session(sourceKey); } catch (error) {
+    if (error instanceof Error && /not found/i.test(error.message)) return { metadata: {}, configuration: {} };
+    throw error;
+  }
   let metadata: Record<string, unknown> = {};
   let configuration: Record<string, unknown> = {};
   try { metadata = await source.getMetadata(); } catch { metadata = {}; }
@@ -1422,10 +1436,11 @@ export async function writeHonchoTargetFromTranscript(params: { honcho: any; key
 }
 
 export async function validateHonchoSessionsBeforeSourceDelete(params: { honcho: any; sourceKey: string; targetKey: string; expectedTargetCount?: number; expectedMessages: RebuildMessage[]; expectedTargetMessages?: NormalizedHonchoMessage[]; migrationStartedAt?: string }) {
-  const [targetMessages, sourceMessages] = await Promise.all([
+  const [targetMessages, sourceMessagesMaybe] = await Promise.all([
     fetchHonchoMessages(params.honcho, params.targetKey),
-    fetchHonchoMessages(params.honcho, params.sourceKey),
+    fetchHonchoMessagesIfExists(params.honcho, params.sourceKey),
   ]);
+  const sourceMessages = sourceMessagesMaybe ?? [];
   const validation = validateHonchoSourceBeforeDelete({ expectedMessages: params.expectedMessages, sourceMessages, targetMessages, expectedTargetMessages: params.expectedTargetMessages, migrationStartedAt: params.migrationStartedAt });
   if (typeof params.expectedTargetCount === "number" && validation.actualTargetCount !== params.expectedTargetCount) {
     validation.abortReasons.push(`target count changed: expected ${params.expectedTargetCount}, got ${validation.actualTargetCount}`);
@@ -1434,7 +1449,11 @@ export async function validateHonchoSessionsBeforeSourceDelete(params: { honcho:
 }
 
 export async function finalizeHonchoSourceAfterTargetValidated(params: { honcho: any; sourceKey: string; targetKey: string; config: HonchoConfig; expectedTargetCount?: number; expectedMessages: RebuildMessage[]; expectedTargetMessages?: NormalizedHonchoMessage[]; migrationStartedAt?: string; sourceBackupFile?: string }) {
-  const sourceMessagesRaw = await fetchHonchoMessages(params.honcho, params.sourceKey);
+  const sourceMessagesRaw = await fetchHonchoMessagesIfExists(params.honcho, params.sourceKey);
+  if (sourceMessagesRaw === null) {
+    const validation = await validateHonchoSessionsBeforeSourceDelete({ ...params, expectedMessages: params.expectedMessages });
+    return { ...validation, sourceTotalCount: 0, sourceOwnedPresentCount: 0, sourceMissingCount: params.expectedMessages.length, sourceResidualCount: 0 };
+  }
   const aligned = alignMigratedPayloadToSource(params.expectedMessages, sourceMessagesRaw);
   const validation = await validateHonchoSessionsBeforeSourceDelete({ ...params, expectedMessages: aligned.messages });
   if (validation.abortReasons.length > 0) {
