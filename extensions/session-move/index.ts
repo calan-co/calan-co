@@ -515,13 +515,21 @@ type ParsedMoveCommand = {
 
 type ParsedTurnsCommand = {
   kind: "turns";
-  sessionToken: string;
+  sessionToken?: string;
   query?: string;
   json: boolean;
   pick: boolean;
 };
 
-type ParsedSessionSubcommand = ParsedMoveCommand | ParsedTurnsCommand;
+type ParsedSplitCommand = {
+  kind: "split";
+  sessionToken?: string;
+  turnRef?: string;
+  continuePart?: "head" | "tail";
+  dryRun: boolean;
+};
+
+type ParsedSessionSubcommand = ParsedMoveCommand | ParsedTurnsCommand | ParsedSplitCommand;
 
 function tokenizeArgs(input: string): string[] {
   const tokens: string[] = [];
@@ -558,11 +566,11 @@ function looksLikeSessionToken(token: string | undefined): boolean {
   return /^[a-f0-9-]{6,}$/i.test(token);
 }
 
-function parseSessionSubcommand(args: string): ParsedSessionSubcommand {
+export function parseSessionSubcommand(args: string): ParsedSessionSubcommand {
   const tokens = tokenizeArgs(args);
   const [subcommand] = tokens;
   if (subcommand === "turns") {
-    let sessionToken = "current";
+    let sessionToken: string | undefined;
     let json = false;
     let pick = false;
     const positional: string[] = [];
@@ -576,6 +584,34 @@ function parseSessionSubcommand(args: string): ParsedSessionSubcommand {
     return { kind: "turns", sessionToken, query, json, pick };
   }
 
+  if (subcommand === "split") {
+    let sessionToken: string | undefined;
+    let dryRun = false;
+    let continuePart: ParsedSplitCommand["continuePart"];
+    let explicitTurnRef: string | undefined;
+    const positional: string[] = [];
+    for (let i = 1; i < tokens.length; i++) {
+      const token = tokens[i];
+      if (token === "--dry-run") { dryRun = true; continue; }
+      if (token === "--continue") {
+        const policy = tokens[++i];
+        if (policy !== "head" && policy !== "tail") throw new Error("--continue must be one of: head, tail");
+        continuePart = policy;
+        continue;
+      }
+      if (token === "--turn") {
+        const value = tokens[++i];
+        if (!value) continue;
+        explicitTurnRef = value;
+        continue;
+      }
+      positional.push(token);
+    }
+    if (looksLikeSessionToken(positional[0])) sessionToken = positional.shift()!;
+    const turnRef = explicitTurnRef ?? (positional.length > 0 ? positional.join(" ").trim() : undefined);
+    return { kind: "split", sessionToken, turnRef, continuePart, dryRun };
+  }
+
   if (subcommand === "move") {
     let sessionToken: string | undefined;
     let targetDir: string | undefined;
@@ -584,42 +620,27 @@ function parseSessionSubcommand(args: string): ParsedSessionSubcommand {
     let createTarget = false;
     let mergeTarget = false;
     let continuePolicy: ParsedMoveCommand["continuePolicy"];
-    let explicitTurnRef: string | undefined;
-    const trailing: string[] = [];
     const positional: string[] = [];
     for (let i = 1; i < tokens.length; i++) {
       const token = tokens[i];
       if (token === "--dry-run") { dryRun = true; continue; }
       if (token === "--create") { createTarget = true; continue; }
       if (token === "--merge") { mergeTarget = true; continue; }
-      if (token === "--split") { splitRequested = true; continue; }
+      if (token === "--split" || token === "--turn") {
+        throw new Error("Split is now a separate command. Use /session split [session] [--turn <turn>] [--continue head|tail].");
+      }
       if (token === "--continue") {
-        const policy = tokens[++i];
-        if (policy !== "source" && policy !== "target") throw new Error("--continue must be one of: source, target");
-        continuePolicy = policy;
-        continue;
-      }
-      if (token === "--turn") {
-        const value = tokens[++i];
-        if (!value) { splitRequested = true; continue; }
-        explicitTurnRef = value;
-        splitRequested = true;
-        continue;
-      }
-      if (token === "split" && tokens[i + 1] === "from") {
-        throw new Error("Use /session move <session> <target-dir> [<turn-ref-or-query>] or --turn <turn-ref>; legacy split syntax is no longer supported.");
+        throw new Error("--continue is only valid for /session split. Use --continue head|tail there.");
       }
       positional.push(token);
     }
-    sessionToken = positional.shift();
+    if (positional.length >= 2) sessionToken = positional.shift();
     targetDir = positional.shift();
-    trailing.push(...positional);
-    const turnRef = explicitTurnRef ?? (trailing.length > 0 ? trailing.join(" ").trim() : undefined);
-    if (turnRef) splitRequested = true;
-    return { kind: "move", sessionToken, targetDir, turnRef, splitRequested, continuePolicy, dryRun, createTarget, mergeTarget };
+    if (positional.length > 0) throw new Error(`Unexpected extra argument(s) for /session move: ${positional.join(" ")}`);
+    return { kind: "move", sessionToken, targetDir, splitRequested, continuePolicy, dryRun, createTarget, mergeTarget };
   }
 
-  throw new Error("Usage: /session turns [current|session-id|session-file] [query...] [--json] [--pick] | /session move <current|session-id|session-file> <target-dir> [<turn-ref-or-query>] [--turn <turn-ref>] [--continue source|target]");
+  throw new Error("Usage: /session turns [session] [query...] [--json] [--pick] | /session split [session] [--turn <turn-ref>] [--continue head|tail] [--dry-run] | /session move [session] <target-dir> [--create] [--merge] [--dry-run]");
 }
 function messageText(content: unknown): string {
   if (typeof content === "string") return content;
@@ -818,8 +839,8 @@ async function pickSplitTurn(turns: TurnInfo[], ctx: any): Promise<TurnInfo | un
   return eligibleTurns.find((turn) => String(turn.turnId) === id);
 }
 
-async function loadEntriesForToken(token: string, ctx: any): Promise<{ sessionFile?: string; entries: SessionEntry[] }> {
-  if (token === "current") {
+async function loadEntriesForToken(token: string | undefined, ctx: any): Promise<{ sessionFile?: string; entries: SessionEntry[] }> {
+  if (!token || token === "current") {
     return { sessionFile: ctx.sessionManager.getSessionFile(), entries: ctx.sessionManager.getBranch() as SessionEntry[] };
   }
   const sessionFile = await findSession(token);
@@ -891,7 +912,8 @@ function staticSessionCompletions(argumentText: string): AutocompleteSuggestions
 
   if (tokens.length === 0 || (tokens.length === 1 && !hasTrailingSpace)) {
     const items = filterCompletionItems([
-      { value: "move", label: "move", description: "Move or split-move a session" },
+      { value: "move", label: "move", description: "Move a session to a directory scope" },
+      { value: "split", label: "split", description: "Split a session into head/tail parts" },
       { value: "turns", label: "turns", description: "List, pick, or resolve user-message turn ids" },
     ], prefix);
     return items.length > 0 ? { items, prefix } : null;
@@ -900,18 +922,32 @@ function staticSessionCompletions(argumentText: string): AutocompleteSuggestions
   if (first === "move") {
     const position = tokens.length - 1 + (hasTrailingSpace ? 1 : 0);
     const items: AutocompleteItem[] = [];
-    if (position === 1) items.push({ value: "current", label: "current", description: "The active session" });
-    else if (position >= 3) {
-      if (!tokens.includes("--turn")) items.push({ value: "--turn", label: "--turn", description: "Provide an explicit turn id, entry id, or query" });
-      if (!tokens.includes("--continue")) items.push({ value: "--continue", label: "--continue", description: "Continuation policy: source or target" });
+    if (position === 1) items.push({ value: "current", label: "current", description: "Optional; omitted means active session" });
+    else if (position >= 2) {
       if (!tokens.includes("--create")) items.push({ value: "--create", label: "--create", description: "Approve creating a missing target Honcho session" });
       if (!tokens.includes("--merge")) items.push({ value: "--merge", label: "--merge", description: "Approve merging into an existing target Honcho session" });
+      if (!tokens.includes("--dry-run")) items.push({ value: "--dry-run", label: "--dry-run", description: "Parse and resolve only; do not mutate" });
+    }
+    const filtered = filterCompletionItems(items, prefix);
+    return filtered.length > 0 ? { items: filtered, prefix } : null;
+  }
+
+  if (first === "split") {
+    const position = tokens.length - 1 + (hasTrailingSpace ? 1 : 0);
+    const items: AutocompleteItem[] = [];
+    if (position === 1) items.push(
+      { value: "current", label: "current", description: "Optional; omitted means active session" },
+      { value: "--turn", label: "--turn", description: "Provide turn id, entry id, or query; omitted opens picker in TUI" },
+    );
+    else {
+      if (!tokens.includes("--turn")) items.push({ value: "--turn", label: "--turn", description: "Provide turn id, entry id, or query; omitted opens picker in TUI" });
+      if (!tokens.includes("--continue")) items.push({ value: "--continue", label: "--continue", description: "Continuation part: head or tail" });
       if (!tokens.includes("--dry-run")) items.push({ value: "--dry-run", label: "--dry-run", description: "Parse and resolve only; do not mutate" });
       if (tokens[tokens.length - 1] === "--continue") {
         items.length = 0;
         items.push(
-          { value: "source", label: "source" },
-          { value: "target", label: "target" },
+          { value: "tail", label: "tail", description: "Part 2: split turn and after (default)" },
+          { value: "head", label: "head", description: "Part 1: before split turn" },
         );
       }
     }
@@ -964,18 +1000,20 @@ function createSessionAutocompleteProvider(current: AutocompleteProvider): Autoc
 function moveHelpText(): string {
   return [
     "Usage:",
-    "  /session move <current|session-id|session-file> <target-dir> [<turn-ref-or-query>] [--turn <turn-ref>] [--continue source|target] [--create] [--merge] [--dry-run]",
-    "  /session move --split",
-    "  /session:move <current|session-id|session-file> <target-dir> [<turn-ref-or-query>] [--turn <turn-ref>] [--continue source|target] [--create] [--merge] [--dry-run]",
+    "  /session move [session] <target-dir> [--create] [--merge] [--dry-run]",
+    "  /session:move [session] <target-dir> [--create] [--merge] [--dry-run]",
+    "Notes:",
+    "  If [session] is omitted, the current session is moved.",
+    "  Splitting is a separate command: /session split [session] [--turn <turn>] [--continue head|tail].",
     "Examples:",
-    "  /session move current ~/ --dry-run",
-    "  /session move current ~/ --turn 12 --continue target",
+    "  /session move ~/dev/pi-extensions --dry-run",
+    "  /session move 019f4e16 ~/dev/pi-extensions --create",
   ].join("\n");
 }
 
-async function resolveSessionFileForMove(token: string, ctx: any): Promise<{ sessionFile: string; isCurrent: boolean }> {
+async function resolveSessionFileForMove(token: string | undefined, ctx: any): Promise<{ sessionFile: string; isCurrent: boolean }> {
   const active = ctx.sessionManager.getSessionFile();
-  if (token === "current") {
+  if (!token || token === "current") {
     if (!active) throw new Error("Current Pi session is not persisted; cannot move it.");
     return { sessionFile: active, isCurrent: true };
   }
@@ -1036,38 +1074,15 @@ export async function createMoveManifest(params: { sessionFile: string; destFile
 }
 
 async function completeMoveCommand(parsed: ParsedMoveCommand, ctx: any): Promise<ParsedMoveCommand | null> {
-  if (parsed.sessionToken && parsed.targetDir && (!parsed.splitRequested || parsed.turnRef) && (parsed.sessionToken !== "current" || parsed.continuePolicy || !parsed.splitRequested)) return parsed;
+  if (parsed.targetDir) return parsed;
   if (!ctx.hasUI) {
     ctx.ui.notify(moveHelpText(), "warning");
     return null;
   }
   const next: ParsedMoveCommand = { ...parsed };
-  if (!next.sessionToken) {
-    const active = ctx.sessionManager.getSessionFile();
-    const options = active ? ["current", "Enter session id/file"] : ["Enter session id/file"];
-    const picked = await ctx.ui.select("Move which session?", options);
-    if (!picked) return null;
-    next.sessionToken = picked === "Enter session id/file" ? await ctx.ui.input("Session id or file:", "current | session id | /path/to/session.jsonl") : picked;
-    if (!next.sessionToken) return null;
-  }
-  if (!next.targetDir) {
-    const target = await ctx.ui.input("Target path:", "~/target-project");
-    if (!target) return null;
-    next.targetDir = target;
-  }
-  if (next.splitRequested && !next.turnRef) {
-    const { sessionFile, isCurrent } = await resolveSessionFileForMove(next.sessionToken, ctx);
-    const sessionManager = isCurrent ? null : await SessionManager.open(sessionFile);
-    const entries = (isCurrent ? ctx.sessionManager.getBranch() : sessionManager!.getBranch()) as SessionEntry[];
-    const pickedTurn = await pickSplitTurn(buildTurnList(entries), ctx);
-    if (!pickedTurn) return null;
-    next.turnRef = pickedTurn.entryId;
-  }
-  if (next.sessionToken === "current" && next.splitRequested && !next.continuePolicy) {
-    const policy = await ctx.ui.select("Continue after split in:", ["source", "target"]);
-    if (policy !== "source" && policy !== "target") return null;
-    next.continuePolicy = policy;
-  }
+  const target = await ctx.ui.input("Target path:", "~/target-project");
+  if (!target) return null;
+  next.targetDir = target;
   return next;
 }
 
@@ -1079,20 +1094,31 @@ function formatMoveCommand(parsed: ParsedMoveCommand, command = "/session:move")
   const parts = [command];
   if (parsed.sessionToken) parts.push(quoteCommandArg(parsed.sessionToken));
   if (parsed.targetDir) parts.push(quoteCommandArg(parsed.targetDir));
-  if (parsed.splitRequested && !parsed.turnRef) parts.push("--split");
-  if (parsed.turnRef) parts.push("--turn", quoteCommandArg(parsed.turnRef));
-  if (parsed.continuePolicy) parts.push("--continue", parsed.continuePolicy);
   if (parsed.createTarget) parts.push("--create");
   if (parsed.mergeTarget) parts.push("--merge");
   if (parsed.dryRun) parts.push("--dry-run");
   return parts.join(" ");
 }
 
+export async function runSessionMutationSafetyGate(params: { ctx: any; sessionFile: string; isCurrent: boolean; operation: "move" | "split"; dryRun?: boolean }) {
+  const checkedAt = new Date().toISOString();
+  if (params.dryRun) return { checkedAt, skipped: true, reason: "dry-run" };
+  if (typeof params.ctx.waitForIdle !== "function") {
+    throw new Error(`${params.operation} requires Pi idle/quiescence support before mutating sessions. Re-run from Pi command context after all work is idle.`);
+  }
+  await params.ctx.waitForIdle();
+  if (params.ctx.hasPendingMessages?.()) throw new Error(`Cannot ${params.operation} while Pi has pending messages.`);
+  // Honcho uploads are asynchronous after agent_end; use a bounded quiescence window for all mutating calls.
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  if (params.ctx.hasPendingMessages?.()) throw new Error(`Cannot ${params.operation}: messages became pending during quiescence window.`);
+  return { checkedAt, skipped: false, operation: params.operation, sessionFile: params.sessionFile, isCurrent: params.isCurrent };
+}
+
 async function executeMoveCommand(parsed: ParsedMoveCommand, ctx: any, options: { rerouteCurrentToCommand?: (command: string) => Promise<void> } = {}): Promise<void> {
   const completed = await completeMoveCommand(parsed, ctx);
   if (!completed) return;
   parsed = completed;
-  if (!parsed.sessionToken || !parsed.targetDir) throw new Error(moveHelpText());
+  if (!parsed.targetDir) throw new Error(moveHelpText());
   const { sessionFile, isCurrent } = await resolveSessionFileForMove(parsed.sessionToken, ctx);
   const { header, lines } = await readHeader(sessionFile);
   const targetDir = resolveTargetDir(parsed.targetDir, ctx.cwd);
@@ -1138,18 +1164,15 @@ async function executeMoveCommand(parsed: ParsedMoveCommand, ctx: any, options: 
   const toHonchoKey = await deriveHonchoSessionKey(targetDir, cfg);
   const entries = isCurrent ? ctx.sessionManager.getBranch() as SessionEntry[] : (await SessionManager.open(sessionFile)).getBranch() as SessionEntry[];
 
-  if (isCurrent && !parsed.dryRun) {
-    if (typeof ctx.waitForIdle !== "function" || typeof ctx.switchSession !== "function") {
+  if (!parsed.dryRun) {
+    if (isCurrent && typeof ctx.switchSession !== "function") {
       if (options.rerouteCurrentToCommand) {
         await options.rerouteCurrentToCommand(formatMoveCommand(parsed, "/session:move"));
         return;
       }
       throw new Error("Current-session move requires Pi command context. Recovery: run " + formatMoveCommand(parsed, "/session:move"));
     }
-    await ctx.waitForIdle();
-    if (ctx.hasPendingMessages?.()) throw new Error("Cannot move current session while messages are pending.");
-    // The Honcho extension may upload asynchronously after agent_end. Give the queue a bounded quiescence window.
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await runSessionMutationSafetyGate({ ctx, sessionFile, isCurrent, operation: "move", dryRun: parsed.dryRun });
   }
 
   const dryRunMigrationId = `dry-run_${hash(`${sessionFile}:${destFile}`)}`;
@@ -1320,10 +1343,71 @@ async function executeMoveCommand(parsed: ParsedMoveCommand, ctx: any, options: 
   ctx.ui.notify(log.join("\n"), "info");
 }
 
+function splitHelpText(): string {
+  return [
+    "Usage:",
+    "  /session split [session] [--turn <turn-ref-or-query>] [--continue head|tail] [--dry-run]",
+    "  /session:split [session] [--turn <turn-ref-or-query>] [--continue head|tail] [--dry-run]",
+    "Notes:",
+    "  head = turns before the split point (part 1)",
+    "  tail = the split turn and everything after it (part 2, default continuation)",
+    "  If --turn is omitted in TUI mode, a turn picker is shown.",
+    "Examples:",
+    "  /session split",
+    "  /session split --turn 12 --continue tail",
+    "  /session split 019f4e16 --turn 12 --dry-run",
+  ].join("\n");
+}
+
+async function completeSplitCommand(parsed: ParsedSplitCommand, ctx: any): Promise<ParsedSplitCommand | null> {
+  const next: ParsedSplitCommand = { ...parsed };
+  if (!next.turnRef) {
+    if (!ctx.hasUI) throw new Error(splitHelpText());
+    const { entries } = await loadEntriesForToken(next.sessionToken, ctx);
+    const pickedTurn = await pickSplitTurn(buildTurnList(entries), ctx);
+    if (!pickedTurn) return null;
+    next.turnRef = pickedTurn.entryId;
+  }
+  if (!next.continuePart) next.continuePart = "tail";
+  return next;
+}
+
+async function executeSplitCommand(parsed: ParsedSplitCommand, ctx: any): Promise<void> {
+  const completed = await completeSplitCommand(parsed, ctx);
+  if (!completed) return;
+  parsed = completed;
+  if (!parsed.turnRef) throw new Error(splitHelpText());
+  const { sessionFile, isCurrent } = await resolveSessionFileForMove(parsed.sessionToken, ctx);
+  const sessionManager = isCurrent ? null : await SessionManager.open(sessionFile);
+  const entries = (isCurrent ? ctx.sessionManager.getBranch() : sessionManager!.getBranch()) as SessionEntry[];
+  const turns = buildTurnList(entries);
+  const resolved = resolveTurnRef(turns, parsed.turnRef, { requireEligible: true });
+  const headTurns = turns.filter((turn) => turn.turnId < resolved.turnId).length;
+  const tailTurns = turns.filter((turn) => turn.turnId >= resolved.turnId).length;
+
+  if (!parsed.dryRun) await runSessionMutationSafetyGate({ ctx, sessionFile, isCurrent, operation: "split", dryRun: parsed.dryRun });
+
+  ctx.ui.notify([
+    parsed.dryRun ? "Dry run: split preflight (no Pi or Honcho mutations)." : "Parsed split command; mutation engine is not enabled yet after safety gate.",
+    `session: ${parsed.sessionToken ?? "current"} (${sessionFile})`,
+    `splitTurnRef: ${parsed.turnRef}`,
+    `splitTurnId: ${resolved.turnId}`,
+    `splitEntryId: ${resolved.entryId}`,
+    `head/part 1 turns: ${headTurns}`,
+    `tail/part 2 turns: ${tailTurns}`,
+    `continue: ${parsed.continuePart ?? "tail"}`,
+    parsed.dryRun ? "" : "No files or Honcho sessions were changed; full split mutation still needs the partition/rebuild engine.",
+  ].filter(Boolean).join("\n"), parsed.dryRun ? "info" : "warning");
+}
+
 async function handlePreferredSessionCommand(args: string, ctx: any, pi?: ExtensionAPI) {
   const parsed = parseSessionSubcommand(args ?? "");
   if (parsed.kind === "turns") {
     await showTurns(parsed, ctx);
+    return;
+  }
+  if (parsed.kind === "split") {
+    await executeSplitCommand(parsed, ctx);
     return;
   }
   await executeMoveCommand(parsed, ctx, pi ? {
@@ -1335,7 +1419,7 @@ async function handlePreferredSessionCommand(args: string, ctx: any, pi?: Extens
 }
 
 async function handleSessionInput(text: string, ctx: any, pi: ExtensionAPI): Promise<boolean> {
-  const match = text.match(/^\/session\s+(move|turns)(?:\s+(.*)|\s*)$/);
+  const match = text.match(/^\/session\s+(move|turns|split)(?:\s+(.*)|\s*)$/);
   if (!match) return false;
   try {
     await handlePreferredSessionCommand(`${match[1]} ${match[2] ?? ""}`.trim(), ctx, pi);
@@ -1532,6 +1616,19 @@ export default function sessionMove(pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       try {
         await handleTurnsCommand(args, ctx);
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+      }
+    },
+  });
+
+  pi.registerCommand("session:split", {
+    description: "Fallback: split a Pi session into head/tail parts",
+    handler: async (args, ctx) => {
+      try {
+        const parsed = parseSessionSubcommand(`split ${args ?? ""}`);
+        if (parsed.kind !== "split") throw new Error("Internal parser error.");
+        await executeSplitCommand(parsed, ctx);
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }

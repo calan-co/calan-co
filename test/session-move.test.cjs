@@ -65,6 +65,26 @@ function sampleMessages() {
   return mod.buildWholeSessionRebuildMessages({ header, entries, sessionFile: '/tmp/s.jsonl', migrationId: 'm1', config: { peerName: 'macos', hosts: { pi: { aiPeer: 'pi' } } } });
 }
 
+async function testCommandParsingDefaultsAndSplitUx() {
+  assert.deepEqual(mod.parseSessionSubcommand('turns'), { kind: 'turns', sessionToken: undefined, query: undefined, json: false, pick: false });
+  assert.deepEqual(mod.parseSessionSubcommand('turns 019f4e16 --json'), { kind: 'turns', sessionToken: '019f4e16', query: undefined, json: true, pick: false });
+  assert.deepEqual(mod.parseSessionSubcommand('move ~/dev/pi-extensions --dry-run'), { kind: 'move', sessionToken: undefined, targetDir: '~/dev/pi-extensions', splitRequested: false, continuePolicy: undefined, dryRun: true, createTarget: false, mergeTarget: false });
+  assert.deepEqual(mod.parseSessionSubcommand('move 019f4e16 ~/dev/pi-extensions --create'), { kind: 'move', sessionToken: '019f4e16', targetDir: '~/dev/pi-extensions', splitRequested: false, continuePolicy: undefined, dryRun: false, createTarget: true, mergeTarget: false });
+  assert.deepEqual(mod.parseSessionSubcommand('split --turn 12'), { kind: 'split', sessionToken: undefined, turnRef: '12', continuePart: undefined, dryRun: false });
+  assert.deepEqual(mod.parseSessionSubcommand('split 019f4e16 --turn 12 --continue tail --dry-run'), { kind: 'split', sessionToken: '019f4e16', turnRef: '12', continuePart: 'tail', dryRun: true });
+  assert.throws(() => mod.parseSessionSubcommand('move current ~/x --turn 12'), /Split is now a separate command/);
+  assert.throws(() => mod.parseSessionSubcommand('split --turn 12 --continue target'), /head, tail/);
+}
+
+async function testMutationSafetyGateRequiresIdleForAllMutations() {
+  await assert.rejects(() => mod.runSessionMutationSafetyGate({ ctx: {}, sessionFile: '/tmp/s.jsonl', isCurrent: false, operation: 'move' }), /idle\/quiescence/);
+  let waited = false;
+  const result = await mod.runSessionMutationSafetyGate({ ctx: { waitForIdle: async () => { waited = true; }, hasPendingMessages: () => false }, sessionFile: '/tmp/s.jsonl', isCurrent: false, operation: 'split' });
+  assert.equal(waited, true);
+  assert.equal(result.skipped, false);
+  await assert.rejects(() => mod.runSessionMutationSafetyGate({ ctx: { waitForIdle: async () => {}, hasPendingMessages: () => true }, sessionFile: '/tmp/s.jsonl', isCurrent: false, operation: 'move' }), /pending messages/);
+}
+
 async function testTranscriptPayload() {
   const msgs = sampleMessages();
   assert.equal(msgs.length, 2);
@@ -220,6 +240,8 @@ async function testManifestTransitions() {
 
 async function main() {
   await testKeyDerivation();
+  await testCommandParsingDefaultsAndSplitUx();
+  await testMutationSafetyGateRequiresIdleForAllMutations();
   await testTranscriptPayload();
   await testSuccessfulRebuildValidatesContentAndDeletesSource();
   await testTargetCountMatchesButContentDiffersSourceRemains();
