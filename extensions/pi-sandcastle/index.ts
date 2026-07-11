@@ -25,9 +25,10 @@ import { noSandbox } from "@ai-hero/sandcastle/sandboxes/no-sandbox";
 import { podman } from "@ai-hero/sandcastle/sandboxes/podman";
 import { vercel } from "@ai-hero/sandcastle/sandboxes/vercel";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { ConfigShadowModel } from "./config-shadow-model.ts";
 import { buildSandcastleImage } from "./build-image.ts";
 import { registerBacklogCommands } from "./backlog.mjs";
@@ -75,6 +76,7 @@ interface ChainStep {
 
 interface PipelineStep {
 	role: string;
+	description?: string;
 	prompt: string;
 	kind?: string;
 	promptOverride?: string;
@@ -1280,6 +1282,8 @@ function readConfigValue(cfg: SandcastleConfig, path: string): unknown {
 	if (parts[0] === "roles" && parts.length === 3 && isEditableAgentField(parts[2])) {
 		return cfg.agents[parts[1]]?.[parts[2]];
 	}
+	if (parts[0] === "pipelines" && parts.length === 3) return (cfg.pipelines[parts[1]] as any)?.[parts[2]];
+	if (parts[0] === "pipelines" && parts[2] === "steps" && parts.length === 5) return (cfg.pipelines[parts[1]]?.steps?.[Number(parts[3])] as any)?.[parts[4]];
 	if (parts[0] === "chains" && parts.length === 2) return cfg.chains[parts[1]];
 	return undefined;
 }
@@ -1287,7 +1291,10 @@ function readConfigValue(cfg: SandcastleConfig, path: string): unknown {
 function supportedConfigPath(path: string): boolean {
 	const parts = splitConfigPath(path);
 	if (parts.length === 1) return isRootConfigKey(parts[0]);
-	return parts[0] === "roles" && parts.length === 3 && isEditableAgentField(parts[2]);
+	if (parts[0] === "roles" && parts.length === 3 && isEditableAgentField(parts[2])) return true;
+	if (parts[0] === "pipelines" && parts.length === 3 && ["description", "model", "sandbox"].includes(parts[2])) return true;
+	if (parts[0] === "pipelines" && parts[2] === "steps" && parts.length === 5 && ["role", "prompt", "model", "sandbox", "maxIterations"].includes(parts[4])) return true;
+	return false;
 }
 
 function defaultConfigValue(path: string): unknown {
@@ -1593,13 +1600,17 @@ function resolvePromptText(cfg: SandcastleConfig, promptRef: string): string {
 }
 
 function mergeWithPackDefaults(cfg: SandcastleConfig): SandcastleConfig {
+	const agents = { ...DEFAULT_CONFIG.agents } as Record<string, AgentDef>;
+	for (const [name, agent] of Object.entries(cfg.agents || {})) agents[name] = { ...(DEFAULT_CONFIG.agents[name] || { name }), ...agent, name };
+	const pipelines = { ...DEFAULT_CONFIG.pipelines } as Record<string, PipelineDef>;
+	for (const [name, pipeline] of Object.entries(cfg.pipelines || {})) pipelines[name] = { ...(DEFAULT_CONFIG.pipelines[name] || { steps: [] }), ...pipeline, steps: pipeline.steps || DEFAULT_CONFIG.pipelines[name]?.steps || [] };
 	return {
 		...DEFAULT_CONFIG,
 		...cfg,
 		prompts: { ...DEFAULT_CONFIG.prompts, ...cfg.prompts },
-		agents: { ...DEFAULT_CONFIG.agents, ...cfg.agents },
+		agents,
 		chains: { ...DEFAULT_CONFIG.chains, ...cfg.chains },
-		pipelines: { ...DEFAULT_CONFIG.pipelines, ...cfg.pipelines },
+		pipelines,
 	};
 }
 
@@ -2070,6 +2081,10 @@ function registerScRunCommand(
 		description: "Run one configured backlog execution agent: /backlog:run [agent] [prompt]",
 		getArgumentCompletions: (prefix: string) => completionItems(listRuntimeAgents(loadExecutionRuntimePack()).map((agent) => ({ value: agent.name, label: agent.name, description: agent.description })), tokenAfterLastSpace(prefix)),
 		handler: async (args, ctx) => {
+			if ((deps as any).isConfigImageRebuildInProgress?.()) {
+				ctx.ui.notify("The sandbox image is being rebuilt after config changes. Retry /backlog:run when the new image is built.", "warning");
+				return;
+			}
 			const cfg = await loadConfig(ctx.cwd);
 			const { agentName, prompt } = resolveRunInvocation(args, cfg);
 			if (!agentName) {
@@ -2314,9 +2329,11 @@ export async function executePipeline(
 			const sandboxKind = step.sandbox || pipeline.sandbox || cfg.defaultSandbox || DEFAULT_SANDBOX;
 			await ensureSandboxImage(cwd, sandboxKind, deps.image, undefined, cfg);
 			const sandbox = await loadSandboxProvider(sandboxKind);
-			const stepPrompt = resolvePipelineStepPrompt(step.promptOverride || resolvePromptText(cfg, step.prompt), input, prompt);
+			const role = cfg.agents[step.role];
+			const stepPromptBody = resolvePipelineStepPrompt(step.promptOverride || resolvePromptText(cfg, step.prompt), input, prompt);
+			const stepPrompt = role?.systemPrompt ? `${role.systemPrompt}\n\n## Delegated task\n\n${stepPromptBody}` : stepPromptBody;
 			const result = await worktree.run({
-				agent: makePipelineAgent(step.model || pipeline.model || cfg.defaultModel || DEFAULT_MODEL),
+				agent: makePipelineAgent(step.model || role?.model || pipeline.model || cfg.defaultModel || DEFAULT_MODEL),
 				sandbox,
 				prompt: stepPrompt,
 				maxIterations: step.maxIterations || 1,
@@ -2453,21 +2470,26 @@ function isTuiEscape(data: string): boolean {
 
 function isDefaultableConfigPath(path: string): boolean {
 	const parts = splitConfigPath(path);
-	return parts.length === 3 && ["agents", "pipelines"].includes(parts[0]) && ["model", "sandbox"].includes(parts[2]);
+	return (parts.length === 3 && ["roles", "pipelines"].includes(parts[0]) && ["model", "sandbox"].includes(parts[2]))
+		|| (parts[0] === "pipelines" && parts[2] === "steps" && ["model", "sandbox", "maxIterations"].includes(parts[4]));
 }
 
 function effectiveDefaultForPath(cfg: SandcastleConfig, path: string): string | undefined {
-	const field = splitConfigPath(path)[2];
+	const parts = splitConfigPath(path);
+	const field = parts.at(-1);
 	if (field === "model") return cfg.defaultModel || DEFAULT_MODEL;
 	if (field === "sandbox") return cfg.defaultSandbox || DEFAULT_SANDBOX;
+	if (field === "maxIterations") return "role default";
 	return undefined;
 }
 
 function selectableValuesForPath(cfg: SandcastleConfig, path: string): string[] {
+	const parts = splitConfigPath(path);
 	const values = schemaEnumForPath(path)
-		|| (path === "defaultPipeline" ? ["blank", "simple-loop", "sequential-reviewer", "parallel-planner", "parallel-planner-with-review"] : undefined)
+		|| (path === "defaultPipeline" ? ["simple-loop", "sequential-reviewer", "parallel-planner", "parallel-planner-with-review", "archive"] : undefined)
 		|| (path === "defaultAgent" ? ["claude-code", "pi", "codex", "cursor", "opencode", "copilot"] : undefined)
-		|| (path === "issueTracker" ? ["github-issues", "custom", "beads"] : undefined);
+		|| (path === "issueTracker" ? ["github-issues", "custom", "beads"] : undefined)
+		|| (parts[0] === "pipelines" && parts[2] === "steps" && parts[4] === "role" ? Object.keys(cfg.agents) : undefined);
 	const withDefault = isDefaultableConfigPath(path) ? ["default", ...(values || [])] : (values || []);
 	return [...new Set(withDefault)];
 }
@@ -2478,6 +2500,7 @@ function allowsCustomValueForPath(path: string): boolean {
 
 function coerceConfigValue(path: string, rawValue: string): unknown {
 	const field = splitConfigPath(path).at(-1);
+	if (rawValue === "default" && isDefaultableConfigPath(path)) return rawValue;
 	if (field === "maxIterations") {
 		const value = Number(rawValue);
 		if (!Number.isInteger(value) || value < 1) throw new Error(`${path} must be a positive integer.`);
@@ -2500,8 +2523,12 @@ type BacklogConfigAction =
 	| { type: "add-pipeline"; name: string }
 	| { type: "rename-pipeline"; oldName: string; newName: string }
 	| { type: "delete-pipeline"; name: string }
+	| { type: "add-pipeline-step"; pipeline: string }
+	| { type: "delete-pipeline-step"; pipeline: string; index: number }
+	| { type: "replace-config"; config: SandcastleConfig }
+	| { type: "import-config-file" }
 	| { type: "apply-pack"; pack: string }
-	| { type: "batch"; actions: BacklogConfigAction[] }
+	| { type: "batch"; actions: BacklogConfigAction[]; config?: SandcastleConfig; rebuildImage?: boolean }
 	| { type: "cancel" };
 
 function friendlyConfigLabel(pathOrField: string): string {
@@ -2527,20 +2554,37 @@ function friendlyConfigLabel(pathOrField: string): string {
 
 function summarizeValue(value: unknown): string {
 	if (Array.isArray(value)) return value.join(", ") || "<empty>";
-	if (value === undefined) return "<unset>";
+	if (value === undefined) return "Not set";
 	return formatConfigValue(value).replace(/\n/g, "\\n");
 }
 
 function describeConfigAction(action: BacklogConfigAction, before: SandcastleConfig, after: SandcastleConfig): string {
 	if (action.type === "set-config") return `${friendlyConfigLabel(action.path)}: ${summarizeValue(readConfigValue(before, action.path))} → ${summarizeValue(readConfigValue(after, action.path))}`;
+	if (action.type === "replace-config") return "Replace configuration draft";
+	if (action.type === "add-pipeline-step") return `Add step: ${action.pipeline}`;
+	if (action.type === "delete-pipeline-step") return `Delete step ${action.index + 1}: ${action.pipeline}`;
 	if (action.type.startsWith("rename-")) return `${action.type.replace("rename-", "Rename ")}: ${(action as any).oldName} → ${(action as any).newName}`;
 	if (action.type.startsWith("add-")) return `${action.type.replace("add-", "Add ")}: ${(action as any).name}`;
 	if (action.type.startsWith("delete-")) return `${action.type.replace("delete-", "Delete ")}: ${(action as any).name}`;
 	return action.type;
 }
 
+function configActionRequiresImageRebuild(action: BacklogConfigAction): boolean {
+	if (["init", "apply-pack", "replace-config", "add-agent", "rename-agent", "delete-agent", "add-pipeline", "rename-pipeline", "delete-pipeline", "add-pipeline-step", "delete-pipeline-step"].includes(action.type)) return true;
+	if (action.type === "set-config") return action.path !== "issueTrackerSetupCommand";
+	if (action.type === "batch") return action.actions.some(configActionRequiresImageRebuild);
+	return false;
+}
+
 async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | null> {
-	const loadedCfg = await loadConfig(ctx.cwd).catch(() => DEFAULT_CONFIG);
+	const loadError: { message?: string } = {};
+	const loadedCfg = await loadConfig(ctx.cwd).catch((error) => {
+		loadError.message = error instanceof Error ? error.message : String(error);
+		return DEFAULT_CONFIG;
+	});
+	const imageProvider = imageProviderForSandbox(loadedCfg.defaultSandbox);
+	const configuredImageName = defaultSandcastleImageName(ctx.cwd, loadedCfg.imageNamePattern);
+	const imageMissingAtOpen = Boolean(imageProvider && !(await inspectImageCreated(ctx.cwd, imageProvider, configuredImageName)));
 	let model = new ConfigShadowModel(loadedCfg);
 	let cfg: SandcastleConfig = model.value as SandcastleConfig;
 	let unsubscribeModel = model.onChange(() => { cfg = model.value as SandcastleConfig; });
@@ -2557,7 +2601,8 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 		let textAction: BacklogConfigAction["type"] | null = null;
 		let textPayload: Record<string, string> = {};
 		let textTitle = "";
-		let textPristine = false;
+		let editCursor = 0;
+		let editSelectAll = false;
 		let pendingPack = "default";
 		let dirty = false;
 		const pendingActions: BacklogConfigAction[] = [];
@@ -2567,10 +2612,13 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 			return value === undefined ? "" : formatConfigValue(value).replace(/\n/g, "\\n");
 		};
 		const valueDescription = (path: string) => {
+			const parts = splitConfigPath(path);
+			const raw = readConfigValue(cfg, path);
+			if (parts[0] === "pipelines" && parts[2] === "steps" && parts[4] === "prompt") return promptSummary(String(raw || ""));
 			const value = pathValue(path);
-			if (value) return value;
-			if (isDefaultableConfigPath(path)) return `default (${effectiveDefaultForPath(cfg, path) || "unset"})`;
-			return "unset";
+			if (value) return value === DEFAULT_MODEL ? "Provider default model" : value;
+			if (isDefaultableConfigPath(path)) return `Inherited: ${effectiveDefaultForPath(cfg, path) || "Not set"}`;
+			return "Not set";
 		};
 		const field = (path: string, label = friendlyConfigLabel(path)): SelectItem => ({ value: `field:${path}`, label, description: valueDescription(path) });
 		const open = (name: string) => { route = [...route, name]; selected = 0; tui.requestRender(); };
@@ -2581,17 +2629,18 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 			title: "BACKLOG CONFIG BIOS",
 			subtitle: "Section editor over .pi/sandcastle/config.yaml",
 			items: [
-				{ value: "nav:defaults", label: "Defaults", description: "Set the default values to be used for this repo" },
+				...(loadError.message ? [{ value: "noop", label: "Config has validation errors", description: loadError.message.slice(0, 120) }] : []),
+				{ value: "nav:defaults", label: "Runtime Defaults", description: "Fallback values used when roles or pipelines inherit a setting" },
 				{ value: "nav:agents", label: "Roles", description: "Create and configure reusable execution roles" },
 				{ value: "nav:pipelines", label: "Pipelines", description: "Configure deterministic workflows and their steps" },
-				{ value: "nav:actions", label: "Actions", description: "init, validate, build image, config packs, raw edit" },
+				{ value: "nav:actions", label: "Operations", description: "Validate, import, rebuild, or reset configuration" },
 				{ value: "cancel", label: "Exit", description: "Close this configuration editor" },
 			],
 		});
 
 		const defaultsScreen = (): Screen => ({
-			title: "DEFAULTS",
-			subtitle: "Common fallback settings used by agents and pipelines",
+			title: "RUNTIME DEFAULTS",
+			subtitle: "User-configurable fallback settings; local environment details live under Actions",
 			items: [field("defaultSandbox"), field("defaultModel"), field("defaultPipeline"), field("defaultAgent"), field("issueTracker"), field("issueTrackerSetupCommand"), field("imageNamePattern")],
 		});
 
@@ -2606,16 +2655,25 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 
 		const agentScreen = (name: string): Screen => ({
 			title: `ROLE / ${name}`,
-			subtitle: "Editable fields for this execution role",
+			subtitle: "Common role settings; provider, model, sandbox, and branch are advanced",
 			items: [
 				{ value: `text:rename-agent:${name}`, label: "Rename role", description: name },
-				{ value: `delete-agent:${name}`, label: "Delete role", description: "Remove this role from the config" },
 				field(`roles.${name}.description`),
-				field(`roles.${name}.model`),
-				field(`roles.${name}.provider`),
 				field(`roles.${name}.maxIterations`),
-				field(`roles.${name}.branch`),
-				field(`roles.${name}.systemPrompt`),
+				field(`roles.${name}.systemPrompt`, "System Prompt"),
+				{ value: `nav:agent-advanced:${name}`, label: "Advanced", description: "Provider, model, sandbox, branch, and deletion" },
+			],
+		});
+
+		const agentAdvancedScreen = (name: string): Screen => ({
+			title: `ROLE / ${name} / ADVANCED`,
+			subtitle: "Low-level execution settings; leave empty to inherit runtime defaults when possible",
+			items: [
+				field(`roles.${name}.provider`),
+				field(`roles.${name}.model`),
+				field(`roles.${name}.sandbox`),
+				field(`roles.${name}.branch`, "Branch Override"),
+				{ value: `delete-agent:${name}`, label: "Delete role", description: "Remove this role from the config" },
 			],
 		});
 
@@ -2624,29 +2682,35 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 			subtitle: "Choose a pipeline for detailed inspection/editing",
 			items: [
 				{ value: "text:add-pipeline", label: "New pipeline", description: "Create a simple worker pipeline" },
-				...Object.entries(cfg.pipelines).map(([name, pipeline]) => ({ value: `nav:pipeline:${name}`, label: name, description: pipeline.description || `${pipeline.steps?.length || 0} step(s)` })),
+				...Object.entries(cfg.pipelines).filter(([name]) => name !== "blank").map(([name, pipeline]) => ({ value: `nav:pipeline:${name}`, label: name, description: pipeline.description || `${pipeline.steps?.length || 0} step(s)` })),
 			],
 		});
 
+		const promptSummary = (prompt?: string): string => {
+			if (!prompt) return "Not set";
+			const resolved = cfg.prompts?.[prompt]?.template || prompt;
+			return resolved.split(/\n/).find((line) => line.trim())?.trim().slice(0, 100) || "Not set";
+		};
+
 		const pipelineScreen = (name: string): Screen => {
 			const pipeline = cfg.pipelines[name];
-			const branch = pipeline?.branchStrategy ? `${pipeline.branchStrategy.type || "branch"}${pipeline.branchStrategy.branch ? ` → ${pipeline.branchStrategy.branch}` : ""}` : "default";
+			const branch = pipeline?.branchStrategy ? `${pipeline.branchStrategy.type || "branch"}${pipeline.branchStrategy.branch ? ` → ${pipeline.branchStrategy.branch}` : ""}` : "Inherited";
 			const stepItems = (pipeline?.steps || []).map((step, index) => ({
 				value: `nav:pipeline-step:${name}:${index}`,
-				label: `step ${index + 1}: ${step.role}`,
-				description: step.prompt ? step.prompt.split(/\n/)[0].slice(0, 80) : "no prompt",
+				label: `Step ${index + 1}: ${step.role || "No role selected"}`,
+				description: promptSummary(step.prompt),
 			}));
 			return {
 				title: `PIPELINE / ${name}`,
-				subtitle: `branch strategy: ${branch}`,
+				subtitle: `Branch strategy: ${branch}`,
 				items: [
 					{ value: `text:rename-pipeline:${name}`, label: "Rename pipeline", description: name },
-					{ value: `delete-pipeline:${name}`, label: "Delete pipeline", description: "Remove this pipeline from the config" },
-					{ value: `info:pipeline:${name}:description`, label: "Description", description: pipeline?.description || "unset" },
-					{ value: `info:pipeline:${name}:model`, label: "Model", description: pipeline?.model || `default (${cfg.defaultModel || DEFAULT_MODEL})` },
-					{ value: `info:pipeline:${name}:sandbox`, label: "Sandbox", description: pipeline?.sandbox || `default (${cfg.defaultSandbox || DEFAULT_SANDBOX})` },
+					field(`pipelines.${name}.description`),
+					field(`pipelines.${name}.model`),
+					field(`pipelines.${name}.sandbox`),
 					...stepItems,
-					{ value: "action:edit", label: "Open detailed raw editor", description: "Use configured terminal editor for advanced pipeline edits" },
+					{ value: `add-pipeline-step:${name}`, label: "Add step", description: "Append a worker step to this pipeline" },
+					{ value: `delete-pipeline:${name}`, label: "Delete pipeline", description: "Remove this pipeline from the config" },
 				],
 			};
 		};
@@ -2656,29 +2720,30 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 			const step = cfg.pipelines[pipelineName]?.steps?.[stepIndex];
 			return {
 				title: `PIPELINE / ${pipelineName} / STEP ${stepIndex + 1}`,
-				subtitle: "Detailed step view; raw editor is available for complex prompt edits",
+				subtitle: "Step settings; leave model/sandbox empty to inherit runtime defaults",
 				items: [
-					{ value: "noop", label: "agent", description: step?.agent || "unset" },
-					{ value: "noop", label: "model", description: step?.model || `default (${cfg.defaultModel || DEFAULT_MODEL})` },
-					{ value: "noop", label: "sandbox", description: step?.sandbox || `default (${cfg.defaultSandbox || DEFAULT_SANDBOX})` },
-					{ value: "noop", label: "maxIterations", description: String(step?.maxIterations || "default") },
-					{ value: "noop", label: "prompt", description: step?.prompt ? step.prompt.split(/\n/)[0].slice(0, 100) : "unset" },
-					{ value: "action:edit", label: "Open raw editor", description: "Edit this pipeline in YAML" },
+					field(`pipelines.${pipelineName}.steps.${stepIndex}.role`, "Role"),
+					field(`pipelines.${pipelineName}.steps.${stepIndex}.description`),
+					field(`pipelines.${pipelineName}.steps.${stepIndex}.model`),
+					field(`pipelines.${pipelineName}.steps.${stepIndex}.sandbox`),
+					field(`pipelines.${pipelineName}.steps.${stepIndex}.maxIterations`),
+					field(`pipelines.${pipelineName}.steps.${stepIndex}.prompt`, "Prompt"),
+					{ value: `delete-pipeline-step:${pipelineName}:${stepIndex}`, label: "Delete step", description: `Remove ${step?.role || "this"} step from the pipeline` },
 				],
 			};
 		};
 
 		const actionsScreen = (): Screen => ({
-			title: "ACTIONS",
+			title: "OPERATIONS",
 			subtitle: "Operational commands around config editing",
 			items: [
-				{ value: "action:init", label: "Initialize / hydrate config", description: "Run /backlog:config init without overwriting edits" },
-				{ value: "nav:packs", label: "Apply config pack", description: "Choose a template pack; confirmation required" },
-				{ value: "action:edit", label: "Edit raw config", description: `Open ${CONFIG_PATH} in ${getPreferredEditor(ctx.cwd)}` },
-				{ value: "nav:editors", label: "Preferred editor", description: "Choose a common terminal editor" },
-				{ value: "action:validate", label: "Validate config", description: "Run /backlog:config validate" },
-				{ value: "action:sandcastle-init", label: "Initialize Execution runtime scaffold", description: "Run non-interactive sandcastle init using this config" },
-				{ value: "action:build", label: "Build sandbox image", description: "Run /backlog:build-image using defaultSandbox" },
+				{ value: "action:validate", label: "Validate Config", description: "Check for missing roles, invalid providers, and pipeline errors" },
+				{ value: "action:init", label: "Reset to System Defaults", description: "Restore the default Pi-Sandcastle configuration" },
+				{ value: "nav:packs", label: "Import Bundled Template", description: "Replace this draft with a built-in template" },
+				{ value: "text:import-config-file", label: "Import Config File", description: "Enter a path to a custom .pi/sandcastle/config.yaml-compatible file" },
+				{ value: "action:edit", label: `Edit Config in ${getPreferredEditor(ctx.cwd)}`, description: "Open the current unsaved draft in your preferred editor" },
+				{ value: "nav:editors", label: "Preferred Editor", description: "Choose the terminal editor used for raw config editing" },
+				{ value: "action:build", label: "Rebuild Sandbox Image", description: "Build the execution container image for this repository" },
 			],
 		});
 
@@ -2687,6 +2752,7 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 			if (key === "main") return mainScreen();
 			if (key === "defaults") return defaultsScreen();
 			if (key === "agents") return agentsScreen();
+			if (key.startsWith("agent-advanced:")) return agentAdvancedScreen(key.slice("agent-advanced:".length));
 			if (key.startsWith("agent:")) return agentScreen(key.slice("agent:".length));
 			if (key === "pipelines") return pipelinesScreen();
 			if (key.startsWith("pipeline:")) return pipelineScreen(key.slice("pipeline:".length));
@@ -2695,10 +2761,25 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 				return pipelineStepScreen(pipelineName, indexText);
 			}
 			if (key === "actions") return actionsScreen();
-			if (key === "packs") return { title: "CONFIG PACKS", subtitle: "Applying a pack overwrites config.yaml", items: listConfigPacks().map((item) => ({ ...item, value: `pack:${item.value}` })) };
-			if (key === "confirm-pack") return { title: "CONFIRM OVERWRITE", subtitle: `Pack: ${pendingPack}`, items: [{ value: "action:apply-pack", label: `Apply ${pendingPack}`, description: "Overwrite .pi/sandcastle/config.yaml" }, { value: "back", label: "Back", description: "Return to config packs" }] };
+			if (key === "packs") return { title: "IMPORT BUNDLED TEMPLATE", subtitle: "Built-in templates replace the current draft; save on exit to write it", items: listConfigPacks().map((item) => ({ ...item, value: `pack:${item.value}` })) };
+			if (key === "confirm-pack") return { title: "CONFIRM IMPORT", subtitle: `Pack: ${pendingPack}`, items: [{ value: "action:apply-pack", label: `Import ${pendingPack}`, description: "Replace the current unsaved draft with this configuration" }, { value: "back", label: "Back", description: "Return to configuration imports" }] };
 			if (key === "editors") return { title: "EDITOR SETUP", subtitle: "Choose preferred terminal editor", items: ["nvim", "vim", "nano", "code --wait", "emacs"].map((editor) => ({ value: `editor:${editor}`, label: editor, description: editor === getPreferredEditor(ctx.cwd) ? "current" : undefined })) };
-			if (key === "confirm-exit") return { title: "UNSAVED CHANGES", subtitle: `${pendingActions.length} pending change(s)`, items: [{ value: "save-exit", label: "Save changes", description: "Apply pending config changes" }, { value: "discard-exit", label: "Exit without saving", description: "Discard pending changes" }, { value: "back", label: "Back", description: "Return to editor" }, ...pendingActions.map((action, index) => ({ value: `change:${index}`, label: `Change ${index + 1}`, description: describeConfigAction(action, loadedCfg, cfg) }))] };
+			if (key === "confirm-exit") {
+				const needsRebuild = pendingActions.some(configActionRequiresImageRebuild) || imageMissingAtOpen;
+				const saveItems = needsRebuild
+					? [
+						{ value: "save-rebuild-exit", label: dirty ? "Save and rebuild" : "Build image and exit", description: imageMissingAtOpen ? `No sandbox image found for ${configuredImageName}` : "Persist changes and rebuild the sandbox image in the main Pi TUI" },
+						{ value: "save-exit", label: dirty ? "Save without rebuilding" : "Exit without rebuilding", description: dirty ? "Persist changes; rebuild the sandbox image later" : "Leave configuration unchanged" },
+						{ value: "discard-exit", label: dirty ? "Exit without saving" : "Back", description: dirty ? "Discard pending changes" : "Return to editor" },
+					]
+					: [
+						{ value: "save-exit", label: "Save changes", description: "Apply pending config changes" },
+						{ value: "discard-exit", label: "Exit without saving", description: "Discard pending changes" },
+						{ value: "back", label: "Back", description: "Return to editor" },
+					];
+				const changeItems = needsRebuild ? [] : pendingActions.map((action, index) => ({ value: `change:${index}`, label: `Change ${index + 1}`, description: describeConfigAction(action, loadedCfg, cfg) }));
+				return { title: "UNSAVED CHANGES", subtitle: `${pendingActions.length} pending change(s)`, items: [...saveItems, ...changeItems] };
+			}
 			if (key.startsWith("confirm-delete-change:")) {
 				const index = Number(key.slice("confirm-delete-change:".length));
 				const action = pendingActions[index];
@@ -2712,7 +2793,8 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 			textPayload = payload;
 			textTitle = title;
 			editBuffer = initial;
-			textPristine = !!initial;
+			editCursor = initial.length;
+			editSelectAll = !!initial;
 			tui.requestRender();
 		};
 
@@ -2724,6 +2806,8 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 			if (action.type === "add-pipeline") model.addPipeline(action.name);
 			if (action.type === "rename-pipeline") model.renamePipeline(action.oldName, action.newName);
 			if (action.type === "delete-pipeline") model.deletePipeline(action.name);
+			if (action.type === "add-pipeline-step") model.addPipelineStep(action.pipeline);
+			if (action.type === "delete-pipeline-step") model.deletePipelineStep(action.pipeline, action.index);
 		};
 
 		const rebuildModelFromPendingActions = () => {
@@ -2746,6 +2830,38 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 			tui.requestRender();
 		};
 
+		const replaceDraftConfig = (nextConfig: SandcastleConfig) => {
+			unsubscribeModel();
+			model = new ConfigShadowModel(nextConfig);
+			cfg = model.value as SandcastleConfig;
+			unsubscribeModel = model.onChange(() => { cfg = model.value as SandcastleConfig; });
+			pendingActions.splice(0, pendingActions.length, { type: "replace-config", config: cfg });
+			dirty = true;
+			route = ["main"];
+			selected = 0;
+			tui.requestRender();
+		};
+
+		const openDraftInEditor = () => {
+			const tmpRoot = mkdtempSync(join(tmpdir(), "pi-sandcastle-config-"));
+			const draftPath = join(tmpRoot, "config.yaml");
+			writeFileSync(draftPath, configToYaml(cfg));
+			tui.stop?.();
+			process.stdout.write("\x1b[2J\x1b[H");
+			const status = runTerminalEditor(ctx.cwd, draftPath);
+			tui.start?.();
+			try {
+				if (status !== 0) throw new Error(`Editor exited with code ${status}.`);
+				const parsed = mergeWithPackDefaults(normalizeConfig(parseSimpleYaml(readFileSync(draftPath, "utf8"))));
+				replaceDraftConfig(parsed);
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			} finally {
+				rmSync(tmpRoot, { recursive: true, force: true });
+				tui.requestRender(true);
+			}
+		};
+
 		const choose = () => {
 			const active = screen();
 			const item = active.items[selected];
@@ -2759,34 +2875,38 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 				editChoiceIndex = 0;
 				editAllowCustom = allowsCustomValueForPath(editPath);
 				editCustom = editChoices.length === 0;
-				textPristine = editCustom && !!editBuffer;
+				editCursor = editBuffer.length;
+				editSelectAll = editCustom && !!editBuffer;
 				tui.requestRender();
 				return;
 			}
 			if (value.startsWith("text:add-agent")) return beginTextAction("add-agent", "NEW ROLE");
 			if (value.startsWith("text:add-pipeline")) return beginTextAction("add-pipeline", "NEW PIPELINE");
+			if (value.startsWith("text:import-config-file")) return beginTextAction("import-config-file", "IMPORT CONFIG FILE", {}, "./.pi/sandcastle/config.yaml");
 			if (value.startsWith("text:rename-agent:")) return beginTextAction("rename-agent", "RENAME ROLE", { oldName: value.slice("text:rename-agent:".length) }, value.slice("text:rename-agent:".length));
 			if (value.startsWith("text:rename-pipeline:")) return beginTextAction("rename-pipeline", "RENAME PIPELINE", { oldName: value.slice("text:rename-pipeline:".length) }, value.slice("text:rename-pipeline:".length));
 			if (value.startsWith("delete-agent:")) { const name = value.slice("delete-agent:".length); model.deleteAgent(name); route = ["main", "agents"]; return queueAction({ type: "delete-agent", name }); }
 			if (value.startsWith("delete-pipeline:")) { const name = value.slice("delete-pipeline:".length); model.deletePipeline(name); route = ["main", "pipelines"]; return queueAction({ type: "delete-pipeline", name }); }
+			if (value.startsWith("add-pipeline-step:")) { const pipeline = value.slice("add-pipeline-step:".length); model.addPipelineStep(pipeline); return queueAction({ type: "add-pipeline-step", pipeline }); }
+			if (value.startsWith("delete-pipeline-step:")) { const [, pipeline, indexText] = value.split(":"); const index = Number(indexText); model.deletePipelineStep(pipeline, index); route = ["main", "pipelines", `pipeline:${pipeline}`]; return queueAction({ type: "delete-pipeline-step", pipeline, index }); }
 			if (value.startsWith("pack:")) { pendingPack = value.slice(5); return replace("confirm-pack"); }
-			if (value.startsWith("editor:")) return done({ type: "set-editor", editor: value.slice(7) });
-			if (value === "action:init") return done({ type: "init" });
-			if (value === "action:edit") return done({ type: "edit" });
+			if (value.startsWith("editor:")) { setPreferredEditor(ctx.cwd, value.slice(7)); route = ["main", "actions"]; selected = 0; ctx.ui.notify(`Preferred Pi-Sandcastle config editor set to: ${value.slice(7)}`, "success"); return tui.requestRender(); }
+			if (value === "action:init") { replaceDraftConfig(DEFAULT_CONFIG); return; }
+			if (value === "action:edit") return openDraftInEditor();
 			if (value === "action:validate") return done({ type: "validate" });
-			if (value === "action:sandcastle-init") return done({ type: "sandcastle-init" });
 			if (value === "action:build") return done({ type: "build-image" });
-			if (value === "action:apply-pack") return done({ type: "apply-pack", pack: pendingPack });
-			if (value === "save-exit") return done({ type: "batch", actions: pendingActions });
-			if (value === "discard-exit") return done({ type: "cancel" });
+			if (value === "action:apply-pack") { replaceDraftConfig(mergeWithPackDefaults(normalizeConfig(parseSimpleYaml(configPackText(pendingPack))))); return; }
+			if (value === "save-rebuild-exit") return done({ type: "batch", actions: pendingActions, config: cfg, rebuildImage: true });
+			if (value === "save-exit") return dirty ? done({ type: "batch", actions: pendingActions, config: cfg }) : done({ type: "cancel" });
+			if (value === "discard-exit") return (!dirty && imageMissingAtOpen) ? back() : done({ type: "cancel" });
 			if (value.startsWith("change:")) return open(`confirm-delete-change:${value.slice("change:".length)}`);
 			if (value.startsWith("delete-change:")) return removePendingAction(Number(value.slice("delete-change:".length)));
 			if (value === "back") return back();
-			if (value === "cancel") return dirty ? open("confirm-exit") : done({ type: "cancel" });
+			if (value === "cancel") return (dirty || imageMissingAtOpen) ? open("confirm-exit") : done({ type: "cancel" });
 		};
 
 		const back = () => {
-			if (editPath || textAction) { editPath = null; textAction = null; editBuffer = ""; editChoices = []; editCustom = false; editAllowCustom = true; textPristine = false; tui.requestRender(); return; }
+			if (editPath || textAction) { editPath = null; textAction = null; editBuffer = ""; editChoices = []; editCustom = false; editAllowCustom = true; editCursor = 0; editSelectAll = false; tui.requestRender(); return; }
 			if (current() === "confirm-exit" || current().startsWith("confirm-delete-change:")) { route = route.slice(0, -1); selected = 0; tui.requestRender(); return; }
 			if (route.length <= 1) dirty ? open("confirm-exit") : done({ type: "cancel" });
 			else { route = route.slice(0, -1); selected = 0; tui.requestRender(); }
@@ -2799,7 +2919,7 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 		const queueAction = (action: BacklogConfigAction) => {
 			pendingActions.push(action);
 			dirty = model.isDirty() || pendingActions.length > 0;
-			editPath = null; textAction = null; editBuffer = ""; editChoices = []; editCustom = false; textPristine = false;
+			editPath = null; textAction = null; editBuffer = ""; editChoices = []; editCustom = false; editCursor = 0; editSelectAll = false;
 			tui.requestRender();
 		};
 
@@ -2809,6 +2929,17 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 				if (!name) return;
 				if (textAction === "add-agent") { model.addAgent(name); return queueAction({ type: "add-agent", name }); }
 				if (textAction === "add-pipeline") { model.addPipeline(name); return queueAction({ type: "add-pipeline", name }); }
+				if (textAction === "import-config-file") {
+					const filePath = name.startsWith("/") ? resolve(name) : resolve(ctx.cwd, name);
+					try {
+						const imported = mergeWithPackDefaults(normalizeConfig(parseSimpleYaml(readFileSync(filePath, "utf8"))));
+						replaceDraftConfig(imported);
+					} catch (error) {
+						ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+					}
+					textAction = null; editBuffer = "";
+					return;
+				}
 				if (textAction === "rename-agent") {
 					model.renameAgent(textPayload.oldName, name);
 					route = ["main", "agents"];
@@ -2847,11 +2978,12 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 					if (editPath && editChoices.length && !editCustom) {
 						const renderedChoices = editAllowCustom ? [...editChoices, "custom…"] : editChoices;
 						for (const [index, choice] of renderedChoices.entries()) {
-							const label = choice === "default" && editPath ? `default (${effectiveDefaultForPath(cfg, editPath) || "unset"})` : choice;
+							const label = choice === "default" && editPath ? `Inherited: ${effectiveDefaultForPath(cfg, editPath) || "Not set"}` : choice;
 							rendered.push(`${index === editChoiceIndex ? theme.fg("accent", "▶ ") : "  "}${index === editChoiceIndex ? theme.fg("accent", label) : label}`);
 						}
 					} else {
-						rendered.push(line(editBuffer || theme.fg("muted", "<empty>"), width));
+						const visible = editBuffer ? (editSelectAll ? `[${editBuffer}]` : `${editBuffer.slice(0, editCursor)}▌${editBuffer.slice(editCursor)}`) : theme.fg("muted", "<empty>");
+						rendered.push(line(visible, width));
 					}
 					rendered.push("", border);
 					return rendered.map((entry) => line(entry, width));
@@ -2875,8 +3007,20 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 						else submitEdit();
 					}
 					else if (!editChoices.length || editCustom || textAction) {
-						if (data === "\x7f" || data === "\b") { editBuffer = editBuffer.slice(0, -1); textPristine = false; }
-						else if (data >= " " && data !== "\x7f") { if (textPristine) editBuffer = ""; textPristine = false; editBuffer += data; }
+						if (data === "\x1b[D") { editSelectAll = false; editCursor = Math.max(0, editCursor - 1); }
+						else if (data === "\x1b[C") { editSelectAll = false; editCursor = Math.min(editBuffer.length, editCursor + 1); }
+						else if (data === "\x7f" || data === "\b") {
+							if (editSelectAll) { editBuffer = ""; editCursor = 0; editSelectAll = false; }
+							else if (editCursor > 0) {
+								editBuffer = `${editBuffer.slice(0, editCursor - 1)}${editBuffer.slice(editCursor)}`;
+								editCursor--;
+							}
+						}
+						else if (data >= " " && data !== "\x7f") {
+							if (editSelectAll) { editBuffer = ""; editCursor = 0; editSelectAll = false; }
+							editBuffer = `${editBuffer.slice(0, editCursor)}${data}${editBuffer.slice(editCursor)}`;
+							editCursor += data.length;
+						}
 					}
 					tui.requestRender();
 					return;
@@ -2895,8 +3039,25 @@ export default function piSandcastle(
 ) {
 	const runs = new Map<string, RunState>();
 	let widgetCtx: { ui: { setWidget: (id: string, lines: string[] | undefined) => void; notify: (message: string, type?: string) => void } } | undefined;
+	let configImageRebuild: Promise<void> | undefined;
 	const sandcastle = deps.sandcastle ?? createDefaultSandcastleRunCapability();
 	const backlogDeps = deps.backlog || {};
+	const isConfigImageRebuildInProgress = () => !!configImageRebuild;
+	const startConfigImageRebuild = (ctx: any, cfg: SandcastleConfig) => {
+		const provider = imageProviderForSandbox(cfg.defaultSandbox) || "docker";
+		const imageName = defaultSandcastleImageName(ctx.cwd, cfg.imageNamePattern);
+		if (configImageRebuild) return configImageRebuild;
+		ctx.ui.notify(`Rebuilding Sandcastle ${provider} image ${imageName}. Commands using the sandbox should be retried after this completes.`, "info");
+		configImageRebuild = (async () => {
+			requireSandcastleCliScaffold(ctx.cwd);
+			await buildSandboxImageOnce(ctx.cwd, provider, imageName, deps.image?.buildImage || buildSandboxImage);
+		})().then(() => {
+			ctx.ui.notify(`Rebuilt Sandcastle ${provider} image ${imageName}. Retry any command that was waiting for the rebuild.`, "success");
+		}).catch((error) => {
+			ctx.ui.notify(`Sandcastle image rebuild failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+		}).finally(() => { configImageRebuild = undefined; });
+		return configImageRebuild;
+	};
 
 	function refreshWidget() {
 		widgetCtx?.ui.setWidget("pi-sandcastle", renderWidget(runs));
@@ -2947,7 +3108,7 @@ Backlog views and processing:
 			?? ctx?.resume;
 	}
 
-	registerScRunCommand(pi, sandcastle, deps);
+	registerScRunCommand(pi, sandcastle, { ...deps, isConfigImageRebuildInProgress });
 
 	async function notifyBacklogPlan(args: string, ctx: any, overrides?: { iterations?: number }): Promise<void> {
 		try {
@@ -3223,6 +3384,10 @@ Backlog views and processing:
 		description: "Build the repo's execution sandbox image: /backlog:build-image [docker|podman]",
 		getArgumentCompletions: (prefix: string) => completionItems(["docker", "podman"], tokenAfterLastSpace(prefix)),
 		handler: async (args, ctx) => {
+			if (isConfigImageRebuildInProgress()) {
+				ctx.ui.notify("A sandbox image rebuild is already running. Retry /backlog:build-image after it completes.", "warning");
+				return;
+			}
 			const providerArg = args.trim().split(/\s+/).filter(Boolean)[0] as "docker" | "podman" | undefined;
 			const cfg = await loadConfig(ctx.cwd).catch(() => ({ defaultSandbox: DEFAULT_SANDBOX, prompts: {}, agents: {}, chains: {}, pipelines: {} }) as SandcastleConfig);
 			const provider = providerArg || imageProviderForSandbox(cfg.defaultSandbox) || "docker";
@@ -3247,107 +3412,86 @@ Backlog views and processing:
 		description: "Open the friendly backlog/Backlog execution configuration BIOS",
 		handler: async (_args, ctx) => {
 			if (ctx.mode !== "tui" || !ctx.ui?.custom) {
-				ctx.ui.notify("/backlog:config requires TUI mode. Use /backlog:config for raw commands.", "error");
+				ctx.ui.notify("/backlog:config requires TUI mode. Use /backlog:config-raw for terminal commands.", "error");
 				return;
 			}
 			const action = await showBacklogConfigTui(ctx);
 			if (!action || action.type === "cancel") return;
 			try {
+				if (action.type === "batch" && action.config) {
+					ensureScaffold(ctx.cwd, { hydrate: true });
+					writeFileSync(join(ctx.cwd, CONFIG_PATH), configToYaml(action.config));
+					ctx.ui.notify(`Saved ${action.actions.length} Pi-Sandcastle config change(s).${action.rebuildImage ? " Starting sandbox image rebuild." : " Rebuild the sandbox image separately when needed."}`, "success");
+					if (action.rebuildImage) startConfigImageRebuild(ctx, action.config);
+					return;
+				}
 				const actions = action.type === "batch" ? action.actions : [action];
 				for (const action of actions) {
-				if (action.type === "init") {
-					if (existsSync(join(ctx.cwd, CONFIG_PATH))) {
+					if (action.type === "init") {
+						const result = ensureScaffold(ctx.cwd, { overwrite: true, hydrate: false });
+						ctx.ui.notify(`Reset Pi-Sandcastle config: ${result.changes.length ? result.changes.join("; ") : "no changes needed"}. Rebuild the sandbox image separately when needed.`, "success");
+					}
+					if (action.type === "apply-pack") {
 						ensureScaffold(ctx.cwd, { hydrate: false });
-						ctx.ui.notify(`${CONFIG_PATH} already exists. Use /backlog:config-raw init --force to overwrite it with defaults.`, "warning");
-						continue;
+						writeFileSync(join(ctx.cwd, CONFIG_PATH), configPackText(action.pack));
+						ctx.ui.notify(`Imported config pack '${action.pack}' to ${CONFIG_PATH}. Rebuild the sandbox image separately when needed.`, "success");
 					}
-					const result = ensureScaffold(ctx.cwd, { hydrate: false });
-					const cfg = await loadConfig(ctx.cwd);
-					const cliResult = await ensureSandcastleCliScaffold(ctx.cwd, cfg);
-					await quietlyBuildConfiguredImage(ctx.cwd, cfg, deps.image);
-					const changes = [...result.changes, ...cliResult.changes];
-					ctx.ui.notify(`Initialized Backlog execution config: ${changes.length ? changes.join("; ") : "no changes needed"}.`, "success");
-				}
-				if (action.type === "apply-pack") {
-					ensureScaffold(ctx.cwd, { hydrate: false });
-					writeFileSync(join(ctx.cwd, CONFIG_PATH), configPackText(action.pack));
-					const cfg = await loadConfig(ctx.cwd);
-					await ensureSandcastleCliScaffold(ctx.cwd, cfg, { reinitialize: true });
-					await quietlyBuildConfiguredImage(ctx.cwd, cfg, deps.image);
-					ctx.ui.notify(`Applied config pack '${action.pack}' to ${CONFIG_PATH}.`, "success");
-				}
-				if (action.type === "set-editor") {
-					setPreferredEditor(ctx.cwd, action.editor);
-					ctx.ui.notify(`Preferred Backlog execution config editor set to: ${action.editor}`, "success");
-				}
-				if (action.type === "set-config") {
-					if (!supportedConfigPath(action.path)) throw new Error(`Unsupported config path '${action.path}'.`);
-					ensureScaffold(ctx.cwd, { hydrate: true });
-					const configPath = join(ctx.cwd, CONFIG_PATH);
-					const raw = readFileSync(configPath, "utf8");
-					const updated = action.value === "default" && isDefaultableConfigPath(action.path)
-						? removeConfigValueInText(raw, action.path)
-						: setConfigValueInText(raw, action.path, coerceConfigValue(action.path, action.value));
-					writeFileSync(configPath, updated);
-					const cfg = await loadConfig(ctx.cwd);
-					if (ROOT_CONFIG_KEYS.includes(action.path as RootConfigKey)) {
-						await ensureSandcastleCliScaffold(ctx.cwd, cfg, { reinitialize: true });
-						await quietlyBuildConfiguredImage(ctx.cwd, cfg, deps.image);
+					if (action.type === "set-editor") {
+						setPreferredEditor(ctx.cwd, action.editor);
+						ctx.ui.notify(`Preferred Pi-Sandcastle config editor set to: ${action.editor}`, "success");
 					}
-					ctx.ui.notify(`Updated ${action.path}.`, "success");
-				}
-				if (["add-agent", "rename-agent", "delete-agent", "add-pipeline", "rename-pipeline", "delete-pipeline"].includes(action.type)) {
-					ensureScaffold(ctx.cwd, { hydrate: true });
-					const configPath = join(ctx.cwd, CONFIG_PATH);
-					const raw = readFileSync(configPath, "utf8");
-					let updated = raw;
-					if (action.type === "add-agent") updated = appendAgentText(raw, action.name);
-					if (action.type === "rename-agent") updated = updateYamlReferences(renameTopLevelMapEntry(raw, roleSectionName(raw), action.oldName, action.newName), action.oldName, action.newName);
-					if (action.type === "delete-agent") updated = removeYamlReferences(deleteTopLevelMapEntry(raw, roleSectionName(raw), action.name), action.name);
-					if (action.type === "add-pipeline") updated = appendPipelineText(raw, action.name);
-					if (action.type === "rename-pipeline") updated = renameTopLevelMapEntry(raw, "pipelines", action.oldName, action.newName);
-					if (action.type === "delete-pipeline") updated = deleteTopLevelMapEntry(raw, "pipelines", action.name);
-					writeFileSync(configPath, updated);
-					ctx.ui.notify(`Updated ${CONFIG_PATH}.`, "success");
-				}
-				if (action.type === "validate") {
-					const cfg = await loadExistingConfig(ctx.cwd);
-					const issues = validateConfig(ctx.cwd, cfg);
-					ctx.ui.notify(issues.length ? `Backlog execution config validation failed:\n- ${issues.join("\n- ")}` : "Backlog execution config validation passed.", issues.length ? "error" : "success");
-				}
-				if (action.type === "build-image") {
-					const cfg = await loadConfig(ctx.cwd).catch(() => ({ defaultSandbox: DEFAULT_SANDBOX, prompts: {}, agents: {}, chains: {}, pipelines: {} }) as SandcastleConfig);
-					const provider = imageProviderForSandbox(cfg.defaultSandbox) || "docker";
-					const imageName = defaultSandcastleImageName(ctx.cwd, cfg.imageNamePattern);
-					requireSandcastleCliScaffold(ctx.cwd);
-					await buildSandboxImageOnce(ctx.cwd, provider, imageName, deps.image?.buildImage || buildSandboxImage);
-					ctx.ui.notify(`Built Sandcastle ${provider} image ${imageName}.`, "success");
-				}
-				if (action.type === "sandcastle-init") {
-					const cfg = await loadConfig(ctx.cwd);
-					const result = await ensureSandcastleCliScaffold(ctx.cwd, cfg, { reinitialize: true });
-					await quietlyBuildConfiguredImage(ctx.cwd, cfg, deps.image);
-					ctx.ui.notify(`Initialized Execution runtime scaffold: ${result.changes.join("; ")}.`, "success");
-				}
-				if (action.type === "edit") {
-					const configPath = ensureScaffoldPath(ctx.cwd);
-					const exitCode = await ctx.ui.custom<number | null>((tui: any, _theme: any, _kb: any, done: (value: number | null) => void) => {
-						tui.stop();
-						process.stdout.write("\x1b[2J\x1b[H");
-						const status = runTerminalEditor(ctx.cwd, configPath);
-						tui.start();
-						tui.requestRender(true);
-						done(status);
-						return { render: () => [], invalidate: () => {} };
-					});
-					ctx.ui.notify(exitCode === 0 ? `Edited ${CONFIG_PATH}.` : `Editor exited with code ${exitCode}.`, exitCode === 0 ? "success" : "error");
-				}
+					if (action.type === "set-config") {
+						if (!supportedConfigPath(action.path)) throw new Error(`Unsupported config path '${action.path}'.`);
+						ensureScaffold(ctx.cwd, { hydrate: true });
+						const configPath = join(ctx.cwd, CONFIG_PATH);
+						const raw = readFileSync(configPath, "utf8");
+						const updated = action.value === "default" && isDefaultableConfigPath(action.path)
+							? removeConfigValueInText(raw, action.path)
+							: setConfigValueInText(raw, action.path, coerceConfigValue(action.path, action.value));
+						writeFileSync(configPath, updated);
+						ctx.ui.notify(`Updated ${action.path}. Rebuild the sandbox image separately when needed.`, "success");
+					}
+					if (["add-agent", "rename-agent", "delete-agent", "add-pipeline", "rename-pipeline", "delete-pipeline"].includes(action.type)) {
+						ensureScaffold(ctx.cwd, { hydrate: true });
+						const configPath = join(ctx.cwd, CONFIG_PATH);
+						const raw = readFileSync(configPath, "utf8");
+						let updated = raw;
+						if (action.type === "add-agent") updated = appendAgentText(raw, action.name);
+						if (action.type === "rename-agent") updated = updateYamlReferences(renameTopLevelMapEntry(raw, roleSectionName(raw), action.oldName, action.newName), action.oldName, action.newName);
+						if (action.type === "delete-agent") updated = removeYamlReferences(deleteTopLevelMapEntry(raw, roleSectionName(raw), action.name), action.name);
+						if (action.type === "add-pipeline") updated = appendPipelineText(raw, action.name);
+						if (action.type === "rename-pipeline") updated = renameTopLevelMapEntry(raw, "pipelines", action.oldName, action.newName);
+						if (action.type === "delete-pipeline") updated = deleteTopLevelMapEntry(raw, "pipelines", action.name);
+						writeFileSync(configPath, updated);
+						ctx.ui.notify(`Updated ${CONFIG_PATH}. Rebuild the sandbox image separately when needed.`, "success");
+					}
+					if (action.type === "replace-config") {
+						ensureScaffold(ctx.cwd, { hydrate: true });
+						writeFileSync(join(ctx.cwd, CONFIG_PATH), configToYaml(action.config));
+						ctx.ui.notify(`Replaced ${CONFIG_PATH}. Rebuild the sandbox image separately when needed.`, "success");
+					}
+					if (action.type === "validate") {
+						const cfg = await loadExistingConfig(ctx.cwd);
+						const issues = validateConfig(ctx.cwd, cfg);
+						ctx.ui.notify(issues.length ? `Pi-Sandcastle config validation failed:\n- ${issues.join("\n- ")}` : "Pi-Sandcastle config validation passed.", issues.length ? "error" : "success");
+					}
+					if (action.type === "build-image") {
+						const cfg = await loadConfig(ctx.cwd).catch(() => ({ defaultSandbox: DEFAULT_SANDBOX, prompts: {}, agents: {}, chains: {}, pipelines: {} }) as SandcastleConfig);
+						const provider = imageProviderForSandbox(cfg.defaultSandbox) || "docker";
+						const imageName = defaultSandcastleImageName(ctx.cwd, cfg.imageNamePattern);
+						requireSandcastleCliScaffold(ctx.cwd);
+						ctx.ui.notify(`Building Sandcastle ${provider} image ${imageName}...`, "info");
+						await buildSandboxImageOnce(ctx.cwd, provider, imageName, deps.image?.buildImage || buildSandboxImage);
+						ctx.ui.notify(`Built Sandcastle ${provider} image ${imageName}.`, "success");
+					}
+					if (action.type === "sandcastle-init") {
+						const cfg = await loadConfig(ctx.cwd);
+						const result = await ensureSandcastleCliScaffold(ctx.cwd, cfg, { reinitialize: true });
+						ctx.ui.notify(`Initialized execution scaffold: ${result.changes.join("; ")}. Rebuild the sandbox image separately when needed.`, "success");
+					}
 				}
 				if (actions.length > 1) {
-					const cfg = await loadConfig(ctx.cwd);
-					const cliResult = await ensureSandcastleCliScaffold(ctx.cwd, cfg, { reinitialize: true });
-					await quietlyBuildConfiguredImage(ctx.cwd, cfg, deps.image);
-					ctx.ui.notify(`Saved ${actions.length} Backlog execution config change(s); ${cliResult.changes.join("; ")}.`, "success");
+					ctx.ui.notify(`Saved ${actions.length} Pi-Sandcastle config change(s). Rebuild the sandbox image separately when needed.`, "success");
 				}
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -3376,13 +3520,9 @@ Backlog views and processing:
 							break;
 						}
 						const result = ensureScaffold(ctx.cwd, { overwrite, hydrate: false });
-						const cfg = await loadConfig(ctx.cwd);
-						const cliResult = await ensureSandcastleCliScaffold(ctx.cwd, cfg, { reinitialize: overwrite });
-						await quietlyBuildConfiguredImage(ctx.cwd, cfg, deps.image);
-						const changes = [...result.changes, ...cliResult.changes];
-						const changeSummary = changes.length ? changes.join("; ") : "no changes needed";
+						const changeSummary = result.changes.length ? result.changes.join("; ") : "no changes needed";
 						const overwriteSummary = result.overwritten.length ? ` Overwrote: ${result.overwritten.join(", ")}.` : "";
-						ctx.ui.notify(`Backlog execution config init complete: ${changeSummary}.${overwriteSummary}`, "success");
+						ctx.ui.notify(`Pi-Sandcastle config init complete: ${changeSummary}.${overwriteSummary} Rebuild the sandbox image separately when needed.`, "success");
 						break;
 					}
 					case "edit": {
@@ -3443,12 +3583,7 @@ Backlog views and processing:
 						const current = readConfigText(ctx.cwd);
 						const updated = setConfigValueInText(current, path, parseScalar(rawValue));
 						writeConfigText(ctx.cwd, updated);
-						if (ROOT_CONFIG_KEYS.includes(path as RootConfigKey)) {
-							const cfg = await loadConfig(ctx.cwd);
-							await ensureSandcastleCliScaffold(ctx.cwd, cfg, { reinitialize: true });
-							await quietlyBuildConfiguredImage(ctx.cwd, cfg, deps.image);
-						}
-						ctx.ui.notify(`Updated ${path}.`, "success");
+						ctx.ui.notify(`Updated ${path}. Rebuild the sandbox image separately when needed.`, "success");
 						break;
 					}
 					case "reset": {
@@ -3464,12 +3599,7 @@ Backlog views and processing:
 						const current = readConfigText(ctx.cwd);
 						const updated = resetConfigText(current, path);
 						writeConfigText(ctx.cwd, updated);
-						if (!path || ROOT_CONFIG_KEYS.includes(path as RootConfigKey)) {
-							const cfg = await loadConfig(ctx.cwd);
-							await ensureSandcastleCliScaffold(ctx.cwd, cfg, { reinitialize: true });
-							await quietlyBuildConfiguredImage(ctx.cwd, cfg, deps.image);
-						}
-						ctx.ui.notify(path ? `Reset ${path} to defaults.` : "Reset supported config paths to defaults.", "success");
+						ctx.ui.notify(path ? `Reset ${path} to defaults. Rebuild the sandbox image separately when needed.` : "Reset supported config paths to defaults. Rebuild the sandbox image separately when needed.", "success");
 						break;
 					}
 					case "validate": {
@@ -3498,6 +3628,10 @@ Backlog views and processing:
 		description: "Run a fixed-domain pipeline: /backlog:pipeline <pipeline> [prompt]",
 		getArgumentCompletions: (prefix: string) => pipelineCompletionItems(tokenAfterLastSpace(prefix)),
 		handler: async (args, ctx) => {
+			if (isConfigImageRebuildInProgress()) {
+				ctx.ui.notify("The sandbox image is being rebuilt after config changes. Retry /backlog:pipeline when the new image is built.", "warning");
+				return;
+			}
 			const { pipeline, prompt } = parsePipelineCommandArgs(args);
 			if (!pipeline) {
 				ctx.ui.notify("Usage: /backlog:pipeline <pipeline> [prompt]", "error");
@@ -3524,6 +3658,10 @@ Backlog views and processing:
 			return flagCompletionItems(["--pipeline", "-p"], tokenAfterLastSpace(prefix));
 		},
 		handler: async (args, ctx) => {
+			if (isConfigImageRebuildInProgress()) {
+				ctx.ui.notify("The sandbox image is being rebuilt after config changes. Retry /backlog:process when the new image is built.", "warning");
+				return;
+			}
 			let baseRecord: BacklogProcessRecord | undefined;
 			try {
 				const { query, pipeline: explicitPipeline } = parseBacklogProcessArgs(args);
@@ -3654,6 +3792,9 @@ Backlog views and processing:
 			additionalProperties: false,
 		}),
 		async execute(_toolCallId, params, _signal, onUpdate, ctx) {
+			if (isConfigImageRebuildInProgress()) {
+				return { content: [{ type: "text", text: "The sandbox image is being rebuilt after config changes. Retry delegate_agent when the new image is built." }] };
+			}
 			const { agent, task } = params as { agent: string; task: string };
 			await loadConfig(ctx.cwd);
 			onUpdate?.({ content: [{ type: "text", text: `Dispatching ${agent} via Sandcastle...` }] });

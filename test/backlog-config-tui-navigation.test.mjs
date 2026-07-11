@@ -152,26 +152,22 @@ test('backlog config TUI ctrl+q force quits from nested edit mode', () => {
   `);
 });
 
-test('backlog config TUI can roll back one pending change from unsaved changes child screen', () => {
+test('backlog config TUI offers rebuild-aware save choices for image-affecting changes', () => {
   runTuiScript(String.raw`
-    enter(); // Defaults
+    enter(); // Runtime Defaults
     enter(); // Sandbox
     down(); enter(); // podman
     esc(); // main
-    enter(); // Defaults
+    enter(); // Runtime Defaults
     down(); enter(); // Model
     for (const ch of 'new-model') press(ch);
     enter();
     esc(); // main
     esc(); // unsaved changes
     assert.match(text(), /UNSAVED CHANGES/);
-    assert.match(text(), /Sandbox: docker → podman/);
-    assert.match(text(), /Model: claude-sonnet-4-6 → new-model/);
-    down(); down(); down(); enter(); // Change 1 child screen
-    assert.match(text(), /ROLL BACK CHANGE/);
-    enter(); // Delete this pending change
-    assert.match(text(), /UNSAVED CHANGES/);
-    assert.doesNotMatch(text(), /Sandbox: docker → podman/);
-    assert.match(text(), /Model: claude-sonnet-4-6 → new-model/);
+    assert.match(text(), /Save and rebuild/);
+    assert.match(text(), /Save without rebuilding/);
+    assert.match(text(), /Exit without saving/);
+    assert.doesNotMatch(text(), /Change 1/);
   `);
 });

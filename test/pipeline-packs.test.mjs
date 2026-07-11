@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { loadExecutionRuntimePack } from '../extensions/pi-sandcastle/execution-runtime.ts';
-import { loadPipelinePacks, packsToConfig, buildDefaultConfigText } from '../extensions/pi-sandcastle/pipeline-packs.mjs';
+import { loadPipelinePacks, packsToConfig, buildDefaultConfigText, configToYaml } from '../extensions/pi-sandcastle/pipeline-packs.mjs';
 
 test('pipeline packs are discovered from the Pi-Sandcastle execution runtime pack', () => {
   const packs = loadPipelinePacks();
@@ -32,4 +32,14 @@ test('default config yaml stores only user-selected/default override settings', 
   assert.doesNotMatch(text, /^agents:/m);
   assert.doesNotMatch(text, /^pipelines:/m);
   assert.doesNotMatch(text, /^teams:/m);
+});
+
+test('configToYaml preserves legacy chains when rewriting drafts', () => {
+  const cfg = packsToConfig();
+  cfg.chains = { review: [{ role: 'reviewer', prompt: 'Review the branch.' }] };
+  const text = configToYaml(cfg);
+  assert.match(text, /^chains:/m);
+  assert.match(text, /^  review:/m);
+  assert.match(text, /^    - role: reviewer/m);
+  assert.match(text, /Review the branch\./);
 });

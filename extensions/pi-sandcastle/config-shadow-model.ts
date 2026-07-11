@@ -14,7 +14,7 @@ export interface ConfigAgentDef {
 }
 
 export interface ConfigChainStep { role: string; prompt: string }
-export interface ConfigPipelineStep { role: string; prompt: string; sandbox?: ConfigAgentDef["sandbox"]; model?: string; maxIterations?: number; copyToWorktree?: string[] }
+export interface ConfigPipelineStep { role: string; description?: string; prompt: string; sandbox?: ConfigAgentDef["sandbox"]; model?: string; maxIterations?: number; copyToWorktree?: string[] }
 export interface ConfigPipelineDef { description?: string; branchStrategy?: Record<string, unknown>; sandbox?: ConfigAgentDef["sandbox"]; model?: string; copyToWorktree?: string[]; steps: ConfigPipelineStep[] }
 
 export interface ConfigShadowSnapshot {
@@ -56,8 +56,30 @@ export class ConfigShadowModel extends ShadowModelBase<ConfigShadowSnapshot> {
 			this.state.agents[parts[1]] ||= { name: parts[1] };
 			if (value === "default" && ["model", "sandbox"].includes(parts[2])) delete (this.state.agents[parts[1]] as any)[parts[2]];
 			else (this.state.agents[parts[1]] as any)[parts[2]] = value;
+		} else if (parts[0] === "pipelines" && parts.length === 3) {
+			this.state.pipelines[parts[1]] ||= { steps: [] };
+			(this.state.pipelines[parts[1]] as any)[parts[2]] = value;
+		} else if (parts[0] === "pipelines" && parts[2] === "steps" && parts.length === 5) {
+			this.state.pipelines[parts[1]] ||= { steps: [] };
+			const index = Number(parts[3]);
+			this.state.pipelines[parts[1]].steps[index] ||= { role: "worker", description: "Worker step", prompt: "Complete the requested task." };
+			if (value === "default" && ["model", "sandbox", "maxIterations"].includes(parts[4])) delete (this.state.pipelines[parts[1]].steps[index] as any)[parts[4]];
+			else (this.state.pipelines[parts[1]].steps[index] as any)[parts[4]] = value;
 		}
 		this.emit("set-config", `Set ${path}`, before, { path, value });
+	}
+
+	addPipelineStep(pipelineName: string): void {
+		const before = this.capture();
+		this.state.pipelines[pipelineName] ||= { steps: [] };
+		this.state.pipelines[pipelineName].steps.push({ role: "worker", description: "Worker step", prompt: "Complete the requested task." });
+		this.emit("add-pipeline-step", `Add step to pipeline ${pipelineName}`, before, { pipelineName });
+	}
+
+	deletePipelineStep(pipelineName: string, index: number): void {
+		const before = this.capture();
+		this.state.pipelines[pipelineName]?.steps.splice(index, 1);
+		this.emit("delete-pipeline-step", `Delete step ${index + 1} from pipeline ${pipelineName}`, before, { pipelineName, index });
 	}
 
 	addAgent(name: string): void {
@@ -85,7 +107,7 @@ export class ConfigShadowModel extends ShadowModelBase<ConfigShadowSnapshot> {
 
 	addPipeline(name: string): void {
 		const before = this.capture();
-		this.state.pipelines[name] = { description: `${name} pipeline`, steps: [{ role: "worker", prompt: "Complete the requested task." }] };
+		this.state.pipelines[name] = { description: `${name} pipeline`, steps: [{ role: "worker", description: "Worker step", prompt: "Complete the requested task." }] };
 		this.emit("add-pipeline", `Add pipeline ${name}`, before, { name });
 	}
 

@@ -147,7 +147,7 @@ export function runtimeToSandcastleConfig(pack = loadExecutionRuntimePack(), def
 			name,
 			description: agent.role ? `${agent.role} role` : `${name} role`,
 			provider: normalizeProvider(normalizeDefault(agent.provider, defaultAgent)),
-			model: normalizeDefault(agent.model, defaultModel),
+			model: agent.model && agent.model !== "default" ? String(agent.model) : undefined,
 			sandbox: agent.sandbox && agent.sandbox !== "default" ? normalizeSandbox(String(agent.sandbox)) : undefined,
 			systemPrompt: agent.systemPrompt,
 			maxIterations: agent.maxIterations,
@@ -199,6 +199,7 @@ function compileAgentStep(step: RuntimePipelineStep, pack: ExecutionRuntimePack)
 	return {
 		kind: step.kind,
 		role: step.role,
+		description: `${step.role || "Step"} ${step.kind || "runRole"}`,
 		prompt: step.prompt || `$INPUT`,
 		maxIterations: Number(step.overrides?.maxIterations || agent.maxIterations || 1),
 		copyToWorktree: agent.copyToWorktree,

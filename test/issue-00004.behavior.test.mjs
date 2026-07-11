@@ -28,6 +28,7 @@ function createTempRepoConfig() {
     '    description: Researcher',
     '    sandbox: docker',
     '    model: claude-opus-4-8',
+    '    systemPrompt: Researcher system prompt.',
     '  builder:',
     '    description: Builder',
     '    sandbox: docker',
@@ -149,6 +150,7 @@ test('/backlog:pipeline registers and parses prompt text deterministically', asy
   await handler('implement finish docs steps: should stay prompt text', ctx);
 
   assert.equal(calls.length, 2);
+  assert.match(calls[0].prompt, /Researcher system prompt/);
   assert.match(calls[0].prompt, /finish docs steps: should stay prompt text/);
   assert.equal(calls[0].sandbox.kind, 'docker');
   assert.equal(calls[0].agent.model, 'claude-opus-4-8');

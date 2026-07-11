@@ -54,6 +54,15 @@ export function configToYaml(config) {
     if (prompt.format !== undefined) lines.push(`    format: ${yamlScalar(prompt.format)}`);
     if (prompt.template !== undefined) lines.push(`    template: ${yamlBlock(prompt.template, 6)}`);
   }
+  if (Object.keys(config.chains || {}).length) {
+    lines.push('', 'chains:');
+    for (const [name, steps] of Object.entries(config.chains || {})) {
+      lines.push(`  ${name}:`);
+      for (const step of steps || []) {
+        lines.push(`    - role: ${yamlScalar(step.role)}`, `      prompt: ${yamlBlock(step.prompt || '', 6)}`);
+      }
+    }
+  }
   lines.push('', 'pipelines:');
   for (const [name, pipeline] of Object.entries(config.pipelines)) {
     lines.push(`  ${name}:`, `    description: ${yamlScalar(pipeline.description)}`, '    branchStrategy:');
@@ -61,7 +70,9 @@ export function configToYaml(config) {
     if (pipeline.sandbox !== undefined) lines.push(`    sandbox: ${yamlScalar(pipeline.sandbox)}`);
     lines.push(`    model: ${yamlScalar(pipeline.model)}`, `    copyToWorktree: ${yamlScalar(pipeline.copyToWorktree || [])}`, '    steps:');
     for (const step of pipeline.steps || []) {
-      lines.push(`      - kind: ${yamlScalar(step.kind || 'runRole')}`, `        role: ${yamlScalar(step.role)}`, `        prompt: ${yamlScalar(step.prompt)}`);
+      lines.push(`      - kind: ${yamlScalar(step.kind || 'runRole')}`, `        role: ${yamlScalar(step.role)}`);
+      if (step.description !== undefined) lines.push(`        description: ${yamlScalar(step.description)}`);
+      lines.push(`        prompt: ${yamlScalar(step.prompt)}`);
       if (step.maxIterations !== undefined) lines.push(`        maxIterations: ${yamlScalar(step.maxIterations)}`);
       if (step.copyToWorktree !== undefined) lines.push(`        copyToWorktree: ${yamlScalar(step.copyToWorktree)}`);
     }

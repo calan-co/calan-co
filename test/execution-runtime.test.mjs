@@ -69,6 +69,6 @@ test('configToYaml renders compiled runtime roles and pipelines', () => {
   assert.match(yaml, /^  parallel-planner-with-review:/m);
   assert.match(yaml, /^prompts:/m);
   assert.match(yaml, /template: \|\n      Inspect the configured issue tracker/s);
-  assert.match(yaml, /kind: runRole\n        role: planner\n        prompt: plan-work/);
+  assert.match(yaml, /kind: runRole\n        role: planner\n        description: planner runRole\n        prompt: plan-work/);
   assert.doesNotMatch(yaml, /^teams:/m);
 });

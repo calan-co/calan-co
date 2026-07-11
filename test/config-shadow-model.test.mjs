@@ -45,3 +45,27 @@ test('ConfigShadowModel defaultable set-config removes explicit agent override',
   model.setConfigValue('roles.planner.model', 'default');
   assert.equal(model.snapshot().agents.planner.model, undefined);
 });
+
+test('ConfigShadowModel edits pipeline fields and step overrides', () => {
+  const model = new ConfigShadowModel(baseConfig());
+  model.setConfigValue('pipelines.loop.description', 'Loop pipeline');
+  model.setConfigValue('pipelines.loop.steps.0.role', 'worker');
+  model.setConfigValue('pipelines.loop.steps.0.model', 'model-b');
+  model.setConfigValue('pipelines.loop.steps.0.model', 'default');
+  const snapshot = model.snapshot();
+  assert.equal(snapshot.pipelines.loop.description, 'Loop pipeline');
+  assert.equal(snapshot.pipelines.loop.steps[0].role, 'worker');
+  assert.equal(snapshot.pipelines.loop.steps[0].model, undefined);
+});
+
+test('ConfigShadowModel adds and deletes pipeline steps', () => {
+  const model = new ConfigShadowModel(baseConfig());
+  const changes = [];
+  model.onChange((change) => changes.push(change));
+  model.addPipelineStep('loop');
+  assert.equal(model.snapshot().pipelines.loop.steps.length, 2);
+  model.deletePipelineStep('loop', 0);
+  assert.equal(model.snapshot().pipelines.loop.steps.length, 1);
+  assert.equal(model.snapshot().pipelines.loop.steps[0].role, 'worker');
+  assert.deepEqual(changes.map((change) => change.type), ['add-pipeline-step', 'delete-pipeline-step']);
+});

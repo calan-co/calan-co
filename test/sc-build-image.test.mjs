@@ -142,7 +142,7 @@ test('/backlog:run auto-builds a missing docker image before starting Sandcastle
 });
 
 
-test('/backlog:config-raw set reinitializes and silently builds configured image', async () => {
+test('/backlog:config-raw set does not initialize or build the sandbox image', async () => {
   const cwd = makeRepo();
   const pi = fakePi();
   const calls = [];
@@ -160,8 +160,7 @@ test('/backlog:config-raw set reinitializes and silently builds configured image
     ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
   });
 
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].provider, 'docker');
+  assert.equal(calls.length, 0);
   assert.equal(notifications.some((entry) => /Building Sandcastle/.test(entry.message)), false);
-  assert.deepEqual(notifications.at(-1), { message: 'Updated defaultSandbox.', type: 'success' });
+  assert.deepEqual(notifications.at(-1), { message: 'Updated defaultSandbox. Rebuild the sandbox image separately when needed.', type: 'success' });
 });

@@ -109,11 +109,11 @@ test('issue 00002 registers /backlog:config-raw and manages repo-local config', 
     assert.match(showNotifications[0].message, /"defaultModel": "Agent Default"/);
 
     const setNotifications = await invoke('set defaultModel claude-opus-4-8');
-    assert.deepEqual(setNotifications, [{ message: 'Updated defaultModel.', type: 'success' }]);
+    assert.deepEqual(setNotifications, [{ message: 'Updated defaultModel. Rebuild the sandbox image separately when needed.', type: 'success' }]);
     assert.match(readFileSync(configPath, 'utf8'), /defaultModel: claude-opus-4-8/);
 
     const resetNotifications = await invoke('reset defaultModel');
-    assert.deepEqual(resetNotifications, [{ message: 'Reset defaultModel to defaults.', type: 'success' }]);
+    assert.deepEqual(resetNotifications, [{ message: 'Reset defaultModel to defaults. Rebuild the sandbox image separately when needed.', type: 'success' }]);
     assert.match(readFileSync(configPath, 'utf8'), /defaultModel: Agent Default/);
 
     writeFileSync(configPath, readFileSync(configPath, 'utf8').replace('defaultSandbox: docker', 'defaultSandbox: spaceship'));
