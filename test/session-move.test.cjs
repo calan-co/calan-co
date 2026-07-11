@@ -115,6 +115,10 @@ async function testSplitHonchoPlanRebuildsHeadSourceAndTailSeparately() {
   assert.equal(plan.tailMessages[0].createdAt, '2026-01-01T00:10:02.000Z');
 }
 
+async function testMoveRefusesMissingCurrentSessionBeforePromptingForTarget() {
+  assert.throws(() => mod.assertPersistedSessionFileForOperation('/tmp/definitely-missing-pi-session.jsonl', 'move'), /nothing to move|does not exist yet/);
+}
+
 async function testMutationSafetyGateRequiresIdleForAllMutations() {
   await assert.rejects(() => mod.runSessionMutationSafetyGate({ ctx: {}, sessionFile: '/tmp/s.jsonl', isCurrent: false, operation: 'move' }), /idle\/quiescence/);
   let waited = false;
@@ -282,6 +286,7 @@ async function main() {
   await testCommandParsingDefaultsAndSplitUx();
   await testSplitPartitionKeepsHeadAndCreatesTailFromTurn();
   await testSplitHonchoPlanRebuildsHeadSourceAndTailSeparately();
+  await testMoveRefusesMissingCurrentSessionBeforePromptingForTarget();
   await testMutationSafetyGateRequiresIdleForAllMutations();
   await testTranscriptPayload();
   await testSuccessfulRebuildValidatesContentAndDeletesSource();

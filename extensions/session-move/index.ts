@@ -1106,6 +1106,8 @@ export async function createSplitManifest(params: { sessionFile: string; tailFil
 }
 
 async function completeMoveCommand(parsed: ParsedMoveCommand, ctx: any): Promise<ParsedMoveCommand | null> {
+  const probe = await resolveSessionFileForMove(parsed.sessionToken, ctx);
+  assertPersistedSessionFileForOperation(probe.sessionFile, "move");
   if (parsed.targetDir) return parsed;
   if (!ctx.hasUI) {
     ctx.ui.notify(moveHelpText(), "warning");
@@ -1116,6 +1118,13 @@ async function completeMoveCommand(parsed: ParsedMoveCommand, ctx: any): Promise
   if (!target) return null;
   next.targetDir = target;
   return next;
+}
+
+export function assertPersistedSessionFileForOperation(sessionFile: string | undefined, operation: "move" | "split" | "turns" = "move"): asserts sessionFile is string {
+  if (!sessionFile) throw new Error(`Current Pi session is not persisted; there is nothing to ${operation} yet.`);
+  if (!existsSync(sessionFile)) {
+    throw new Error(`Current Pi session file does not exist yet: ${sessionFile}\nThere is nothing to ${operation} until the session has been persisted. Send a message first, or specify an existing session id/file.`);
+  }
 }
 
 function quoteCommandArg(value: string): string {
@@ -1556,7 +1565,13 @@ async function handleSessionInput(text: string, ctx: any, pi: ExtensionAPI): Pro
 }
 
 async function readHeader(file: string): Promise<{ header: SessionHeader; lines: string[] }> {
-  const text = await readFile(file, "utf8");
+  let text: string;
+  try {
+    text = await readFile(file, "utf8");
+  } catch (error) {
+    if ((error as any)?.code === "ENOENT") throw new Error(`Pi session file does not exist: ${file}\nIf this is a new/empty current session, there is nothing to move or split yet. Send a message first, or specify an existing session id/file.`);
+    throw error;
+  }
   const lines = text.split(/\r?\n/);
   if (!lines[0]) throw new Error("Session file is empty.");
   const header = JSON.parse(lines[0]) as SessionHeader;
