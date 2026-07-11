@@ -1836,6 +1836,17 @@ export default function sessionMove(pi: ExtensionAPI) {
     return await handleSessionInput(event.text, ctx, pi) ? { action: "handled" } : { action: "continue" };
   });
 
+  pi.registerCommand("session", {
+    description: "Session utilities: turns, split, and move",
+    handler: async (args, ctx) => {
+      try {
+        await handlePreferredSessionCommand(args ?? "", ctx);
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+      }
+    },
+  });
+
   pi.registerCommand("session:turns", {
     description: "Fallback: list, pick, or resolve stable user-message turn ids for a Pi session",
     handler: async (args, ctx) => {
