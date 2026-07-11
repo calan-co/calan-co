@@ -1223,7 +1223,7 @@ async function executeMoveCommand(parsed: ParsedMoveCommand, ctx: any, options: 
     `Memory: ${fromHonchoKey}`,
     ` -> ${toHonchoKey}`,
     targetExists ? "Target Honcho exists: preserve + merge approved." : "Target Honcho missing: create approved.",
-    `Will migrate ${rebuildMessages.length} Honcho message(s) at the target, validate, then delete or partition source memory before moving Pi.`,
+    `Will migrate ${rebuildMessages.length} Honcho message(s) at the target, move/switch Pi, then delete or partition source memory after revalidation.`,
     isCurrent ? "Will switch this Pi process to the moved session file after writing." : "",
   ].filter(Boolean).join("\n"));
   if (!ok) return;
@@ -1252,18 +1252,14 @@ async function executeMoveCommand(parsed: ParsedMoveCommand, ctx: any, options: 
     });
     log.push(`rebuilt target Honcho session ${toHonchoKey} (${targetWrite.count} messages)`);
 
-    try {
+    const cleanupHonchoSource = async () => {
       const deleteValidation = await validateHonchoSessionsBeforeSourceDelete({ honcho, sourceKey: fromHonchoKey, targetKey: toHonchoKey, expectedTargetCount: targetWrite.count, expectedMessages: messages, expectedTargetMessages: targetWrite.expectedTargetMessages, migrationStartedAt });
       await writeManifest(migration.manifestFile, migration.manifest, { status: "honcho_predelete_validated", honchoValidation: deleteValidation, honchoAbortReasons: deleteValidation.abortReasons, sourceHonchoBackup: sourceBackupFile });
       if (deleteValidation.abortReasons.length > 0) throw Object.assign(new Error(`Refusing to alter source Honcho: ${deleteValidation.abortReasons.join("; ")}`), { validation: deleteValidation });
       const finalSourceValidation = await finalizeHonchoSourceAfterTargetValidated({ honcho, sourceKey: fromHonchoKey, targetKey: toHonchoKey, config: cfg, expectedTargetCount: targetWrite.count, expectedMessages: messages, expectedTargetMessages: targetWrite.expectedTargetMessages, migrationStartedAt, sourceBackupFile });
       await writeManifest(migration.manifestFile, migration.manifest, { status: finalSourceValidation.sourceResidualCount && finalSourceValidation.sourceResidualCount > 0 ? "honcho_source_partitioned" : "honcho_source_deleted", honchoValidation: finalSourceValidation, sourceHonchoBackup: sourceBackupFile });
-    } catch (error) {
-      const validation = (error as Error & { validation?: HonchoValidationDetails }).validation;
-      if (validation) await writeManifest(migration.manifestFile, migration.manifest, { status: "failed", honchoValidation: validation, honchoAbortReasons: validation.abortReasons });
-      throw error;
-    }
-    log.push(`deleted or partitioned source Honcho session ${fromHonchoKey}`);
+      log.push(`deleted or partitioned source Honcho session ${fromHonchoKey}`);
+    };
 
     const newHeader = { ...header, cwd: targetDir };
     lines[0] = JSON.stringify(newHeader);
@@ -1271,8 +1267,47 @@ async function executeMoveCommand(parsed: ParsedMoveCommand, ctx: any, options: 
     await mkdir(dirname(destFile), { recursive: true });
     await rename(sessionFile, destFile);
     await writeManifest(migration.manifestFile, migration.manifest, { status: "pi_written" });
-    await writeManifest(migration.manifestFile, migration.manifest, { status: "complete" });
     log.push(`moved Pi session to ${destFile}`);
+
+    if (isCurrent) {
+      await writeManifest(migration.manifestFile, migration.manifest, { status: "pi_written_pending_source_cleanup", recovery: { notes: [`Pi session moved and target Honcho validated. Resume manually with: pi --session ${destFile}`, `Source Honcho cleanup is pending and should be retried only after revalidation: ${fromHonchoKey}`] } });
+      try {
+        const result = await ctx.switchSession(destFile, { withSession: async (newCtx: any) => {
+          try {
+            await cleanupHonchoSource();
+            await writeManifest(migration.manifestFile, migration.manifest, { status: "complete" });
+            newCtx.ui.notify(log.join("\n"), "info");
+          } catch (cleanupError) {
+            await writeManifest(migration.manifestFile, migration.manifest, {
+              status: "pi_written_pending_source_cleanup",
+              errors: [{ at: "honcho-source-cleanup-after-switch", message: cleanupError instanceof Error ? cleanupError.message : String(cleanupError), stack: cleanupError instanceof Error ? cleanupError.stack : undefined }],
+            });
+            newCtx.ui.notify(`Session switched, but source Honcho cleanup is pending: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}\n${log.join("\n")}`, "warning");
+          }
+        } });
+        if (result?.cancelled) {
+          const recovery = `Session moved, but switch was cancelled. Resume manually with: pi --session ${destFile}`;
+          ctx.ui.notify(`${recovery}\nSource Honcho cleanup remains pending.\n${log.join("\n")}`, "error");
+          ctx.shutdown?.();
+        }
+      } catch (error) {
+        const recovery = `Session moved, but automatic switch failed. Resume manually with: pi --session ${destFile}`;
+        ctx.ui.notify(`${recovery}\nSource Honcho cleanup remains pending.\n${error instanceof Error ? error.message : String(error)}\n${log.join("\n")}`, "error");
+        ctx.shutdown?.();
+      }
+      return;
+    }
+
+    try {
+      await cleanupHonchoSource();
+      await writeManifest(migration.manifestFile, migration.manifest, { status: "complete" });
+    } catch (cleanupError) {
+      await writeManifest(migration.manifestFile, migration.manifest, {
+        status: "pi_written_pending_source_cleanup",
+        errors: [{ at: "honcho-source-cleanup-after-pi-write", message: cleanupError instanceof Error ? cleanupError.message : String(cleanupError), stack: cleanupError instanceof Error ? cleanupError.stack : undefined }],
+      });
+      log.push(`source Honcho cleanup pending: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
+    }
   } catch (error) {
     await writeManifest(migration.manifestFile, migration.manifest, {
       status: "failed",
@@ -1282,21 +1317,6 @@ async function executeMoveCommand(parsed: ParsedMoveCommand, ctx: any, options: 
     throw error;
   }
 
-  if (isCurrent) {
-    try {
-      const result = await ctx.switchSession(destFile, { withSession: async (newCtx: any) => newCtx.ui.notify(log.join("\n"), "info") });
-      if (result?.cancelled) {
-        const recovery = `Session moved, but switch was cancelled. Resume manually with: pi --session ${destFile}`;
-        ctx.ui.notify(`${recovery}\n${log.join("\n")}`, "error");
-        ctx.shutdown?.();
-      }
-    } catch (error) {
-      const recovery = `Session moved, but automatic switch failed. Resume manually with: pi --session ${destFile}`;
-      ctx.ui.notify(`${recovery}\n${error instanceof Error ? error.message : String(error)}\n${log.join("\n")}`, "error");
-      ctx.shutdown?.();
-    }
-    return;
-  }
   ctx.ui.notify(log.join("\n"), "info");
 }
 
