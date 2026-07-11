@@ -1265,7 +1265,9 @@ function standardPeers(config: HonchoConfig) {
 }
 
 async function fetchHonchoMessages(honcho: any, key: string): Promise<any[]> {
-  return pageToArray(await (await honcho.session(key)).messages({ size: 1000 }));
+  // Honcho currently rejects oversized page sizes with an opaque SDK error; Page.toArray()
+  // follows pagination, so keep the server-safe page size while still collecting all rows.
+  return pageToArray(await (await honcho.session(key)).messages({ size: 100 }));
 }
 
 async function addHonchoMessages(honcho: any, session: any, messages: NormalizedHonchoMessage[]): Promise<void> {
