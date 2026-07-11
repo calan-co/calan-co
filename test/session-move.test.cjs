@@ -22,7 +22,7 @@ const { join } = require('node:path');
 const createJiti = require('/opt/homebrew/Cellar/pi-coding-agent/0.80.3/libexec/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti');
 const jiti = createJiti(__filename, { interopDefault: true });
 
-const mod = jiti('/Users/macos/.pi/agent/extensions/session-move/index.ts');
+const mod = jiti(join(__dirname, '..', 'extensions', 'session-move', 'index.ts'));
 
 class MockPeer {
   constructor(id) { this.id = id; }
@@ -90,6 +90,28 @@ async function testTargetExistsRefuses() {
   assert.equal(honcho.sessionsMap.has('source'), true);
 }
 
+async function testMergeExistingTargetPreservesTargetAndPartitionsSource() {
+  const transcript = sampleMessages();
+  const sourceMessages = [
+    { peerId: 'macos', content: 'unrelated source memory', createdAt: '2026-01-01T00:00:00.500Z' },
+    { peerId: transcript[0].peerId, content: transcript[0].content, createdAt: '2026-01-01T00:10:00.000Z' },
+    { peerId: transcript[1].peerId, content: transcript[1].content, createdAt: '2026-01-01T00:10:01.000Z' },
+  ];
+  const aligned = mod.alignMigratedPayloadToSource(transcript, sourceMessages).messages;
+  assert.equal(aligned[0].createdAt, '2026-01-01T00:10:00.000Z');
+  const honcho = new MockHoncho({
+    source: { metadata: {}, configuration: {}, messages: sourceMessages },
+    target: { metadata: {}, configuration: {}, messages: [{ peerId: 'pi', content: 'existing target memory', createdAt: '2026-01-01T00:05:00.000Z' }] },
+  });
+  const written = await mod.writeHonchoTargetFromTranscript({ honcho, key: 'target', sourceKey: 'source', config: { peerName: 'macos', hosts: { pi: { aiPeer: 'pi' } } }, messages: aligned, migrationId: 'm1', sourceCwd: '/a', targetCwd: '/b', mergeTarget: true });
+  assert.equal(written.count, 3);
+  const finalized = await mod.finalizeHonchoSourceAfterTargetValidated({ honcho, sourceKey: 'source', targetKey: 'target', config: { peerName: 'macos', hosts: { pi: { aiPeer: 'pi' } } }, expectedTargetCount: 3, expectedMessages: aligned, expectedTargetMessages: written.expectedTargetMessages, migrationStartedAt: '2026-01-01T01:00:00.000Z' });
+  assert.equal(finalized.sourceResidualCount, 1);
+  assert.equal(honcho.sessionsMap.has('source'), true);
+  assert.deepEqual(honcho.sessionsMap.get('source').messages.map((m) => m.content), ['unrelated source memory']);
+  assert.deepEqual(honcho.sessionsMap.get('target').messages.map((m) => m.content), ['existing target memory', 'hello', 'hi']);
+}
+
 async function testTargetCountMatchesButContentDiffersSourceRemains() {
   const msgs = sampleMessages();
   const honcho = new MockHoncho({
@@ -122,7 +144,7 @@ async function testPostMigrationSourceMessageMissingFromTargetSourceRemains() {
     source: { metadata: {}, configuration: {}, messages: sourceMessages },
     target: { metadata: {}, configuration: {}, messages: msgs.map((m) => ({ peerId: m.peerId, content: m.content, createdAt: m.createdAt })) },
   });
-  await assert.rejects(() => mod.deleteHonchoSourceAfterTargetValidated({ honcho, sourceKey: 'source', targetKey: 'target', expectedTargetCount: 2, expectedMessages: msgs }), /post-migration|missing from target/);
+  await assert.rejects(() => mod.finalizeHonchoSourceAfterTargetValidated({ honcho, sourceKey: 'source', targetKey: 'target', config: {}, expectedTargetCount: 2, expectedMessages: msgs, migrationStartedAt: '2026-01-01T00:00:02.500Z' }), /post-migration|missing from target/);
   assert.equal(honcho.sessionsMap.has('source'), true);
 }
 
@@ -158,6 +180,7 @@ async function main() {
   await testDuplicateTargetFingerprintSourceRemains();
   await testPostMigrationSourceMessageMissingFromTargetSourceRemains();
   await testTargetExistsRefuses();
+  await testMergeExistingTargetPreservesTargetAndPartitionsSource();
   await testManifestTransitions();
   console.log('session-move tests ok');
 }

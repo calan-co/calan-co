@@ -259,9 +259,13 @@ type HonchoValidationDetails = {
   actualTargetHash: string;
   duplicateCount: number;
   sequenceMatches: boolean;
+  preexistingTargetCount?: number;
+  migratedPayloadCount?: number;
+  migratedPayloadHash?: string;
   sourceTotalCount?: number;
   sourceOwnedPresentCount?: number;
   sourceMissingCount?: number;
+  sourceResidualCount?: number;
   postMigrationSourceMessageCount?: number;
   abortReasons: string[];
 };
@@ -328,8 +332,7 @@ function collectAbortReasons(details: HonchoValidationDetails): string[] {
   return reasons;
 }
 
-export function validateHonchoTargetContent(expected: RebuildMessage[], actualMessages: any[]): HonchoValidationDetails {
-  const expectedNormalized = expected.map(normalizeExpectedMessage);
+function validateNormalizedTargetContent(expectedNormalized: NormalizedHonchoMessage[], actualMessages: any[]): HonchoValidationDetails {
   const actualNormalized = actualMessages.map(normalizeHonchoMessage);
   const details: HonchoValidationDetails = {
     expectedCount: expectedNormalized.length,
@@ -348,26 +351,55 @@ export function validateHonchoTargetContent(expected: RebuildMessage[], actualMe
   return details;
 }
 
-export function validateHonchoSourceBeforeDelete(params: { expectedMessages: RebuildMessage[]; sourceMessages: any[]; targetMessages: any[] }): HonchoValidationDetails {
-  const targetDetails = validateHonchoTargetContent(params.expectedMessages, params.targetMessages);
+export function validateHonchoTargetContent(expected: RebuildMessage[], actualMessages: any[]): HonchoValidationDetails {
+  return validateNormalizedTargetContent(expected.map(normalizeExpectedMessage), actualMessages);
+}
+
+export function alignMigratedPayloadToSource(expectedMessages: RebuildMessage[], sourceMessages: any[]): { messages: RebuildMessage[]; matchedSourceIndexes: number[]; missingCount: number } {
+  const source = sourceMessages.map(normalizeHonchoMessage);
+  const used = new Set<number>();
+  const matchedSourceIndexes: number[] = [];
+  let missingCount = 0;
+  const messages = expectedMessages.map((message) => {
+    const expected = normalizeExpectedMessage(message);
+    const sourceIndex = source.findIndex((candidate, index) => !used.has(index) && candidate.peerId === expected.peerId && candidate.content === expected.content);
+    if (sourceIndex === -1) {
+      missingCount++;
+      return message;
+    }
+    used.add(sourceIndex);
+    matchedSourceIndexes.push(sourceIndex);
+    const sourceCreatedAt = source[sourceIndex]?.createdAt;
+    return sourceCreatedAt ? { ...message, createdAt: sourceCreatedAt, metadata: { ...message.metadata, sourceHonchoCreatedAt: sourceCreatedAt } } : message;
+  });
+  return { messages, matchedSourceIndexes, missingCount };
+}
+
+export function validateHonchoSourceBeforeDelete(params: { expectedMessages: RebuildMessage[]; sourceMessages: any[]; targetMessages: any[]; expectedTargetMessages?: NormalizedHonchoMessage[]; migrationStartedAt?: string }): HonchoValidationDetails {
+  const expectedMigrated = params.expectedMessages.map(normalizeExpectedMessage);
+  const expectedTarget = params.expectedTargetMessages ?? expectedMigrated;
+  const targetDetails = validateNormalizedTargetContent(expectedTarget, params.targetMessages);
   const source = params.sourceMessages.map(normalizeHonchoMessage);
   const target = params.targetMessages.map(normalizeHonchoMessage);
-  const expected = params.expectedMessages.map(normalizeExpectedMessage);
-  const sourceOwnedPresentCount = countPresentByFingerprint(source, target);
-  const sourceMissingCount = Math.max(0, source.length - sourceOwnedPresentCount);
-  const expectedSet = new Set(expected.map(normalizedPeerContentFingerprint));
+  const sourceOwnedPresentCount = countPresentByFingerprint(expectedMigrated, source);
+  const sourceMissingCount = Math.max(0, expectedMigrated.length - sourceOwnedPresentCount);
+  const sourceResidualCount = Math.max(0, source.length - sourceOwnedPresentCount);
   const targetStableSet = new Set(target.map(stableFingerprint));
   const targetPeerContentSet = new Set(target.map(normalizedPeerContentFingerprint));
+  const migrationStarted = params.migrationStartedAt ? Date.parse(params.migrationStartedAt) : Number.POSITIVE_INFINITY;
   const postMigrationSourceMessageCount = source.filter((message) => {
-    const belongsToExpectedPayload = expectedSet.has(normalizedPeerContentFingerprint(message));
-    const presentInTarget = targetStableSet.has(stableFingerprint(message)) || targetPeerContentSet.has(normalizedPeerContentFingerprint(message));
-    return !belongsToExpectedPayload && !presentInTarget;
+    const createdAt = message.createdAt ? Date.parse(message.createdAt) : Number.NaN;
+    if (!Number.isFinite(createdAt) || createdAt < migrationStarted) return false;
+    return !(targetStableSet.has(stableFingerprint(message)) || targetPeerContentSet.has(normalizedPeerContentFingerprint(message)));
   }).length;
   const details: HonchoValidationDetails = {
     ...targetDetails,
+    migratedPayloadCount: expectedMigrated.length,
+    migratedPayloadHash: contentHash(expectedMigrated),
     sourceTotalCount: source.length,
     sourceOwnedPresentCount,
     sourceMissingCount,
+    sourceResidualCount,
     postMigrationSourceMessageCount,
     abortReasons: [],
   };
@@ -405,6 +437,8 @@ type ParsedMoveCommand = {
   splitRequested: boolean;
   continuePolicy?: "source" | "target";
   dryRun: boolean;
+  createTarget?: boolean;
+  mergeTarget?: boolean;
 };
 
 type ParsedTurnsCommand = {
@@ -475,6 +509,8 @@ function parseSessionSubcommand(args: string): ParsedSessionSubcommand {
     let targetDir: string | undefined;
     let dryRun = false;
     let splitRequested = false;
+    let createTarget = false;
+    let mergeTarget = false;
     let continuePolicy: ParsedMoveCommand["continuePolicy"];
     let explicitTurnRef: string | undefined;
     const trailing: string[] = [];
@@ -482,6 +518,8 @@ function parseSessionSubcommand(args: string): ParsedSessionSubcommand {
     for (let i = 1; i < tokens.length; i++) {
       const token = tokens[i];
       if (token === "--dry-run") { dryRun = true; continue; }
+      if (token === "--create") { createTarget = true; continue; }
+      if (token === "--merge") { mergeTarget = true; continue; }
       if (token === "--split") { splitRequested = true; continue; }
       if (token === "--continue") {
         const policy = tokens[++i];
@@ -506,7 +544,7 @@ function parseSessionSubcommand(args: string): ParsedSessionSubcommand {
     trailing.push(...positional);
     const turnRef = explicitTurnRef ?? (trailing.length > 0 ? trailing.join(" ").trim() : undefined);
     if (turnRef) splitRequested = true;
-    return { kind: "move", sessionToken, targetDir, turnRef, splitRequested, continuePolicy, dryRun };
+    return { kind: "move", sessionToken, targetDir, turnRef, splitRequested, continuePolicy, dryRun, createTarget, mergeTarget };
   }
 
   throw new Error("Usage: /session turns [current|session-id|session-file] [query...] [--json] [--pick] | /session move <current|session-id|session-file> <target-dir> [<turn-ref-or-query>] [--turn <turn-ref>] [--continue source|target]");
@@ -794,6 +832,8 @@ function staticSessionCompletions(argumentText: string): AutocompleteSuggestions
     else if (position >= 3) {
       if (!tokens.includes("--turn")) items.push({ value: "--turn", label: "--turn", description: "Provide an explicit turn id, entry id, or query" });
       if (!tokens.includes("--continue")) items.push({ value: "--continue", label: "--continue", description: "Continuation policy: source or target" });
+      if (!tokens.includes("--create")) items.push({ value: "--create", label: "--create", description: "Approve creating a missing target Honcho session" });
+      if (!tokens.includes("--merge")) items.push({ value: "--merge", label: "--merge", description: "Approve merging into an existing target Honcho session" });
       if (!tokens.includes("--dry-run")) items.push({ value: "--dry-run", label: "--dry-run", description: "Parse and resolve only; do not mutate" });
       if (tokens[tokens.length - 1] === "--continue") {
         items.length = 0;
@@ -852,9 +892,9 @@ function createSessionAutocompleteProvider(current: AutocompleteProvider): Autoc
 function moveHelpText(): string {
   return [
     "Usage:",
-    "  /session move <current|session-id|session-file> <target-dir> [<turn-ref-or-query>] [--turn <turn-ref>] [--continue source|target] [--dry-run]",
+    "  /session move <current|session-id|session-file> <target-dir> [<turn-ref-or-query>] [--turn <turn-ref>] [--continue source|target] [--create] [--merge] [--dry-run]",
     "  /session move --split",
-    "  /session:move <current|session-id|session-file> <target-dir> [<turn-ref-or-query>] [--turn <turn-ref>] [--continue source|target] [--dry-run]",
+    "  /session:move <current|session-id|session-file> <target-dir> [<turn-ref-or-query>] [--turn <turn-ref>] [--continue source|target] [--create] [--merge] [--dry-run]",
     "Examples:",
     "  /session move current ~/ --dry-run",
     "  /session move current ~/ --turn 12 --continue target",
@@ -970,6 +1010,8 @@ function formatMoveCommand(parsed: ParsedMoveCommand, command = "/session:move")
   if (parsed.splitRequested && !parsed.turnRef) parts.push("--split");
   if (parsed.turnRef) parts.push("--turn", quoteCommandArg(parsed.turnRef));
   if (parsed.continuePolicy) parts.push("--continue", parsed.continuePolicy);
+  if (parsed.createTarget) parts.push("--create");
+  if (parsed.mergeTarget) parts.push("--merge");
   if (parsed.dryRun) parts.push("--dry-run");
   return parts.join(" ");
 }
@@ -1055,8 +1097,18 @@ async function executeMoveCommand(parsed: ParsedMoveCommand, ctx: any, options: 
     environment: runtime.environment,
   });
   if (!(await honchoSessionExists(honcho, fromHonchoKey))) throw new Error(`Source Honcho session does not exist: ${fromHonchoKey}`);
-  if (await honchoSessionExists(honcho, toHonchoKey)) {
-    throw new Error(`Target Honcho session already exists: ${toHonchoKey}. Refusing to append duplicates; choose an empty target or add an explicit replace mode later.`);
+  const targetExists = await honchoSessionExists(honcho, toHonchoKey);
+  if (targetExists && !parsed.mergeTarget) {
+    if (!ctx.hasUI) throw new Error(`Target Honcho session exists: ${toHonchoKey}. Re-run with --merge to approve preserving existing target messages and adding this session.`);
+    const mergeOk = await ctx.ui.confirm("Merge into existing Honcho session?", `Target Honcho session exists:\n${toHonchoKey}\n\nExisting messages will be preserved and moved messages will be added only after duplicate checks pass.`);
+    if (!mergeOk) return;
+    parsed.mergeTarget = true;
+  }
+  if (!targetExists && !parsed.createTarget) {
+    if (!ctx.hasUI) throw new Error(`Target Honcho session does not exist: ${toHonchoKey}. Re-run with --create to approve creating it.`);
+    const createOk = await ctx.ui.confirm("Create target Honcho session?", `Target Honcho session does not exist:\n${toHonchoKey}\n\nA new target memory session will be created.`);
+    if (!createOk) return;
+    parsed.createTarget = true;
   }
 
   const ok = await ctx.ui.confirm("Move session?", [
@@ -1066,7 +1118,8 @@ async function executeMoveCommand(parsed: ParsedMoveCommand, ctx: any, options: 
     ` -> ${targetDir}`,
     `Memory: ${fromHonchoKey}`,
     ` -> ${toHonchoKey}`,
-    `Will rebuild ${rebuildMessages.length} Honcho message(s) at the target, validate, then delete source memory before moving Pi.`,
+    targetExists ? "Target Honcho exists: preserve + merge approved." : "Target Honcho missing: create approved.",
+    `Will migrate ${rebuildMessages.length} Honcho message(s) at the target, validate, then delete or partition source memory before moving Pi.`,
     isCurrent ? "Will switch this Pi process to the moved session file after writing." : "",
   ].filter(Boolean).join("\n"));
   if (!ok) return;
@@ -1074,8 +1127,14 @@ async function executeMoveCommand(parsed: ParsedMoveCommand, ctx: any, options: 
   const migration = await createMoveManifest({ sessionFile, destFile, sourceCwd: String(header.cwd), targetDir, operation: "move", dryRun: false, sourceHonchoKey: fromHonchoKey, targetHonchoKey: toHonchoKey });
   const log = [`manifest: ${migration.manifestFile}`];
   try {
-    const messages = buildWholeSessionRebuildMessages({ header, entries, sessionFile, migrationId: migration.migrationId, config: cfg });
-    const targetWrite = await writeHonchoTargetFromTranscript({ honcho, key: toHonchoKey, sourceKey: fromHonchoKey, config: cfg, messages, migrationId: migration.migrationId, sourceCwd: String(header.cwd), targetCwd: targetDir });
+    const migrationStartedAt = new Date().toISOString();
+    const transcriptMessages = buildWholeSessionRebuildMessages({ header, entries, sessionFile, migrationId: migration.migrationId, config: cfg });
+    const sourceMessagesBeforeTargetWrite = await fetchHonchoMessages(honcho, fromHonchoKey);
+    const aligned = alignMigratedPayloadToSource(transcriptMessages, sourceMessagesBeforeTargetWrite);
+    if (aligned.missingCount > 0) throw new Error(`Source Honcho session is missing ${aligned.missingCount} transcript message(s); refusing to migrate incomplete source payload.`);
+    const messages = aligned.messages;
+    const sourceBackupFile = join(migration.migrationDir, "source-honcho-backup.json");
+    const targetWrite = await writeHonchoTargetFromTranscript({ honcho, key: toHonchoKey, sourceKey: fromHonchoKey, config: cfg, messages, migrationId: migration.migrationId, sourceCwd: String(header.cwd), targetCwd: targetDir, mergeTarget: parsed.mergeTarget });
     await writeManifest(migration.manifestFile, migration.manifest, {
       status: "honcho_target_written",
       honchoValidation: targetWrite.validation,
@@ -1084,21 +1143,23 @@ async function executeMoveCommand(parsed: ParsedMoveCommand, ctx: any, options: 
       honchoExpectedCount: targetWrite.validation.expectedCount,
       honchoExpectedHash: targetWrite.validation.expectedHash,
       honchoDuplicateCount: targetWrite.validation.duplicateCount,
+      honchoPreexistingTargetCount: targetWrite.validation.preexistingTargetCount,
+      honchoMigratedPayloadCount: targetWrite.validation.migratedPayloadCount,
     });
     log.push(`rebuilt target Honcho session ${toHonchoKey} (${targetWrite.count} messages)`);
 
     try {
-      const deleteValidation = await validateHonchoSessionsBeforeSourceDelete({ honcho, sourceKey: fromHonchoKey, targetKey: toHonchoKey, expectedTargetCount: targetWrite.count, expectedMessages: messages });
-      await writeManifest(migration.manifestFile, migration.manifest, { status: "honcho_predelete_validated", honchoValidation: deleteValidation, honchoAbortReasons: deleteValidation.abortReasons });
-      if (deleteValidation.abortReasons.length > 0) throw Object.assign(new Error(`Refusing to delete source Honcho: ${deleteValidation.abortReasons.join("; ")}`), { validation: deleteValidation });
-      await (await honcho.session(fromHonchoKey)).delete();
-      await writeManifest(migration.manifestFile, migration.manifest, { status: "honcho_source_deleted", honchoValidation: deleteValidation });
+      const deleteValidation = await validateHonchoSessionsBeforeSourceDelete({ honcho, sourceKey: fromHonchoKey, targetKey: toHonchoKey, expectedTargetCount: targetWrite.count, expectedMessages: messages, expectedTargetMessages: targetWrite.expectedTargetMessages, migrationStartedAt });
+      await writeManifest(migration.manifestFile, migration.manifest, { status: "honcho_predelete_validated", honchoValidation: deleteValidation, honchoAbortReasons: deleteValidation.abortReasons, sourceHonchoBackup: sourceBackupFile });
+      if (deleteValidation.abortReasons.length > 0) throw Object.assign(new Error(`Refusing to alter source Honcho: ${deleteValidation.abortReasons.join("; ")}`), { validation: deleteValidation });
+      const finalSourceValidation = await finalizeHonchoSourceAfterTargetValidated({ honcho, sourceKey: fromHonchoKey, targetKey: toHonchoKey, config: cfg, expectedTargetCount: targetWrite.count, expectedMessages: messages, expectedTargetMessages: targetWrite.expectedTargetMessages, migrationStartedAt, sourceBackupFile });
+      await writeManifest(migration.manifestFile, migration.manifest, { status: finalSourceValidation.sourceResidualCount && finalSourceValidation.sourceResidualCount > 0 ? "honcho_source_partitioned" : "honcho_source_deleted", honchoValidation: finalSourceValidation, sourceHonchoBackup: sourceBackupFile });
     } catch (error) {
       const validation = (error as Error & { validation?: HonchoValidationDetails }).validation;
       if (validation) await writeManifest(migration.manifestFile, migration.manifest, { status: "failed", honchoValidation: validation, honchoAbortReasons: validation.abortReasons });
       throw error;
     }
-    log.push(`deleted source Honcho session ${fromHonchoKey}`);
+    log.push(`deleted or partitioned source Honcho session ${fromHonchoKey}`);
 
     const newHeader = { ...header, cwd: targetDir };
     lines[0] = JSON.stringify(newHeader);
@@ -1195,26 +1256,19 @@ async function honchoSessionExists(honcho: any, key: string): Promise<boolean> {
   return sessions.some((s: any) => s.id === key);
 }
 
-export async function writeHonchoTargetFromTranscript(params: { honcho: any; key: string; sourceKey: string; config: HonchoConfig; messages: RebuildMessage[]; migrationId: string; sourceCwd: string; targetCwd: string }) {
-  const { honcho, key, sourceKey, config, messages } = params;
-  if (await honchoSessionExists(honcho, key)) {
-    throw new Error(`Target Honcho session already exists: ${key}. Refusing to append because that can duplicate moved messages.`);
-  }
+function standardPeers(config: HonchoConfig) {
   const runtime = honchoRuntimeConfig(config);
-  const source = await honcho.session(sourceKey);
-  let metadata: Record<string, unknown> = {};
-  let configuration: Record<string, unknown> = {};
-  try { metadata = await source.getMetadata(); } catch { metadata = {}; }
-  try { configuration = await source.getConfiguration(); } catch { configuration = {}; }
-  const target = await honcho.session(key, {
-    metadata: { ...metadata, movedFromSessionKey: sourceKey, sourceCwd: params.sourceCwd, targetCwd: params.targetCwd, migrationId: params.migrationId, rebuiltBy: "session-move" },
-    configuration,
-    peers: [
-      [runtime.peerName, { observeMe: runtime.observeMe, observeOthers: runtime.observeOthers }],
-      [runtime.aiPeer, { observeMe: runtime.aiObserveMe, observeOthers: runtime.aiObserveOthers }],
-    ],
-  });
+  return [
+    [runtime.peerName, { observeMe: runtime.observeMe, observeOthers: runtime.observeOthers }],
+    [runtime.aiPeer, { observeMe: runtime.aiObserveMe, observeOthers: runtime.aiObserveOthers }],
+  ];
+}
 
+async function fetchHonchoMessages(honcho: any, key: string): Promise<any[]> {
+  return pageToArray(await (await honcho.session(key)).messages({ size: 1000 }));
+}
+
+async function addHonchoMessages(honcho: any, session: any, messages: NormalizedHonchoMessage[]): Promise<void> {
   const peerCache = new Map<string, any>();
   const getPeer = async (id: string) => {
     let peer = peerCache.get(id);
@@ -1224,39 +1278,95 @@ export async function writeHonchoTargetFromTranscript(params: { honcho: any; key
   for (let i = 0; i < messages.length; i += 50) {
     const batch = [];
     for (const m of messages.slice(i, i + 50)) {
-      batch.push((await getPeer(m.peerId)).message(m.content, { metadata: m.metadata, createdAt: m.createdAt }));
+      batch.push((await getPeer(m.peerId)).message(m.content, { metadata: m.metadata ?? {}, createdAt: m.createdAt }));
     }
-    if (batch.length > 0) await target.addMessages(batch);
+    if (batch.length > 0) await session.addMessages(batch);
   }
-  const written = await pageToArray(await target.messages({ size: 1000 }));
-  const validation = validateHonchoTargetContent(messages, written);
-  if (validation.abortReasons.length > 0) throw new Error(`Target Honcho validation failed: ${validation.abortReasons.join("; ")}`);
-  return { count: validation.actualTargetCount, hash: validation.actualTargetHash, validation };
 }
 
-export async function validateHonchoSessionsBeforeSourceDelete(params: { honcho: any; sourceKey: string; targetKey: string; expectedTargetCount?: number; expectedMessages: RebuildMessage[] }) {
-  const target = await params.honcho.session(params.targetKey);
-  const source = await params.honcho.session(params.sourceKey);
+async function sourceSessionBase(honcho: any, sourceKey: string): Promise<{ metadata: Record<string, unknown>; configuration: Record<string, unknown> }> {
+  const source = await honcho.session(sourceKey);
+  let metadata: Record<string, unknown> = {};
+  let configuration: Record<string, unknown> = {};
+  try { metadata = await source.getMetadata(); } catch { metadata = {}; }
+  try { configuration = await source.getConfiguration(); } catch { configuration = {}; }
+  return { metadata, configuration };
+}
+
+export async function writeHonchoTargetFromTranscript(params: { honcho: any; key: string; sourceKey: string; config: HonchoConfig; messages: RebuildMessage[]; migrationId: string; sourceCwd: string; targetCwd: string; mergeTarget?: boolean }) {
+  const { honcho, key, sourceKey, config, messages } = params;
+  const targetExists = await honchoSessionExists(honcho, key);
+  if (targetExists && !params.mergeTarget) {
+    throw new Error(`Target Honcho session already exists: ${key}. Use --merge to approve merging moved messages into the existing target.`);
+  }
+  const existingTargetMessages = targetExists ? await fetchHonchoMessages(honcho, key) : [];
+  const existingTarget = existingTargetMessages.map(normalizeHonchoMessage);
+  const migrating = messages.map(normalizeExpectedMessage);
+  const existingPeerContent = new Set(existingTarget.map(normalizedPeerContentFingerprint));
+  const overlapCount = migrating.filter((message) => existingPeerContent.has(normalizedPeerContentFingerprint(message))).length;
+  if (overlapCount > 0) throw new Error(`Target Honcho session already contains ${overlapCount} moved message(s); refusing to duplicate migrated payload.`);
+
+  const { metadata, configuration } = await sourceSessionBase(honcho, sourceKey);
+  const target = targetExists ? await honcho.session(key) : await honcho.session(key, {
+    metadata: { ...metadata, movedFromSessionKey: sourceKey, sourceCwd: params.sourceCwd, targetCwd: params.targetCwd, migrationId: params.migrationId, rebuiltBy: "session-move" },
+    configuration,
+    peers: standardPeers(config),
+  });
+
+  await addHonchoMessages(honcho, target, migrating);
+  const written = await fetchHonchoMessages(honcho, key);
+  const expectedTarget = [...existingTarget, ...migrating];
+  const validation = validateNormalizedTargetContent(expectedTarget, written);
+  validation.preexistingTargetCount = existingTarget.length;
+  validation.migratedPayloadCount = migrating.length;
+  validation.migratedPayloadHash = contentHash(migrating);
+  validation.abortReasons = collectAbortReasons(validation);
+  if (validation.abortReasons.length > 0) throw new Error(`Target Honcho validation failed: ${validation.abortReasons.join("; ")}`);
+  return { count: validation.actualTargetCount, hash: validation.actualTargetHash, validation, messages, expectedTargetMessages: expectedTarget };
+}
+
+export async function validateHonchoSessionsBeforeSourceDelete(params: { honcho: any; sourceKey: string; targetKey: string; expectedTargetCount?: number; expectedMessages: RebuildMessage[]; expectedTargetMessages?: NormalizedHonchoMessage[]; migrationStartedAt?: string }) {
   const [targetMessages, sourceMessages] = await Promise.all([
-    pageToArray(await target.messages({ size: 1000 })),
-    pageToArray(await source.messages({ size: 1000 })),
+    fetchHonchoMessages(params.honcho, params.targetKey),
+    fetchHonchoMessages(params.honcho, params.sourceKey),
   ]);
-  const validation = validateHonchoSourceBeforeDelete({ expectedMessages: params.expectedMessages, sourceMessages, targetMessages });
+  const validation = validateHonchoSourceBeforeDelete({ expectedMessages: params.expectedMessages, sourceMessages, targetMessages, expectedTargetMessages: params.expectedTargetMessages, migrationStartedAt: params.migrationStartedAt });
   if (typeof params.expectedTargetCount === "number" && validation.actualTargetCount !== params.expectedTargetCount) {
     validation.abortReasons.push(`target count changed: expected ${params.expectedTargetCount}, got ${validation.actualTargetCount}`);
   }
   return validation;
 }
 
-export async function deleteHonchoSourceAfterTargetValidated(params: { honcho: any; sourceKey: string; targetKey: string; expectedTargetCount?: number; expectedMessages: RebuildMessage[] }) {
-  const validation = await validateHonchoSessionsBeforeSourceDelete(params);
+export async function finalizeHonchoSourceAfterTargetValidated(params: { honcho: any; sourceKey: string; targetKey: string; config: HonchoConfig; expectedTargetCount?: number; expectedMessages: RebuildMessage[]; expectedTargetMessages?: NormalizedHonchoMessage[]; migrationStartedAt?: string; sourceBackupFile?: string }) {
+  const sourceMessagesRaw = await fetchHonchoMessages(params.honcho, params.sourceKey);
+  const aligned = alignMigratedPayloadToSource(params.expectedMessages, sourceMessagesRaw);
+  const validation = await validateHonchoSessionsBeforeSourceDelete({ ...params, expectedMessages: aligned.messages });
   if (validation.abortReasons.length > 0) {
-    const error = new Error(`Refusing to delete source Honcho: ${validation.abortReasons.join("; ")}`) as Error & { validation?: HonchoValidationDetails };
+    const error = new Error(`Refusing to alter source Honcho: ${validation.abortReasons.join("; ")}`) as Error & { validation?: HonchoValidationDetails };
     error.validation = validation;
     throw error;
   }
-  await (await params.honcho.session(params.sourceKey)).delete();
-  return validation;
+  const matched = new Set(aligned.matchedSourceIndexes);
+  const residual = sourceMessagesRaw.map(normalizeHonchoMessage).filter((_message, index) => !matched.has(index));
+  const source = await params.honcho.session(params.sourceKey);
+  const { metadata, configuration } = await sourceSessionBase(params.honcho, params.sourceKey);
+  if (params.sourceBackupFile) {
+    await writeFile(params.sourceBackupFile, JSON.stringify({ key: params.sourceKey, metadata, configuration, messages: sourceMessagesRaw.map(normalizeHonchoMessage) }, null, 2), "utf8");
+  }
+  await source.delete();
+  if (residual.length > 0) {
+    const recreated = await params.honcho.session(params.sourceKey, { metadata: { ...metadata, rebuiltBy: "session-move", rebuiltAfterMigration: params.migrationStartedAt }, configuration, peers: standardPeers(params.config) });
+    await addHonchoMessages(params.honcho, recreated, residual);
+    const rebuiltSource = (await fetchHonchoMessages(params.honcho, params.sourceKey)).map(normalizeHonchoMessage);
+    const sourceValidation = validateNormalizedTargetContent(residual, rebuiltSource);
+    if (sourceValidation.abortReasons.length > 0) throw Object.assign(new Error(`Source residual rebuild validation failed: ${sourceValidation.abortReasons.join("; ")}`), { validation: sourceValidation });
+  }
+  return { ...validation, sourceResidualCount: residual.length };
+}
+
+export async function deleteHonchoSourceAfterTargetValidated(params: { honcho: any; sourceKey: string; targetKey: string; expectedTargetCount?: number; expectedMessages: RebuildMessage[] }) {
+  const result = await finalizeHonchoSourceAfterTargetValidated({ ...params, config: {} });
+  return result;
 }
 
 export default function sessionMove(pi: ExtensionAPI) {
