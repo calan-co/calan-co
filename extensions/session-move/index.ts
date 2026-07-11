@@ -304,6 +304,28 @@ function normalizedPeerContentFingerprint(message: NormalizedHonchoMessage): str
   return createHash("sha256").update(JSON.stringify([message.peerId, message.content])).digest("hex");
 }
 
+function countByPeerContent(messages: NormalizedHonchoMessage[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const message of messages) {
+    const fp = normalizedPeerContentFingerprint(message);
+    counts.set(fp, (counts.get(fp) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function migratedDuplicateCountInTarget(migrating: NormalizedHonchoMessage[], target: NormalizedHonchoMessage[]): number {
+  const targetCounts = countByPeerContent(target);
+  const seenMigrating = new Set<string>();
+  let duplicates = 0;
+  for (const message of migrating) {
+    const fp = normalizedPeerContentFingerprint(message);
+    if (seenMigrating.has(fp)) continue;
+    seenMigrating.add(fp);
+    duplicates += Math.max(0, (targetCounts.get(fp) ?? 0) - 1);
+  }
+  return duplicates;
+}
+
 function duplicateStableFingerprintCount(messages: NormalizedHonchoMessage[]): number {
   const seen = new Set<string>();
   let duplicates = 0;
@@ -417,12 +439,14 @@ export function buildHonchoDryRunReport(params: { expectedMessages: RebuildMessa
   const target = params.targetMessages.map(normalizeHonchoMessage);
   const targetPeerContent = new Set(target.map(normalizedPeerContentFingerprint));
   const overlapCount = migrating.filter((message) => targetPeerContent.has(normalizedPeerContentFingerprint(message))).length;
-  const expectedTarget = params.targetExists ? [...target, ...migrating] : migrating;
+  const duplicateMigratedInTarget = migratedDuplicateCountInTarget(migrating, target);
+  const toAdd = migrating.filter((message) => !targetPeerContent.has(normalizedPeerContentFingerprint(message)));
+  const expectedTarget = params.targetExists ? [...target, ...toAdd] : migrating;
   const validation = validateHonchoSourceBeforeDelete({ expectedMessages: aligned.messages, sourceMessages: params.sourceMessages, targetMessages: expectedTarget, expectedTargetMessages: expectedTarget });
   if (!params.sourceExists) validation.abortReasons.push("source Honcho session does not exist");
   if (params.targetExists && !params.mergeTarget) validation.abortReasons.push("target exists; execution requires --merge or interactive approval");
   if (!params.targetExists && !params.createTarget) validation.abortReasons.push("target missing; execution requires --create or interactive approval");
-  if (overlapCount > 0) validation.abortReasons.push(`target already contains ${overlapCount} migrated message(s); execution would refuse to duplicate them`);
+  if (duplicateMigratedInTarget > 0) validation.abortReasons.push(`target contains ${duplicateMigratedInTarget} duplicate already-migrated message occurrence(s)`);
   const sourceMatchedCount = aligned.matchedSourceIndexes.length;
   const sourceResidualCount = Math.max(0, source.length - sourceMatchedCount);
   validation.sourceTotalCount = source.length;
@@ -443,7 +467,9 @@ export function buildHonchoDryRunReport(params: { expectedMessages: RebuildMessa
       `Pi transcript migratable messages: ${params.expectedMessages.length}`,
       `Transcript messages matched in source Honcho: ${sourceMatchedCount}`,
       `Transcript messages missing from source Honcho: ${aligned.missingCount}`,
-      `Target overlap / duplicate risk: ${overlapCount}`,
+      `Target already-present migrated messages: ${overlapCount}`,
+      `Target migrated duplicate risk: ${duplicateMigratedInTarget}`,
+      `Target migrated messages to add: ${toAdd.length}`,
       `Execution approval needed: ${params.targetExists ? (params.mergeTarget ? "none (--merge supplied)" : "--merge") : (params.createTarget ? "none (--create supplied)" : "--create")}`,
       `Source action if executed: ${would}`,
       `Expected final target count: ${expectedTarget.length}`,
@@ -1370,7 +1396,9 @@ export async function writeHonchoTargetFromTranscript(params: { honcho: any; key
   const migrating = messages.map(normalizeExpectedMessage);
   const existingPeerContent = new Set(existingTarget.map(normalizedPeerContentFingerprint));
   const overlapCount = migrating.filter((message) => existingPeerContent.has(normalizedPeerContentFingerprint(message))).length;
-  if (overlapCount > 0) throw new Error(`Target Honcho session already contains ${overlapCount} moved message(s); refusing to duplicate migrated payload.`);
+  const duplicateMigratedInTarget = migratedDuplicateCountInTarget(migrating, existingTarget);
+  if (duplicateMigratedInTarget > 0) throw new Error(`Target Honcho session contains ${duplicateMigratedInTarget} duplicate already-migrated message occurrence(s); refusing until target is cleaned up.`);
+  const messagesToAdd = migrating.filter((message) => !existingPeerContent.has(normalizedPeerContentFingerprint(message)));
 
   const { metadata, configuration } = await sourceSessionBase(honcho, sourceKey);
   const target = targetExists ? await honcho.session(key) : await honcho.session(key, {
@@ -1379,13 +1407,15 @@ export async function writeHonchoTargetFromTranscript(params: { honcho: any; key
     peers: standardPeers(config),
   });
 
-  await addHonchoMessages(honcho, target, migrating);
+  await addHonchoMessages(honcho, target, messagesToAdd);
   const written = await fetchHonchoMessages(honcho, key);
-  const expectedTarget = [...existingTarget, ...migrating];
+  const expectedTarget = [...existingTarget, ...messagesToAdd];
   const validation = validateNormalizedTargetContent(expectedTarget, written);
   validation.preexistingTargetCount = existingTarget.length;
   validation.migratedPayloadCount = migrating.length;
   validation.migratedPayloadHash = contentHash(migrating);
+  (validation as any).targetAlreadyPresentMigratedCount = overlapCount;
+  (validation as any).targetMigratedAddedCount = messagesToAdd.length;
   validation.abortReasons = collectAbortReasons(validation);
   if (validation.abortReasons.length > 0) throw new Error(`Target Honcho validation failed: ${validation.abortReasons.join("; ")}`);
   return { count: validation.actualTargetCount, hash: validation.actualTargetHash, validation, messages, expectedTargetMessages: expectedTarget };

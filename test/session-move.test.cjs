@@ -123,6 +123,19 @@ async function testSourceMissingTranscriptMessageUsesPiPayloadAndDoesNotBlock() 
   assert.equal(honcho.sessionsMap.has('source'), false);
 }
 
+async function testMergeSkipsAlreadyPresentTargetPayload() {
+  const transcript = sampleMessages();
+  const sourceMessages = transcript.map((m) => ({ peerId: m.peerId, content: m.content, createdAt: m.createdAt }));
+  const honcho = new MockHoncho({
+    source: { metadata: {}, configuration: {}, messages: sourceMessages },
+    target: { metadata: {}, configuration: {}, messages: [{ peerId: transcript[0].peerId, content: transcript[0].content, createdAt: transcript[0].createdAt }] },
+  });
+  const written = await mod.writeHonchoTargetFromTranscript({ honcho, key: 'target', sourceKey: 'source', config: { peerName: 'macos', hosts: { pi: { aiPeer: 'pi' } } }, messages: transcript, migrationId: 'm1', sourceCwd: '/a', targetCwd: '/b', mergeTarget: true });
+  assert.equal(written.validation.targetAlreadyPresentMigratedCount, 1);
+  assert.equal(written.validation.targetMigratedAddedCount, 1);
+  assert.deepEqual(honcho.sessionsMap.get('target').messages.map((m) => m.content), ['hello', 'hi']);
+}
+
 async function testMergeExistingTargetPreservesTargetAndPartitionsSource() {
   const transcript = sampleMessages();
   const sourceMessages = [
@@ -215,6 +228,7 @@ async function main() {
   await testTargetExistsRefuses();
   await testDryRunReportIncludesHonchoComparisonData();
   await testSourceMissingTranscriptMessageUsesPiPayloadAndDoesNotBlock();
+  await testMergeSkipsAlreadyPresentTargetPayload();
   await testMergeExistingTargetPreservesTargetAndPartitionsSource();
   await testManifestTransitions();
   console.log('session-move tests ok');
