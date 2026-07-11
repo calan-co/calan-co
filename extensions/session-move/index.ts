@@ -1141,6 +1141,15 @@ function formatMoveCommand(parsed: ParsedMoveCommand, command = "/session:move")
   return parts.join(" ");
 }
 
+export function formatSplitCommand(parsed: ParsedSplitCommand, command = "/session:split"): string {
+  const parts = [command];
+  if (parsed.sessionToken) parts.push(quoteCommandArg(parsed.sessionToken));
+  if (parsed.turnRef) parts.push("--turn", quoteCommandArg(parsed.turnRef));
+  if (parsed.continuePart) parts.push("--continue", parsed.continuePart);
+  if (parsed.dryRun) parts.push("--dry-run");
+  return parts.join(" ");
+}
+
 export async function runSessionMutationSafetyGate(params: { ctx: any; sessionFile: string; isCurrent: boolean; operation: "move" | "split"; dryRun?: boolean }) {
   const checkedAt = new Date().toISOString();
   if (params.dryRun) return { checkedAt, skipped: true, reason: "dry-run" };
@@ -1413,7 +1422,7 @@ async function completeSplitCommand(parsed: ParsedSplitCommand, ctx: any): Promi
   return next;
 }
 
-async function executeSplitCommand(parsed: ParsedSplitCommand, ctx: any): Promise<void> {
+async function executeSplitCommand(parsed: ParsedSplitCommand, ctx: any, options: { rerouteCurrentToCommand?: (command: string) => Promise<void> } = {}): Promise<void> {
   const completed = await completeSplitCommand(parsed, ctx);
   if (!completed) return;
   parsed = completed;
@@ -1471,7 +1480,13 @@ async function executeSplitCommand(parsed: ParsedSplitCommand, ctx: any): Promis
   if (!sourceExists) throw new Error(`Source Honcho session does not exist: ${headHonchoKey}`);
   if (tailExists) throw new Error(`Tail Honcho session already exists: ${tailHonchoKey}`);
   if (existsSync(tailFile)) throw new Error(`Tail Pi session file already exists: ${tailFile}`);
-  if (isCurrent && typeof ctx.switchSession !== "function") throw new Error("Current-session split requires Pi command context so rollback/switch can be guaranteed. Recovery: run /session:split from command context.");
+  if (isCurrent && typeof ctx.switchSession !== "function") {
+    if (options.rerouteCurrentToCommand) {
+      await options.rerouteCurrentToCommand(formatSplitCommand(parsed, "/session:split"));
+      return;
+    }
+    throw new Error("Current-session split requires Pi command context so rollback/switch can be guaranteed. Recovery: run " + formatSplitCommand(parsed, "/session:split"));
+  }
   await runSessionMutationSafetyGate({ ctx, sessionFile, isCurrent, operation: "split", dryRun: parsed.dryRun });
 
   const ok = await ctx.ui.confirm("Split session?", [
@@ -1542,7 +1557,12 @@ async function handlePreferredSessionCommand(args: string, ctx: any, pi?: Extens
     return;
   }
   if (parsed.kind === "split") {
-    await executeSplitCommand(parsed, ctx);
+    await executeSplitCommand(parsed, ctx, pi ? {
+      rerouteCurrentToCommand: async (command) => {
+        ctx.ui.notify(`Continuing current-session split through command context: ${command}`, "info");
+        pi.sendUserMessage(command, { deliverAs: "followUp" });
+      },
+    } : {});
     return;
   }
   await executeMoveCommand(parsed, ctx, pi ? {

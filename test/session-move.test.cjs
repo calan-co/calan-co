@@ -72,6 +72,7 @@ async function testCommandParsingDefaultsAndSplitUx() {
   assert.deepEqual(mod.parseSessionSubcommand('move 019f4e16 ~/dev/pi-extensions --create'), { kind: 'move', sessionToken: '019f4e16', targetDir: '~/dev/pi-extensions', splitRequested: false, continuePolicy: undefined, dryRun: false, createTarget: true, mergeTarget: false });
   assert.deepEqual(mod.parseSessionSubcommand('split --turn 12'), { kind: 'split', sessionToken: undefined, turnRef: '12', continuePart: undefined, dryRun: false });
   assert.deepEqual(mod.parseSessionSubcommand('split 019f4e16 --turn 12 --continue tail --dry-run'), { kind: 'split', sessionToken: '019f4e16', turnRef: '12', continuePart: 'tail', dryRun: true });
+  assert.equal(mod.formatSplitCommand({ kind: 'split', turnRef: 'u2', continuePart: 'tail', dryRun: false }), '/session:split --turn u2 --continue tail');
   assert.throws(() => mod.parseSessionSubcommand('move current ~/x --turn 12'), /Split is now a separate command/);
   assert.throws(() => mod.parseSessionSubcommand('split --turn 12 --continue target'), /head, tail/);
 }
