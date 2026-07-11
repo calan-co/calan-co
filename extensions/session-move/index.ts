@@ -1,8 +1,8 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync } from "node:fs";
-import { copyFile, mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, realpath, rename, stat, writeFile, unlink } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
@@ -673,8 +673,8 @@ function buildTurnList(entries: SessionEntry[]): TurnInfo[] {
   return turns.map((turn, index) => ({
     ...turn,
     relativeTurnId: index - turns.length,
-    eligible: index !== 0 && index !== turns.length - 1,
-    ineligibleReason: index === 0 ? "would create empty source" : index === turns.length - 1 ? "would create empty target" : undefined,
+    eligible: index !== 0,
+    ineligibleReason: index === 0 ? "would create empty head" : undefined,
   }));
 }
 
@@ -1073,6 +1073,38 @@ export async function createMoveManifest(params: { sessionFile: string; destFile
   return { migrationId, migrationDir, manifestFile, backupFile, manifest };
 }
 
+export async function createSplitManifest(params: { sessionFile: string; tailFile: string; sourceCwd: string; headHonchoKey?: string; tailHonchoKey?: string; dryRun: boolean }) {
+  const createdAt = new Date().toISOString();
+  const migrationId = `${createdAt.replace(/[:.]/g, "-")}_${hash(`${params.sessionFile}:${params.tailFile}`)}`;
+  const migrationDir = join(MIGRATION_ROOT, migrationId);
+  const manifestFile = join(migrationDir, "manifest.json");
+  const backupFile = join(migrationDir, basename(params.sessionFile));
+  const manifest: Record<string, unknown> = {
+    schemaVersion: 1,
+    migrationId,
+    operation: "split",
+    status: "planned",
+    createdAt,
+    updatedAt: createdAt,
+    sourceSessionFile: params.sessionFile,
+    headSessionFile: params.sessionFile,
+    tailSessionFile: params.tailFile,
+    sourceCwd: params.sourceCwd,
+    targetCwd: params.sourceCwd,
+    headHonchoKey: params.headHonchoKey,
+    tailHonchoKey: params.tailHonchoKey,
+    backups: params.dryRun ? [] : [{ role: "original-monosession", path: backupFile }],
+    recovery: { notes: [`Pi backup: ${backupFile}`, `Split rollback should restore original monosession from backup and remove tail session: ${params.tailFile}`] },
+  };
+  if (!params.dryRun) {
+    await mkdir(migrationDir, { recursive: true });
+    await writeManifest(manifestFile, manifest);
+    await copyFile(params.sessionFile, backupFile);
+    await writeManifest(manifestFile, manifest, { status: "pi_backed_up" });
+  }
+  return { migrationId, migrationDir, manifestFile, backupFile, manifest };
+}
+
 async function completeMoveCommand(parsed: ParsedMoveCommand, ctx: any): Promise<ParsedMoveCommand | null> {
   if (parsed.targetDir) return parsed;
   if (!ctx.hasUI) {
@@ -1377,27 +1409,121 @@ async function executeSplitCommand(parsed: ParsedSplitCommand, ctx: any): Promis
   if (!completed) return;
   parsed = completed;
   if (!parsed.turnRef) throw new Error(splitHelpText());
+  if (!parsed.continuePart) parsed.continuePart = "tail";
   const { sessionFile, isCurrent } = await resolveSessionFileForMove(parsed.sessionToken, ctx);
+  const { header, lines } = await readHeader(sessionFile);
   const sessionManager = isCurrent ? null : await SessionManager.open(sessionFile);
   const entries = (isCurrent ? ctx.sessionManager.getBranch() : sessionManager!.getBranch()) as SessionEntry[];
-  const turns = buildTurnList(entries);
-  const resolved = resolveTurnRef(turns, parsed.turnRef, { requireEligible: true });
-  const headTurns = turns.filter((turn) => turn.turnId < resolved.turnId).length;
-  const tailTurns = turns.filter((turn) => turn.turnId >= resolved.turnId).length;
+  const { resolved, headEntries, tailEntries } = splitEntriesAtTurn(entries, parsed.turnRef);
+  const tailSessionId = randomUUID();
+  const tailHeader: SessionHeader = { ...header, id: tailSessionId, timestamp: new Date().toISOString() };
+  const tailFile = join(dirname(sessionFile), `${new Date().toISOString().replace(/[:.]/g, "-")}_${tailSessionId}.jsonl`);
 
-  if (!parsed.dryRun) await runSessionMutationSafetyGate({ ctx, sessionFile, isCurrent, operation: "split", dryRun: parsed.dryRun });
+  const cfg = JSON.parse(await readFile(HONCHO_CONFIG, "utf8")) as HonchoConfig;
+  const runtime = honchoRuntimeConfig(cfg);
+  const headHonchoKey = await deriveHonchoSessionKey(String(header.cwd), cfg);
+  const tailHonchoKey = deriveSplitTailHonchoKey(headHonchoKey, tailSessionId);
+  const dryRunMigrationId = `dry-run_${hash(`${sessionFile}:${tailFile}`)}`;
+  const headTranscriptMessages = buildWholeSessionRebuildMessages({ header, entries: headEntries, sessionFile, migrationId: dryRunMigrationId, config: cfg });
+  const tailTranscriptMessages = buildWholeSessionRebuildMessages({ header: tailHeader, entries: tailEntries, sessionFile: tailFile, migrationId: dryRunMigrationId, config: cfg });
 
-  ctx.ui.notify([
-    parsed.dryRun ? "Dry run: split preflight (no Pi or Honcho mutations)." : "Parsed split command; mutation engine is not enabled yet after safety gate.",
-    `session: ${parsed.sessionToken ?? "current"} (${sessionFile})`,
-    `splitTurnRef: ${parsed.turnRef}`,
-    `splitTurnId: ${resolved.turnId}`,
-    `splitEntryId: ${resolved.entryId}`,
-    `head/part 1 turns: ${headTurns}`,
-    `tail/part 2 turns: ${tailTurns}`,
-    `continue: ${parsed.continuePart ?? "tail"}`,
-    parsed.dryRun ? "" : "No files or Honcho sessions were changed; full split mutation still needs the partition/rebuild engine.",
-  ].filter(Boolean).join("\n"), parsed.dryRun ? "info" : "warning");
+  const { Honcho } = await import(HONCHO_SDK);
+  const honcho = new Honcho({ apiKey: runtime.apiKey, baseURL: runtime.baseURL, workspaceId: runtime.workspaceId, environment: runtime.environment });
+  const [sourceExists, tailExists] = await Promise.all([honchoSessionExists(honcho, headHonchoKey), honchoSessionExists(honcho, tailHonchoKey)]);
+  const sourceMessages = sourceExists ? await fetchHonchoMessages(honcho, headHonchoKey) : [];
+  const plan = planSplitHonchoRebuild({ sourceMessages, headMessages: headTranscriptMessages, tailMessages: tailTranscriptMessages });
+  const headValidation = validateNormalizedTargetContent(plan.headMessages, plan.headMessages);
+  const tailValidation = validateHonchoTargetContent(plan.tailMessages, plan.tailMessages.map(normalizeExpectedMessage));
+
+  if (parsed.dryRun) {
+    ctx.ui.notify([
+      "Dry run: split preflight (no Pi or Honcho mutations).",
+      `session: ${parsed.sessionToken ?? "current"} (${sessionFile})`,
+      `splitTurnRef: ${parsed.turnRef}`,
+      `splitTurnId: ${resolved.turnId}`,
+      `splitEntryId: ${resolved.entryId}`,
+      `head/part 1 entries: ${headEntries.length}`,
+      `tail/part 2 entries: ${tailEntries.length}`,
+      `continue: ${parsed.continuePart}`,
+      `Pi head keeps: ${sessionFile}`,
+      `Pi tail creates: ${tailFile}`,
+      `Honcho head/source key: ${headHonchoKey}`,
+      `Honcho tail key: ${tailHonchoKey}`,
+      `Source Honcho exists: ${sourceExists ? "yes" : "no"}`,
+      `Tail Honcho exists: ${tailExists ? "yes" : "no"}`,
+      `Head rebuild messages: ${plan.headMessages.length} (missing from source transcript payload: ${plan.headMissingCount})`,
+      `Tail rebuild messages: ${plan.tailMessages.length} (missing from source transcript payload: ${plan.tailMissingCount})`,
+      `Head hash: ${headValidation.expectedHash}`,
+      `Tail hash: ${tailValidation.expectedHash}`,
+    ].join("\n"), "info");
+    return;
+  }
+
+  if (!sourceExists) throw new Error(`Source Honcho session does not exist: ${headHonchoKey}`);
+  if (tailExists) throw new Error(`Tail Honcho session already exists: ${tailHonchoKey}`);
+  if (existsSync(tailFile)) throw new Error(`Tail Pi session file already exists: ${tailFile}`);
+  if (isCurrent && typeof ctx.switchSession !== "function") throw new Error("Current-session split requires Pi command context so rollback/switch can be guaranteed. Recovery: run /session:split from command context.");
+  await runSessionMutationSafetyGate({ ctx, sessionFile, isCurrent, operation: "split", dryRun: parsed.dryRun });
+
+  const ok = await ctx.ui.confirm("Split session?", [
+    `Head keeps original Pi session/id: ${sessionFile}`,
+    `Tail creates new Pi session/id: ${tailFile}`,
+    `Head/source Honcho will be rebuilt in-place: ${headHonchoKey}`,
+    `Tail Honcho will be created: ${tailHonchoKey}`,
+    `Continue in: ${parsed.continuePart}`,
+    "If current-session switching fails, the command will attempt to roll back to the original monosession.",
+  ].join("\n"));
+  if (!ok) return;
+
+  const migration = await createSplitManifest({ sessionFile, tailFile, sourceCwd: String(header.cwd), headHonchoKey, tailHonchoKey, dryRun: false });
+  const sourceBackupFile = join(migration.migrationDir, "source-honcho-backup.json");
+  const log = [`manifest: ${migration.manifestFile}`];
+  const originalText = lines.join("\n");
+  const restoreMonosession = async (reason: unknown) => {
+    try { await writeFile(sessionFile, originalText, "utf8"); } catch { /* best effort */ }
+    try { if (existsSync(tailFile)) await unlink(tailFile); } catch { /* best effort */ }
+    try {
+      if (await honchoSessionExists(honcho, tailHonchoKey)) await (await honcho.session(tailHonchoKey)).delete();
+      const backup = JSON.parse(await readFile(sourceBackupFile, "utf8"));
+      await replaceHonchoSessionMessages({ honcho, key: headHonchoKey, config: cfg, sourceCwd: String(header.cwd), targetCwd: String(header.cwd), migrationId: migration.migrationId, messages: backup.messages ?? [], metadata: { rollbackOf: migration.migrationId } });
+    } catch { /* best effort; manifest records original failure */ }
+    await writeManifest(migration.manifestFile, migration.manifest, {
+      status: "failed_rolled_back",
+      errors: [{ at: "split", message: reason instanceof Error ? reason.message : String(reason), stack: reason instanceof Error ? reason.stack : undefined }],
+      recovery: { notes: [`Rollback attempted to restore original monosession: ${sessionFile}`, `If uncertain, restore Pi backup manually: ${migration.backupFile}`, `Inspect Honcho backup: ${sourceBackupFile}`] },
+    });
+  };
+
+  try {
+    await writeManifest(migration.manifestFile, migration.manifest, { status: "safety_gate_passed" });
+    const tailSession = await honcho.session(tailHonchoKey, { metadata: { splitFromSessionKey: headHonchoKey, sourceCwd: header.cwd, targetCwd: header.cwd, migrationId: migration.migrationId, rebuiltBy: "session-split" }, configuration: (await sourceSessionBase(honcho, headHonchoKey)).configuration, peers: standardPeers(cfg) });
+    await addHonchoMessages(honcho, tailSession, plan.tailMessages.map(normalizeExpectedMessage));
+    const tailWritten = await fetchHonchoMessages(honcho, tailHonchoKey);
+    const tailWrittenValidation = validateHonchoTargetContent(plan.tailMessages, tailWritten);
+    if (tailWrittenValidation.abortReasons.length > 0) throw new Error(`Tail Honcho validation failed: ${tailWrittenValidation.abortReasons.join("; ")}`);
+    await writeManifest(migration.manifestFile, migration.manifest, { status: "honcho_tail_written", tailHonchoValidation: tailWrittenValidation });
+
+    const headWritten = await replaceHonchoSessionMessages({ honcho, key: headHonchoKey, config: cfg, sourceCwd: String(header.cwd), targetCwd: String(header.cwd), migrationId: migration.migrationId, messages: plan.headMessages, metadata: { splitTailKey: tailHonchoKey }, backupFile: sourceBackupFile });
+    await writeManifest(migration.manifestFile, migration.manifest, { status: "honcho_head_written", headHonchoValidation: headWritten.validation, sourceHonchoBackup: sourceBackupFile });
+
+    await writeFile(sessionFile, [JSON.stringify(header), ...headEntries.map((entry) => JSON.stringify(entry))].join("\n") + "\n", "utf8");
+    await writeFile(tailFile, [JSON.stringify(tailHeader), ...tailEntries.map((entry) => JSON.stringify(entry))].join("\n") + "\n", "utf8");
+    await writeManifest(migration.manifestFile, migration.manifest, { status: "pi_written" });
+    log.push(`wrote head Pi session ${sessionFile}`);
+    log.push(`wrote tail Pi session ${tailFile}`);
+
+    if (isCurrent && typeof ctx.switchSession === "function") {
+      const nextFile = parsed.continuePart === "head" ? sessionFile : tailFile;
+      const result = await ctx.switchSession(nextFile, { withSession: async (newCtx: any) => newCtx.ui.notify([...log, `continued in ${parsed.continuePart}: ${nextFile}`].join("\n"), "info") });
+      if (result?.cancelled) throw new Error(`Session switch cancelled; refusing to leave split state active.`);
+    }
+    await writeManifest(migration.manifestFile, migration.manifest, { status: "complete" });
+  } catch (error) {
+    await restoreMonosession(error);
+    throw error;
+  }
+
+  ctx.ui.notify(log.join("\n"), "info");
 }
 
 async function handlePreferredSessionCommand(args: string, ctx: any, pi?: ExtensionAPI) {
@@ -1599,6 +1725,70 @@ export async function finalizeHonchoSourceAfterTargetValidated(params: { honcho:
 export async function deleteHonchoSourceAfterTargetValidated(params: { honcho: any; sourceKey: string; targetKey: string; expectedTargetCount?: number; expectedMessages: RebuildMessage[] }) {
   const result = await finalizeHonchoSourceAfterTargetValidated({ ...params, config: {} });
   return result;
+}
+
+export function splitEntriesAtTurn(entries: SessionEntry[], turnRef: string): { resolved: TurnInfo; headEntries: SessionEntry[]; tailEntries: SessionEntry[] } {
+  const turns = buildTurnList(entries);
+  const resolved = resolveTurnRef(turns, turnRef, { requireEligible: true });
+  const splitIndex = entries.findIndex((entry) => entry.id === resolved.entryId);
+  if (splitIndex < 0) throw new Error(`Split entry not found: ${resolved.entryId}`);
+  const headEntries = entries.slice(0, splitIndex);
+  const tailIds = new Set(entries.slice(splitIndex).map((entry) => entry.id));
+  const tailEntries = entries.slice(splitIndex).map((entry, index) => {
+    if (index === 0 || (entry.parentId && !tailIds.has(entry.parentId))) return { ...entry, parentId: null };
+    return entry;
+  });
+  return { resolved, headEntries, tailEntries };
+}
+
+export function deriveSplitTailHonchoKey(sourceKey: string, tailSessionId: string): string {
+  return sanitize(`${sourceKey}__tail_${tailSessionId.slice(0, 8)}`);
+}
+
+export function planSplitHonchoRebuild(params: { sourceMessages: any[]; headMessages: RebuildMessage[]; tailMessages: RebuildMessage[] }) {
+  const source = params.sourceMessages.map(normalizeHonchoMessage);
+  const headAligned = alignMigratedPayloadToSource(params.headMessages, params.sourceMessages);
+  const tailAligned = alignMigratedPayloadToSource(params.tailMessages, params.sourceMessages);
+  const tailMatched = new Set(tailAligned.matchedSourceIndexes);
+  const headMatched = new Set(headAligned.matchedSourceIndexes);
+  const headByPeerContent = new Map(headAligned.messages.map((message) => [normalizedPeerContentFingerprint(normalizeExpectedMessage(message)), message]));
+  const headSourceMessages: NormalizedHonchoMessage[] = [];
+  for (let index = 0; index < source.length; index++) {
+    if (tailMatched.has(index)) continue;
+    const sourceMessage = source[index];
+    if (!sourceMessage) continue;
+    const alignedHead = headMatched.has(index) ? headByPeerContent.get(normalizedPeerContentFingerprint(sourceMessage)) : undefined;
+    headSourceMessages.push(alignedHead ? normalizeExpectedMessage(alignedHead) : sourceMessage);
+  }
+  const presentHead = new Set(headSourceMessages.map(normalizedPeerContentFingerprint));
+  for (const message of headAligned.messages.map(normalizeExpectedMessage)) {
+    if (!presentHead.has(normalizedPeerContentFingerprint(message))) headSourceMessages.push(message);
+  }
+  return {
+    headMessages: headSourceMessages,
+    tailMessages: tailAligned.messages,
+    headMissingCount: headAligned.missingCount,
+    tailMissingCount: tailAligned.missingCount,
+    tailMatchedSourceIndexes: tailAligned.matchedSourceIndexes,
+  };
+}
+
+async function replaceHonchoSessionMessages(params: { honcho: any; key: string; config: HonchoConfig; sourceKey?: string; sourceCwd: string; targetCwd: string; migrationId: string; messages: NormalizedHonchoMessage[]; metadata?: Record<string, unknown>; backupFile?: string }) {
+  const exists = await honchoSessionExists(params.honcho, params.key);
+  const base = exists ? await sourceSessionBase(params.honcho, params.key) : { metadata: {}, configuration: {} };
+  const originalMessages = exists ? await fetchHonchoMessages(params.honcho, params.key) : [];
+  if (params.backupFile) await writeFile(params.backupFile, JSON.stringify({ key: params.key, metadata: base.metadata, configuration: base.configuration, messages: originalMessages.map(normalizeHonchoMessage) }, null, 2), "utf8");
+  if (exists) await (await params.honcho.session(params.key)).delete();
+  const session = await params.honcho.session(params.key, {
+    metadata: { ...base.metadata, ...params.metadata, sourceCwd: params.sourceCwd, targetCwd: params.targetCwd, migrationId: params.migrationId, rebuiltBy: "session-split" },
+    configuration: base.configuration,
+    peers: standardPeers(params.config),
+  });
+  await addHonchoMessages(params.honcho, session, params.messages);
+  const written = await fetchHonchoMessages(params.honcho, params.key);
+  const validation = validateNormalizedTargetContent(params.messages, written);
+  if (validation.abortReasons.length > 0) throw Object.assign(new Error(`Honcho rebuild validation failed for ${params.key}: ${validation.abortReasons.join("; ")}`), { validation });
+  return { count: validation.actualTargetCount, hash: validation.actualTargetHash, validation };
 }
 
 export default function sessionMove(pi: ExtensionAPI) {

@@ -76,6 +76,45 @@ async function testCommandParsingDefaultsAndSplitUx() {
   assert.throws(() => mod.parseSessionSubcommand('split --turn 12 --continue target'), /head, tail/);
 }
 
+async function testSplitPartitionKeepsHeadAndCreatesTailFromTurn() {
+  const entries = [
+    { type: 'message', id: 'u1', parentId: null, timestamp: '2026-01-01T00:00:00.000Z', message: { role: 'user', content: 'one' } },
+    { type: 'message', id: 'a1', parentId: 'u1', timestamp: '2026-01-01T00:00:01.000Z', message: { role: 'assistant', content: 'one reply' } },
+    { type: 'message', id: 'u2', parentId: 'a1', timestamp: '2026-01-01T00:00:02.000Z', message: { role: 'user', content: 'two' } },
+    { type: 'message', id: 'a2', parentId: 'u2', timestamp: '2026-01-01T00:00:03.000Z', message: { role: 'assistant', content: 'two reply' } },
+    { type: 'message', id: 'u3', parentId: 'a2', timestamp: '2026-01-01T00:00:04.000Z', message: { role: 'user', content: 'three' } },
+  ];
+  const split = mod.splitEntriesAtTurn(entries, '2');
+  assert.equal(split.resolved.entryId, 'u2');
+  assert.deepEqual(split.headEntries.map((e) => e.id), ['u1', 'a1']);
+  assert.deepEqual(split.tailEntries.map((e) => e.id), ['u2', 'a2', 'u3']);
+  assert.equal(split.tailEntries[0].parentId, null);
+  const lastTurnSplit = mod.splitEntriesAtTurn(entries.slice(0, 4), '2');
+  assert.deepEqual(lastTurnSplit.tailEntries.map((e) => e.id), ['u2', 'a2']);
+}
+
+async function testSplitHonchoPlanRebuildsHeadSourceAndTailSeparately() {
+  const header = { id: 'sess1', cwd: '/Users/macos', type: 'session' };
+  const headEntries = [
+    { type: 'message', id: 'u1', parentId: null, timestamp: '2026-01-01T00:00:00.000Z', message: { role: 'user', content: 'one' } },
+  ];
+  const tailEntries = [
+    { type: 'message', id: 'u2', parentId: null, timestamp: '2026-01-01T00:00:02.000Z', message: { role: 'user', content: 'two' } },
+  ];
+  const cfg = { peerName: 'macos', hosts: { pi: { aiPeer: 'pi' } } };
+  const head = mod.buildWholeSessionRebuildMessages({ header, entries: headEntries, sessionFile: '/tmp/s.jsonl', migrationId: 'm1', config: cfg });
+  const tail = mod.buildWholeSessionRebuildMessages({ header: { ...header, id: 'tail1' }, entries: tailEntries, sessionFile: '/tmp/t.jsonl', migrationId: 'm1', config: cfg });
+  const sourceMessages = [
+    { peerId: 'macos', content: 'unrelated', createdAt: '2026-01-01T00:00:00.500Z' },
+    { peerId: 'macos', content: 'one', createdAt: '2026-01-01T00:10:00.000Z' },
+    { peerId: 'macos', content: 'two', createdAt: '2026-01-01T00:10:02.000Z' },
+  ];
+  const plan = mod.planSplitHonchoRebuild({ sourceMessages, headMessages: head, tailMessages: tail });
+  assert.deepEqual(plan.headMessages.map((m) => m.content), ['unrelated', 'one']);
+  assert.deepEqual(plan.tailMessages.map((m) => m.content), ['two']);
+  assert.equal(plan.tailMessages[0].createdAt, '2026-01-01T00:10:02.000Z');
+}
+
 async function testMutationSafetyGateRequiresIdleForAllMutations() {
   await assert.rejects(() => mod.runSessionMutationSafetyGate({ ctx: {}, sessionFile: '/tmp/s.jsonl', isCurrent: false, operation: 'move' }), /idle\/quiescence/);
   let waited = false;
@@ -241,6 +280,8 @@ async function testManifestTransitions() {
 async function main() {
   await testKeyDerivation();
   await testCommandParsingDefaultsAndSplitUx();
+  await testSplitPartitionKeepsHeadAndCreatesTailFromTurn();
+  await testSplitHonchoPlanRebuildsHeadSourceAndTailSeparately();
   await testMutationSafetyGateRequiresIdleForAllMutations();
   await testTranscriptPayload();
   await testSuccessfulRebuildValidatesContentAndDeletesSource();
