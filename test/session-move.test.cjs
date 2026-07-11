@@ -90,6 +90,20 @@ async function testTargetExistsRefuses() {
   assert.equal(honcho.sessionsMap.has('source'), true);
 }
 
+async function testSourceMissingTranscriptMessageUsesPiPayloadAndDoesNotBlock() {
+  const transcript = sampleMessages();
+  const sourceMessages = [{ peerId: transcript[0].peerId, content: transcript[0].content, createdAt: '2026-01-01T00:10:00.000Z' }];
+  const aligned = mod.alignMigratedPayloadToSource(transcript, sourceMessages);
+  assert.equal(aligned.missingCount, 1);
+  assert.equal(aligned.messages[0].createdAt, '2026-01-01T00:10:00.000Z');
+  assert.equal(aligned.messages[1].createdAt, transcript[1].createdAt);
+  const honcho = new MockHoncho({ source: { metadata: {}, configuration: {}, messages: sourceMessages } });
+  const written = await mod.writeHonchoTargetFromTranscript({ honcho, key: 'target', sourceKey: 'source', config: { peerName: 'macos', hosts: { pi: { aiPeer: 'pi' } } }, messages: aligned.messages, migrationId: 'm1', sourceCwd: '/a', targetCwd: '/b' });
+  const finalized = await mod.finalizeHonchoSourceAfterTargetValidated({ honcho, sourceKey: 'source', targetKey: 'target', config: { peerName: 'macos', hosts: { pi: { aiPeer: 'pi' } } }, expectedTargetCount: 2, expectedMessages: aligned.messages, expectedTargetMessages: written.expectedTargetMessages, migrationStartedAt: '2026-01-01T01:00:00.000Z' });
+  assert.equal(finalized.sourceMissingCount, 1);
+  assert.equal(honcho.sessionsMap.has('source'), false);
+}
+
 async function testMergeExistingTargetPreservesTargetAndPartitionsSource() {
   const transcript = sampleMessages();
   const sourceMessages = [
@@ -180,6 +194,7 @@ async function main() {
   await testDuplicateTargetFingerprintSourceRemains();
   await testPostMigrationSourceMessageMissingFromTargetSourceRemains();
   await testTargetExistsRefuses();
+  await testSourceMissingTranscriptMessageUsesPiPayloadAndDoesNotBlock();
   await testMergeExistingTargetPreservesTargetAndPartitionsSource();
   await testManifestTransitions();
   console.log('session-move tests ok');

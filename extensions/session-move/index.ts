@@ -327,7 +327,10 @@ function collectAbortReasons(details: HonchoValidationDetails): string[] {
   if (details.expectedHash !== details.actualTargetHash) reasons.push("target content hash mismatch");
   if (!details.sequenceMatches) reasons.push("target peer/content/timestamp sequence mismatch");
   if (details.duplicateCount > 0) reasons.push(`target contains ${details.duplicateCount} duplicate stable fingerprint(s)`);
-  if ((details.sourceMissingCount ?? 0) > 0) reasons.push(`source contains ${details.sourceMissingCount} message(s) missing from target`);
+  // A transcript message can be absent from source Honcho if live upload was delayed,
+  // filtered, or previously failed. That is not data loss by itself because the Pi
+  // transcript remains the authoritative migration source; only source-owned rows
+  // that actually exist in Honcho must be partitioned away from source.
   if ((details.postMigrationSourceMessageCount ?? 0) > 0) reasons.push(`source contains ${details.postMigrationSourceMessageCount} post-migration/unexpected message(s) not present in target`);
   return reasons;
 }
@@ -1131,7 +1134,6 @@ async function executeMoveCommand(parsed: ParsedMoveCommand, ctx: any, options: 
     const transcriptMessages = buildWholeSessionRebuildMessages({ header, entries, sessionFile, migrationId: migration.migrationId, config: cfg });
     const sourceMessagesBeforeTargetWrite = await fetchHonchoMessages(honcho, fromHonchoKey);
     const aligned = alignMigratedPayloadToSource(transcriptMessages, sourceMessagesBeforeTargetWrite);
-    if (aligned.missingCount > 0) throw new Error(`Source Honcho session is missing ${aligned.missingCount} transcript message(s); refusing to migrate incomplete source payload.`);
     const messages = aligned.messages;
     const sourceBackupFile = join(migration.migrationDir, "source-honcho-backup.json");
     const targetWrite = await writeHonchoTargetFromTranscript({ honcho, key: toHonchoKey, sourceKey: fromHonchoKey, config: cfg, messages, migrationId: migration.migrationId, sourceCwd: String(header.cwd), targetCwd: targetDir, mergeTarget: parsed.mergeTarget });
@@ -1145,6 +1147,7 @@ async function executeMoveCommand(parsed: ParsedMoveCommand, ctx: any, options: 
       honchoDuplicateCount: targetWrite.validation.duplicateCount,
       honchoPreexistingTargetCount: targetWrite.validation.preexistingTargetCount,
       honchoMigratedPayloadCount: targetWrite.validation.migratedPayloadCount,
+      honchoTranscriptMessagesMissingFromSource: aligned.missingCount,
     });
     log.push(`rebuilt target Honcho session ${toHonchoKey} (${targetWrite.count} messages)`);
 
