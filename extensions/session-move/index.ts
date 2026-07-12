@@ -745,6 +745,18 @@ function turnLabel(turn: TurnInfo): string {
   return `Turn ${String(turn.turnId).padStart(3, "0")}  ${turn.entryId}${turn.eligible ? "" : "  (ineligible)"}`;
 }
 
+const TURN_PICKER_MAX_VISIBLE = 20;
+const TURN_PICKER_CHROME_LINES = 5;
+const TURN_OVERLAY_BOTTOM_MARGIN = 10;
+
+function isPageUpKey(data: string): boolean {
+  return data === "\x1b[5~" || data.toLowerCase() === "pageup" || data.toLowerCase() === "page up" || data.toLowerCase() === "pgup";
+}
+
+function isPageDownKey(data: string): boolean {
+  return data === "\x1b[6~" || data.toLowerCase() === "pagedown" || data.toLowerCase() === "page down" || data.toLowerCase() === "pgdn" || data.toLowerCase() === "pgdown";
+}
+
 async function showTurnDetailOverlay(turn: TurnInfo, ctx: any): Promise<void> {
   await ctx.ui.custom<void>((_tui: any, theme: any, _keybindings: any, done: () => void) => {
     const container = new Container();
@@ -762,6 +774,7 @@ async function showTurnDetailOverlay(turn: TurnInfo, ctx: any): Promise<void> {
       label("Prompt"),
       turn.text,
     ];
+    while (detailLines.length < TURN_PICKER_MAX_VISIBLE + TURN_PICKER_CHROME_LINES) detailLines.push("");
     container.addChild(new DynamicBorder(accent));
     container.addChild(new Text(accent(theme.bold("Turn Detail")), 1, 0));
     container.addChild(new Text(detailLines.join("\n"), 1, 0));
@@ -772,7 +785,7 @@ async function showTurnDetailOverlay(turn: TurnInfo, ctx: any): Promise<void> {
       invalidate() { container.invalidate(); },
       handleInput(_data: string) { done(); },
     };
-  }, { overlay: true, overlayOptions: { width: "90%", maxHeight: "85%", anchor: "bottom-center", margin: { bottom: 10, left: 2, right: 2 } } });
+  }, { overlay: true, overlayOptions: { width: "90%", maxHeight: "85%", anchor: "bottom-center", margin: { bottom: TURN_OVERLAY_BOTTOM_MARGIN, left: 2, right: 2 } } });
 }
 
 async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: any, initialTurnId?: string): Promise<void> {
@@ -794,7 +807,8 @@ async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: an
     container.addChild(new Text(accent(theme.bold("Session Turns")), 1, 0));
     container.addChild(new Text(theme.fg("dim", sessionLabel), 1, 0));
 
-    const list = new SelectList(items, Math.min(turns.length, 18), {
+    let selectedIndex = initialTurnId ? Math.max(0, items.findIndex((item) => item.value === initialTurnId)) : 0;
+    const list = new SelectList(items, Math.min(turns.length, TURN_PICKER_MAX_VISIBLE), {
       selectedPrefix: accent,
       selectedText: (text: string) => text.includes("(ineligible)") ? theme.fg("dim", text) : accent(text),
       description: (text: string) => text.includes("would create empty") ? theme.fg("dim", text) : theme.fg("muted", text),
@@ -811,21 +825,28 @@ async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: an
       },
     });
 
-    if (initialTurnId) list.setSelectedIndex(Math.max(0, items.findIndex((item) => item.value === initialTurnId)));
+    list.setSelectedIndex(selectedIndex);
+    list.onSelectionChange = (item) => { selectedIndex = Math.max(0, items.findIndex((candidate) => candidate.value === item.value)); };
     list.onSelect = (item) => done(item.value);
     list.onCancel = () => done(null);
     container.addChild(list);
-    container.addChild(new Text(theme.fg("dim", "↑↓ navigate • enter show turn details • esc close"), 1, 0));
+    container.addChild(new Text(theme.fg("dim", "↑↓ navigate • pgup/pgdn page • enter show turn details • esc close"), 1, 0));
     container.addChild(new DynamicBorder(accent));
 
     return {
       render(width: number) { return container.render(width); },
       invalidate() { container.invalidate(); },
-      handleInput(data: string) { list.handleInput(data); tui.requestRender(); },
+      handleInput(data: string) {
+        if (isPageUpKey(data) || isPageDownKey(data)) {
+          selectedIndex = Math.max(0, Math.min(items.length - 1, selectedIndex + (isPageUpKey(data) ? -TURN_PICKER_MAX_VISIBLE : TURN_PICKER_MAX_VISIBLE)));
+          list.setSelectedIndex(selectedIndex);
+        } else list.handleInput(data);
+        tui.requestRender();
+      },
     };
   }, {
     overlay: true,
-    overlayOptions: { width: "90%", maxHeight: "80%", anchor: "bottom-center", margin: { bottom: 10, left: 2, right: 2 } },
+    overlayOptions: { width: "90%", maxHeight: "80%", anchor: "bottom-center", margin: { bottom: TURN_OVERLAY_BOTTOM_MARGIN, left: 2, right: 2 } },
   }).then(async (selectedTurnId: string | null | undefined) => {
     if (!selectedTurnId) return;
     const selected = turns.find((turn) => String(turn.turnId) === selectedTurnId);
