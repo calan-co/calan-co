@@ -772,7 +772,7 @@ async function showTurnDetailOverlay(turn: TurnInfo, ctx: any): Promise<void> {
       invalidate() { container.invalidate(); },
       handleInput(_data: string) { done(); },
     };
-  }, { overlay: true, overlayOptions: { width: "90%", maxHeight: "85%", anchor: "bottom-center", margin: { bottom: 3, left: 2, right: 2 } } });
+  }, { overlay: true, overlayOptions: { width: "90%", maxHeight: "85%", anchor: "bottom-center", margin: { bottom: 10, left: 2, right: 2 } } });
 }
 
 async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: any, initialTurnId?: string): Promise<void> {
@@ -825,7 +825,7 @@ async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: an
     };
   }, {
     overlay: true,
-    overlayOptions: { width: "90%", maxHeight: "80%", anchor: "bottom-center", margin: { bottom: 3, left: 2, right: 2 } },
+    overlayOptions: { width: "90%", maxHeight: "80%", anchor: "bottom-center", margin: { bottom: 10, left: 2, right: 2 } },
   }).then(async (selectedTurnId: string | null | undefined) => {
     if (!selectedTurnId) return;
     const selected = turns.find((turn) => String(turn.turnId) === selectedTurnId);
