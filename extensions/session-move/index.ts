@@ -746,19 +746,22 @@ function turnLabel(turn: TurnInfo): string {
 }
 
 async function showTurnDetailOverlay(turn: TurnInfo, ctx: any): Promise<void> {
-  const detailLines = [
-    `Turn ${turn.turnId} (${turn.relativeTurnId})`,
-    `entryId: ${turn.entryId}`,
-    `parentId: ${turn.parentId ?? "null"}`,
-    `timestamp: ${turn.timestamp}`,
-    `eligible split target: ${turn.eligible ? "yes" : "no"}`,
-    ...(turn.ineligibleReason ? [`reason: ${turn.ineligibleReason}`] : []),
-    "",
-    turn.text,
-  ];
   await ctx.ui.custom<void>((_tui: any, theme: any, _keybindings: any, done: () => void) => {
     const container = new Container();
     const accent = (text: string) => theme.fg("accent", text);
+    const label = (text: string) => accent(theme.bold(text));
+    const value = (text: string) => theme.fg("dim", text);
+    const detailLines = [
+      `${label("Turn")} ${value(`${turn.turnId} (${turn.relativeTurnId})`)}`,
+      `${label("entryId")} ${value(turn.entryId)}`,
+      `${label("parentId")} ${value(turn.parentId ?? "null")}`,
+      `${label("timestamp")} ${value(turn.timestamp)}`,
+      `${label("eligible split target")} ${value(turn.eligible ? "yes" : "no")}`,
+      ...(turn.ineligibleReason ? [`${label("reason")} ${value(turn.ineligibleReason)}`] : []),
+      "",
+      label("Prompt"),
+      turn.text,
+    ];
     container.addChild(new DynamicBorder(accent));
     container.addChild(new Text(accent(theme.bold("Turn Detail")), 1, 0));
     container.addChild(new Text(detailLines.join("\n"), 1, 0));
@@ -769,7 +772,7 @@ async function showTurnDetailOverlay(turn: TurnInfo, ctx: any): Promise<void> {
       invalidate() { container.invalidate(); },
       handleInput(_data: string) { done(); },
     };
-  }, { overlay: true, overlayOptions: { width: "90%", maxHeight: "85%", anchor: "center", margin: 2 } });
+  }, { overlay: true, overlayOptions: { width: "90%", maxHeight: "85%", anchor: "bottom-center", margin: { bottom: 3, left: 2, right: 2 } } });
 }
 
 async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: any, initialTurnId?: string): Promise<void> {
@@ -822,7 +825,7 @@ async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: an
     };
   }, {
     overlay: true,
-    overlayOptions: { width: "90%", maxHeight: "80%", anchor: "center", margin: 2 },
+    overlayOptions: { width: "90%", maxHeight: "80%", anchor: "bottom-center", margin: { bottom: 3, left: 2, right: 2 } },
   }).then(async (selectedTurnId: string | null | undefined) => {
     if (!selectedTurnId) return;
     const selected = turns.find((turn) => String(turn.turnId) === selectedTurnId);
