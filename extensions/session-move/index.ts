@@ -811,7 +811,7 @@ async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: an
     list.onSelect = (item) => done(item.value);
     list.onCancel = () => done(null);
     container.addChild(list);
-    container.addChild(new Text(theme.fg("dim", "↑↓ navigate • enter show entry id • esc close"), 1, 0));
+    container.addChild(new Text(theme.fg("dim", "↑↓ navigate • enter show turn details • esc close"), 1, 0));
     container.addChild(new DynamicBorder(accent));
 
     return {
@@ -880,7 +880,7 @@ async function showTurns(parsed: ParsedTurnsCommand, ctx: any) {
     ctx.ui.notify(JSON.stringify({ session: sessionFile ?? "current in-memory session", turns }, null, 2), "info");
     return;
   }
-  if (parsed.pick && ctx.mode === "tui") {
+  if ((parsed.pick || ctx.ui?.custom) && typeof ctx.ui?.custom === "function") {
     await showTurnsOverlay(turns, sessionLabel, ctx);
     return;
   }
