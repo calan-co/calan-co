@@ -7,7 +7,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { DynamicBorder, SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Container, SelectList, Text, truncateToWidth, type AutocompleteItem, type AutocompleteProvider, type AutocompleteSuggestions, type SelectItem } from "@earendil-works/pi-tui";
+import { Container, SelectList, Text, truncateToWidth, wrapTextWithAnsi, type AutocompleteItem, type AutocompleteProvider, type AutocompleteSuggestions, type SelectItem } from "@earendil-works/pi-tui";
 
 const execFileAsync = promisify(execFile);
 
@@ -658,14 +658,15 @@ function buildTurnList(entries: SessionEntry[]): TurnInfo[] {
   for (const entry of entries) {
     if (entry.type !== "message" || entry.message?.role !== "user") continue;
     turnId += 1;
-    const text = messageText(entry.message.content).replace(/\s+/g, " ").trim();
+    const text = messageText(entry.message.content).trim();
+    const previewText = text.replace(/\s+/g, " ").trim();
     turns.push({
       turnId,
       entryId: entry.id,
       parentId: entry.parentId ?? null,
       timestamp: entry.timestamp ?? new Date(entry.message.timestamp ?? Date.now()).toISOString(),
       text,
-      preview: text.length > 100 ? `${text.slice(0, 97)}...` : text,
+      preview: previewText.length > 100 ? `${previewText.slice(0, 97)}...` : previewText,
       relativeTurnId: 0,
       eligible: true,
     });
@@ -746,8 +747,25 @@ function turnLabel(turn: TurnInfo): string {
 }
 
 const TURN_PICKER_MAX_VISIBLE = 20;
+const TURN_PICKER_MIN_VISIBLE = 6;
 const TURN_PICKER_CHROME_LINES = 5;
 const TURN_OVERLAY_BOTTOM_MARGIN = 10;
+
+function terminalRows(): number {
+  return Number(process.stdout.rows || process.env.LINES || 40);
+}
+
+function turnPickerVisibleCount(): number {
+  const rows = terminalRows();
+  const available = rows - TURN_OVERLAY_BOTTOM_MARGIN - TURN_PICKER_CHROME_LINES - 2;
+  return Math.max(TURN_PICKER_MIN_VISIBLE, Math.min(TURN_PICKER_MAX_VISIBLE, available));
+}
+
+function turnOverlayBottomMargin(): number {
+  const rows = terminalRows();
+  const needed = TURN_PICKER_MIN_VISIBLE + TURN_PICKER_CHROME_LINES + TURN_OVERLAY_BOTTOM_MARGIN;
+  return rows >= needed ? TURN_OVERLAY_BOTTOM_MARGIN : 1;
+}
 
 function isPageUpKey(data: string): boolean {
   return data === "\x1b[5~" || data.toLowerCase() === "pageup" || data.toLowerCase() === "page up" || data.toLowerCase() === "pgup";
@@ -757,35 +775,66 @@ function isPageDownKey(data: string): boolean {
   return data === "\x1b[6~" || data.toLowerCase() === "pagedown" || data.toLowerCase() === "page down" || data.toLowerCase() === "pgdn" || data.toLowerCase() === "pgdown";
 }
 
+function highlightedPromptLines(text: string, width: number, theme: any): string[] {
+  const lines: string[] = [];
+  let inFence = false;
+  for (const rawLine of text.replace(/\t/g, "   ").split("\n")) {
+    const isFence = /^\s*```/.test(rawLine);
+    const styled = isFence ? theme.fg("accent", rawLine) : inFence ? theme.fg("muted", rawLine) : rawLine;
+    const wrapped = wrapTextWithAnsi(styled || " ", Math.max(1, width - 2));
+    lines.push(...(wrapped.length ? wrapped : [""]));
+    if (isFence) inFence = !inFence;
+  }
+  return lines;
+}
+
 async function showTurnDetailOverlay(turn: TurnInfo, ctx: any): Promise<void> {
-  await ctx.ui.custom<void>((_tui: any, theme: any, _keybindings: any, done: () => void) => {
-    const container = new Container();
+  await ctx.ui.custom<void>((tui: any, theme: any, _keybindings: any, done: () => void) => {
     const accent = (text: string) => theme.fg("accent", text);
     const label = (text: string) => accent(theme.bold(text));
     const value = (text: string) => theme.fg("dim", text);
-    const detailLines = [
-      `${label("Turn")} ${value(`${turn.turnId} (${turn.relativeTurnId})`)}`,
-      `${label("entryId")} ${value(turn.entryId)}`,
-      `${label("parentId")} ${value(turn.parentId ?? "null")}`,
-      `${label("timestamp")} ${value(turn.timestamp)}`,
-      `${label("eligible split target")} ${value(turn.eligible ? "yes" : "no")}`,
-      ...(turn.ineligibleReason ? [`${label("reason")} ${value(turn.ineligibleReason)}`] : []),
-      "",
-      label("Prompt"),
-      turn.text,
-    ];
-    while (detailLines.length < TURN_PICKER_MAX_VISIBLE + TURN_PICKER_CHROME_LINES) detailLines.push("");
-    container.addChild(new DynamicBorder(accent));
-    container.addChild(new Text(accent(theme.bold("Turn Detail")), 1, 0));
-    container.addChild(new Text(detailLines.join("\n"), 1, 0));
-    container.addChild(new Text(theme.fg("dim", "esc back to turns"), 1, 0));
-    container.addChild(new DynamicBorder(accent));
-    return {
-      render(width: number) { return container.render(width); },
-      invalidate() { container.invalidate(); },
-      handleInput(_data: string) { done(); },
+    let scroll = 0;
+    const visibleBodyLines = turnPickerVisibleCount();
+    const renderBody = (width: number): string[] => {
+      const metadata = [
+        `${label("Turn")} ${value(`${turn.turnId} (${turn.relativeTurnId})`)}`,
+        `${label("entryId")} ${value(turn.entryId)}`,
+        `${label("parentId")} ${value(turn.parentId ?? "null")}`,
+        `${label("timestamp")} ${value(turn.timestamp)}`,
+        `${label("eligible split target")} ${value(turn.eligible ? "yes" : "no")}`,
+        ...(turn.ineligibleReason ? [`${label("reason")} ${value(turn.ineligibleReason)}`] : []),
+        "",
+        label("Prompt"),
+      ];
+      const body = [...metadata, ...highlightedPromptLines(turn.text, width, theme)];
+      const maxScroll = Math.max(0, body.length - visibleBodyLines);
+      scroll = Math.max(0, Math.min(scroll, maxScroll));
+      const slice = body.slice(scroll, scroll + visibleBodyLines);
+      while (slice.length < visibleBodyLines) slice.push("");
+      return slice;
     };
-  }, { overlay: true, overlayOptions: { width: "90%", maxHeight: "85%", anchor: "bottom-center", margin: { bottom: TURN_OVERLAY_BOTTOM_MARGIN, left: 2, right: 2 } } });
+    return {
+      render(width: number) {
+        const border = new DynamicBorder(accent).render(width);
+        return [
+          ...border,
+          ` ${accent(theme.bold("Turn Detail"))}`,
+          ...renderBody(width).map((line) => ` ${line}`),
+          ` ${theme.fg("dim", "↑↓/pgup/pgdn scroll • esc back to turns")}`,
+          ...border,
+        ];
+      },
+      invalidate() {},
+      handleInput(data: string) {
+        if (isPageUpKey(data)) scroll -= visibleBodyLines;
+        else if (isPageDownKey(data)) scroll += visibleBodyLines;
+        else if (data === "\x1b[A" || data.toLowerCase() === "up") scroll -= 1;
+        else if (data === "\x1b[B" || data.toLowerCase() === "down") scroll += 1;
+        else return done();
+        tui.requestRender();
+      },
+    };
+  }, { overlay: true, overlayOptions: { width: "90%", maxHeight: turnPickerVisibleCount() + TURN_PICKER_CHROME_LINES, anchor: "bottom-center", margin: { bottom: turnOverlayBottomMargin(), left: 2, right: 2 } } });
 }
 
 async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: any, initialTurnId?: string): Promise<void> {
@@ -807,8 +856,9 @@ async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: an
     container.addChild(new Text(accent(theme.bold("Session Turns")), 1, 0));
     container.addChild(new Text(theme.fg("dim", sessionLabel), 1, 0));
 
+    const visibleTurns = Math.min(turns.length, turnPickerVisibleCount());
     let selectedIndex = initialTurnId ? Math.max(0, items.findIndex((item) => item.value === initialTurnId)) : 0;
-    const list = new SelectList(items, Math.min(turns.length, TURN_PICKER_MAX_VISIBLE), {
+    const list = new SelectList(items, visibleTurns, {
       selectedPrefix: accent,
       selectedText: (text: string) => text.includes("(ineligible)") ? theme.fg("dim", text) : accent(text),
       description: (text: string) => text.includes("would create empty") ? theme.fg("dim", text) : theme.fg("muted", text),
@@ -838,7 +888,7 @@ async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: an
       invalidate() { container.invalidate(); },
       handleInput(data: string) {
         if (isPageUpKey(data) || isPageDownKey(data)) {
-          selectedIndex = Math.max(0, Math.min(items.length - 1, selectedIndex + (isPageUpKey(data) ? -TURN_PICKER_MAX_VISIBLE : TURN_PICKER_MAX_VISIBLE)));
+          selectedIndex = Math.max(0, Math.min(items.length - 1, selectedIndex + (isPageUpKey(data) ? -visibleTurns : visibleTurns)));
           list.setSelectedIndex(selectedIndex);
         } else list.handleInput(data);
         tui.requestRender();
@@ -846,7 +896,7 @@ async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: an
     };
   }, {
     overlay: true,
-    overlayOptions: { width: "90%", maxHeight: "80%", anchor: "bottom-center", margin: { bottom: TURN_OVERLAY_BOTTOM_MARGIN, left: 2, right: 2 } },
+    overlayOptions: { width: "90%", maxHeight: visibleTurns + TURN_PICKER_CHROME_LINES, anchor: "bottom-center", margin: { bottom: turnOverlayBottomMargin(), left: 2, right: 2 } },
   }).then(async (selectedTurnId: string | null | undefined) => {
     if (!selectedTurnId) return;
     const selected = turns.find((turn) => String(turn.turnId) === selectedTurnId);
