@@ -762,7 +762,7 @@ async function showTurnDetailOverlay(turn: TurnInfo, ctx: any): Promise<void> {
     container.addChild(new DynamicBorder(accent));
     container.addChild(new Text(accent(theme.bold("Turn Detail")), 1, 0));
     container.addChild(new Text(detailLines.join("\n"), 1, 0));
-    container.addChild(new Text(theme.fg("dim", "esc close"), 1, 0));
+    container.addChild(new Text(theme.fg("dim", "esc back to turns"), 1, 0));
     container.addChild(new DynamicBorder(accent));
     return {
       render(width: number) { return container.render(width); },
@@ -772,7 +772,7 @@ async function showTurnDetailOverlay(turn: TurnInfo, ctx: any): Promise<void> {
   }, { overlay: true, overlayOptions: { width: "90%", maxHeight: "85%", anchor: "center", margin: 2 } });
 }
 
-async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: any): Promise<void> {
+async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: any, initialTurnId?: string): Promise<void> {
   if (turns.length === 0) {
     ctx.ui.notify("No user-message turns found.", "info");
     return;
@@ -808,6 +808,7 @@ async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: an
       },
     });
 
+    if (initialTurnId) list.setSelectedIndex(Math.max(0, items.findIndex((item) => item.value === initialTurnId)));
     list.onSelect = (item) => done(item.value);
     list.onCancel = () => done(null);
     container.addChild(list);
@@ -827,6 +828,7 @@ async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: an
     const selected = turns.find((turn) => String(turn.turnId) === selectedTurnId);
     if (!selected) return;
     await showTurnDetailOverlay(selected, ctx);
+    await showTurnsOverlay(turns, sessionLabel, ctx, selectedTurnId);
   });
 }
 
