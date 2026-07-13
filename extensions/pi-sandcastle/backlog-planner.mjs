@@ -76,14 +76,14 @@ export function parsePlanArgs(rawArgs) {
 }
 
 function normalizeIssueId(value) {
-  const match = String(value ?? '').match(/(\d{5})/);
+  const match = String(value ?? '').match(/(?:^|[^\d])(\d{3,5})(?:[^\d]|$)/);
   return match ? match[1] : null;
 }
 
 function humanizeFileStem(stem) {
   return stem
-    .replace(/^\d{5}-/, '')
-    .replace(/-/g, ' ')
+    .replace(/^\d{3,5}[-_]/, '')
+    .replace(/[-_]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -151,6 +151,12 @@ function parseSimpleFrontmatter(frontmatterText) {
     }
 
     if (!sectionKey) continue;
+    const topLevelListItem = line.match(/^\s{2}-\s*(.*)$/);
+    if (topLevelListItem && !nestedKey) {
+      if (!Array.isArray(data[sectionKey])) data[sectionKey] = [];
+      data[sectionKey].push(parseScalar(topLevelListItem[1]));
+      continue;
+    }
     const nested = line.match(/^\s{2}([A-Za-z0-9_-]+):\s*(.*)$/);
     if (nested) {
       nestedKey = nested[1];
@@ -225,6 +231,13 @@ function estimateRisk(item) {
 
 function isTerminalStatus(status) {
   return TERMINAL_STATUSES.has(String(status ?? '').toLowerCase());
+}
+
+function isPlanCandidate(item) {
+  return String(item.status ?? '').toLowerCase() === 'ready'
+    && !isTerminalStatus(item.status)
+    && item.missingDependencies.length === 0
+    && !item.tags.map((tag) => String(tag).toLowerCase()).includes('hitl');
 }
 
 function recommendPipeline(item) {
@@ -443,18 +456,19 @@ export async function buildBacklogPlan(cwd, rawArgs, overrides = {}) {
   const requestedIterations = Math.max(1, Math.floor(overrides.iterations ?? iterations));
   const shouldIncludeTerminal = Boolean(overrides.includeTerminal ?? includeTerminal);
   const allItems = await loadBacklogItems(cwd);
-  const activeItems = shouldIncludeTerminal ? allItems : allItems.filter((item) => !isTerminalStatus(item.status));
-  const excludedTerminalCount = allItems.length - activeItems.length;
+  const candidateItems = shouldIncludeTerminal ? allItems : allItems.filter(isPlanCandidate);
+  const excludedTerminalCount = allItems.filter((item) => isTerminalStatus(item.status)).length;
   const queryTokens = splitCommandArgs(query).map((token) => token.toLowerCase()).filter(Boolean);
-  const filtered = queryTokens.length === 0
-    ? activeItems
-    : activeItems.filter((item) => queryTokens.every((token) => item.searchText.includes(token)));
+  const queryFiltered = queryTokens.length === 0
+    ? candidateItems
+    : candidateItems.filter((item) => queryTokens.every((token) => item.searchText.includes(token)));
 
   const index = new Map(allItems.map((item) => [item.numericId, item]));
   const memo = new Map();
-  for (const item of filtered) {
+  for (const item of queryFiltered) {
     item.depth = computeDepth(item, index, memo, new Set());
   }
+  const filtered = shouldIncludeTerminal ? queryFiltered : queryFiltered.filter((item) => getItemDepth(item) < requestedIterations);
 
   const sorted = [...filtered].sort((a, b) =>
     a.depth - b.depth ||

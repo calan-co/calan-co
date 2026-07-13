@@ -101,7 +101,7 @@ test('buildBacklogPlan groups by dependency depth and preserves read-only behavi
   cleanupRepo(t, repo);
 
   const before = await readdir(join(repo, 'backlog'));
-  const plan = await buildBacklogPlan(repo, '--iterations 2');
+  const plan = await buildBacklogPlan(repo, '--iterations 2 --all');
   const after = await readdir(join(repo, 'backlog'));
   const rendered = formatBacklogPlan(plan);
   const nextPlan = await buildBacklogPlan(repo, '--iterations 1', { iterations: 1 });
@@ -159,7 +159,7 @@ test('buildBacklogPlan keeps dependency layers intact across iterations', async 
   ]);
   cleanupRepo(t, repo);
 
-  const plan = await buildBacklogPlan(repo, '--iterations 2');
+  const plan = await buildBacklogPlan(repo, '--iterations 2 --all');
 
   assert.equal(plan.groups.length, 2);
   assert.deepEqual(
@@ -170,6 +170,34 @@ test('buildBacklogPlan keeps dependency layers intact across iterations', async 
     plan.groups[1].items.map((item) => item.numericId),
     ['00004'],
   );
+});
+
+test('buildBacklogPlan uses iterations as dependency-depth expansion', async (t) => {
+  const repo = await makeBacklogRepo([
+    {
+      fileName: '001-alpha.md',
+      content: backlogItem({ id: 'wi-001', title: 'Alpha', summary: 'Ready alpha', tags: ['afk'] }),
+    },
+    {
+      fileName: '002-beta.md',
+      content: backlogItem({ id: 'wi-002', title: 'Beta', summary: 'Ready beta', tags: ['afk'] }),
+    },
+    {
+      fileName: '003-gamma.md',
+      content: backlogItem({ id: 'wi-003', title: 'Gamma', summary: 'Ready after alpha', tags: ['afk'], dependsOn: ['[[001-alpha]]'] }),
+    },
+  ]);
+  cleanupRepo(t, repo);
+
+  const firstIteration = await buildBacklogPlan(repo, '');
+  const expanded = await buildBacklogPlan(repo, '--iterations=2');
+
+  assert.equal(firstIteration.matchedCount, 2);
+  assert.equal(firstIteration.groups.length, 1);
+  assert.deepEqual(firstIteration.groups[0].items.map((item) => item.numericId), ['001', '002']);
+  assert.equal(expanded.matchedCount, 3);
+  assert.equal(expanded.groups.length, 2);
+  assert.deepEqual(expanded.groups.map((group) => group.items.map((item) => item.numericId)), [['001', '002'], ['003']]);
 });
 
 test('buildBacklogPlan excludes terminal work by default and recommends archive when included', async (t) => {

@@ -32,7 +32,6 @@ import { dirname, join, resolve } from "node:path";
 import { ConfigShadowModel } from "./config-shadow-model.ts";
 import { buildSandcastleImage } from "./build-image.ts";
 import { registerBacklogCommands } from "./backlog.mjs";
-import { buildBacklogPlan, formatBacklogPlan } from "./backlog-planner.mjs";
 import { buildDefaultConfigText, configToYaml, packsToConfig } from "./pipeline-packs.mjs";
 import { loadExecutionRuntimePack, listRuntimeAgents, listRuntimePipelines } from "./execution-runtime.ts";
 import {
@@ -230,6 +229,7 @@ const DEFAULT_MODEL = "Agent Default";
 const ROOT_CONFIG_KEYS: RootConfigKey[] = ["defaultSandbox", "defaultModel", "defaultPipeline", "defaultAgent", "issueTracker", "issueTrackerSetupCommand", "imageNamePattern"];
 const EDITABLE_AGENT_FIELDS: EditableAgentField[] = ["description", "model", "sandbox", "maxIterations", "branch"];
 const RUNS_DIR = `${CONFIG_DIR}/runs`;
+const PLANS_DIR = `${CONFIG_DIR}/plans`;
 const LOGS_DIR = `${CONFIG_DIR}/logs`;
 const DEFAULT_STEP_PROMPT = "$INPUT";
 const PIPELINE_RUNS_DIR = RUNS_DIR;
@@ -238,6 +238,7 @@ const DIRECT_ROLE_RUN_KIND = "direct-role";
 const PIPELINE_RUN_KIND = "pipeline";
 const BACKLOG_PROCESS_RUN_KIND = "backlog-process";
 const EDITOR_PREF_PATH = `${CONFIG_DIR}/editor`;
+const SCAFFOLD_STATE_PATH = `${CONFIG_DIR}/scaffold-state.json`;
 const CONFIG_SCHEMA_PATH = new URL("./schema/sandcastle-config.schema.json", import.meta.url);
 const inFlightImageBuilds = new Map<string, Promise<void>>();
 
@@ -966,10 +967,11 @@ function tokenizeCommandArgs(raw: string): string[] {
 	return tokens;
 }
 
-export function parseBacklogProcessArgs(raw: string): { query: string; pipeline?: string } {
+export function parseBacklogProcessArgs(raw: string): { query: string; pipeline?: string; planId?: string } {
 	const tokens = tokenizeCommandArgs(raw);
 	const queryTokens: string[] = [];
 	let pipeline: string | undefined;
+	let planId: string | undefined;
 
 	for (let i = 0; i < tokens.length; i++) {
 		const token = tokens[i]!;
@@ -996,10 +998,22 @@ export function parseBacklogProcessArgs(raw: string): { query: string; pipeline?
 			}
 			continue;
 		}
+		if (token === "--plan") {
+			const value = tokens[i + 1];
+			if (!value || value.startsWith("-")) throw new Error("Missing value for --plan. Use /backlog:process --plan <plan-id>.");
+			planId = value;
+			i++;
+			continue;
+		}
+		if (token.startsWith("--plan=")) {
+			planId = token.slice("--plan=".length);
+			if (!planId) throw new Error("Missing value for --plan. Use /backlog:process --plan <plan-id>.");
+			continue;
+		}
 		queryTokens.push(token);
 	}
 
-	return { query: queryTokens.join(" ").trim(), pipeline };
+	return { query: queryTokens.join(" ").trim(), pipeline, planId };
 }
 
 function ensureBacklogRunScaffold(cwd: string): void {
@@ -1023,6 +1037,23 @@ function getBacklogTimestamp(now?: () => number): number {
 
 function createBacklogRunId(startedAt: number): string {
 	return `backlog-${startedAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function createBacklogPlanId(createdAt: number): string {
+	return `plan-${createdAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function writeBacklogPlanRecord(cwd: string, record: any): string {
+	mkdirSync(join(cwd, PLANS_DIR), { recursive: true });
+	const recordPath = join(cwd, PLANS_DIR, `${record.id}.json`);
+	writeFileSync(recordPath, JSON.stringify(record, null, 2));
+	return recordPath;
+}
+
+function readBacklogPlanRecord(cwd: string, planId: string): any {
+	const path = join(cwd, PLANS_DIR, `${planId}.json`);
+	if (!existsSync(path)) throw new Error(`Unknown backlog plan '${planId}'.`);
+	return JSON.parse(readFileSync(path, "utf8"));
 }
 
 function readFrontmatter(text: string): Record<string, string> {
@@ -1521,6 +1552,10 @@ function validateAgainstSchema(value: any, schema: any, root: any = schema, path
 		}
 		for (const [key, entry] of Object.entries(value)) {
 			const childSchema = resolved.properties?.[key] || resolved.additionalProperties;
+			if (!childSchema && resolved.additionalProperties === false) {
+				issues.push(`${path}.${key} is not supported.`);
+				continue;
+			}
 			if (childSchema && typeof childSchema === "object") issues.push(...validateAgainstSchema(entry, childSchema, root, `${path}.${key}`));
 		}
 		return issues;
@@ -1542,13 +1577,41 @@ function validateAgainstSchema(value: any, schema: any, root: any = schema, path
 	return issues;
 }
 
+function validateRawConfigText(raw: string): string[] {
+	const allowedTopLevel = new Set(["runtimeVersion", ...ROOT_CONFIG_KEYS, "roles", "prompts", "policies", "pipelines", "chains"]);
+	const issues: string[] = [];
+	for (const line of raw.replace(/\r/g, "").split("\n")) {
+		const match = line.match(/^([A-Za-z0-9_-]+):\s*/);
+		if (match && !allowedTopLevel.has(match[1])) issues.push(`config.${match[1]} is not supported.`);
+	}
+	return issues;
+}
+
+function stripUndefinedAndInternalKeys(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(stripUndefinedAndInternalKeys);
+	if (!value || typeof value !== "object") return value;
+	const output: Record<string, unknown> = {};
+	for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+		if (entry === undefined || key === "name") continue;
+		output[key] = stripUndefinedAndInternalKeys(entry);
+	}
+	return output;
+}
+
+function configForSchemaValidation(cfg: SandcastleConfig): Record<string, unknown> {
+	const value: Record<string, unknown> = { ...cfg, roles: cfg.agents };
+	delete value.agents;
+	return stripUndefinedAndInternalKeys(value) as Record<string, unknown>;
+}
+
 function validateConfig(cwd: string, cfg: SandcastleConfig): string[] {
 	const issues: string[] = [];
 	const configPath = join(cwd, CONFIG_PATH);
 	const runnerPath = join(cwd, RUNNER_PATH);
 	if (!existsSync(configPath)) issues.push(`Missing config scaffold: ${CONFIG_PATH}`);
+	else issues.push(...validateRawConfigText(readFileSync(configPath, "utf8")));
 	if (!existsSync(runnerPath)) issues.push(`Missing runner scaffold: ${RUNNER_PATH}`);
-	issues.push(...validateAgainstSchema(cfg, loadConfigSchema()));
+	issues.push(...validateAgainstSchema(configForSchemaValidation(cfg), loadConfigSchema()));
 	if (!Object.keys(cfg.agents).length) issues.push("No roles configured.");
 	for (const [name, agent] of Object.entries(cfg.agents)) {
 		if (!agent.description) issues.push(`Role '${name}' is missing a description.`);
@@ -1785,6 +1848,13 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 				cfg.pipelines[currentPipeline].steps.push(currentPipelineStep);
 				continue;
 			}
+			const unknownStep = line.match(/^\s{6}-\s+([A-Za-z0-9_-]+):\s*(.*)$/);
+			if (unknownStep) {
+				currentPipelineStep = { kind: "runRole", role: "", prompt: DEFAULT_STEP_PROMPT } as any;
+				setField(currentPipelineStep as any, unknownStep[1] as any, parseScalar(unknownStep[2]) as any);
+				cfg.pipelines[currentPipeline].steps.push(currentPipelineStep);
+				continue;
+			}
 			const kindStep = line.match(/^\s{6}-\s+kind:\s*(.+)$/);
 			if (kindStep) {
 				currentPipelineStep = { kind: parseScalar(kindStep[1]), role: "", prompt: DEFAULT_STEP_PROMPT };
@@ -1977,14 +2047,58 @@ async function inspectImageCreated(cwd: string, provider: "docker" | "podman", i
 	}
 }
 
+async function loadBacklogPlannerModule(): Promise<typeof import("./backlog-planner.mjs")> {
+	const plannerUrl = new URL("./backlog-planner.mjs", import.meta.url);
+	let version = Date.now();
+	try {
+		version = statSync(plannerUrl).mtimeMs;
+	} catch {
+		// Fall back to a per-call cache buster so /reload still sees planner edits.
+	}
+	return import(`${plannerUrl.href}?reload=${version}`);
+}
+
 function missingSandcastleCliScaffoldMessage(): string {
 	return [
 		"Execution runtime scaffold is missing: .sandcastle/.",
-		"Initialize it with /backlog:config init or /backlog:config. The extension runs non-interactive sandcastle init using values from .pi/sandcastle/config.yaml.",
+		"Initialize it with /backlog:build-image or save config with rebuild enabled. The extension runs unattended npx @ai-hero/sandcastle init using values from .pi/sandcastle/config.yaml.",
 	].join("\n");
 }
 
-async function ensureSandcastleCliScaffold(cwd: string, cfg: SandcastleConfig, options: { reinitialize?: boolean } = {}): Promise<{ changes: string[] }> {
+function scaffoldStatePath(cwd: string): string {
+	return join(cwd, SCAFFOLD_STATE_PATH);
+}
+
+function scaffoldSetupSignature(cfg: SandcastleConfig): Record<string, unknown> {
+	return {
+		runtimeVersion: 1,
+		defaultPipeline: cfg.defaultPipeline || "simple-loop",
+		defaultAgent: cfg.defaultAgent || "claude-code",
+		defaultSandbox: imageProviderForSandbox(cfg.defaultSandbox) || "docker",
+		defaultModel: cfg.defaultModel && cfg.defaultModel !== DEFAULT_MODEL ? cfg.defaultModel : DEFAULT_MODEL,
+		issueTracker: cfg.issueTracker || "github-issues",
+		issueTrackerSetupCommand: cfg.issueTracker === "custom" ? cfg.issueTrackerSetupCommand || "" : "",
+	};
+}
+
+function readScaffoldSetupSignature(cwd: string): Record<string, unknown> | undefined {
+	try {
+		return JSON.parse(readFileSync(scaffoldStatePath(cwd), "utf8"))?.setupSignature;
+	} catch {
+		return undefined;
+	}
+}
+
+function writeScaffoldSetupSignature(cwd: string, cfg: SandcastleConfig): void {
+	mkdirSync(dirname(scaffoldStatePath(cwd)), { recursive: true });
+	writeFileSync(scaffoldStatePath(cwd), JSON.stringify({ setupSignature: scaffoldSetupSignature(cfg), updatedAt: new Date().toISOString() }, null, 2));
+}
+
+function scaffoldSetupNeedsReinit(cwd: string, cfg: SandcastleConfig): boolean {
+	return JSON.stringify(readScaffoldSetupSignature(cwd) || null) !== JSON.stringify(scaffoldSetupSignature(cfg));
+}
+
+async function ensureSandcastleCliScaffold(cwd: string, cfg: SandcastleConfig, options: { reinitialize?: boolean; runIssueTrackerSetup?: boolean } = {}): Promise<{ changes: string[] }> {
 	const scaffoldPath = join(cwd, ".sandcastle");
 	if (existsSync(scaffoldPath)) {
 		if (!options.reinitialize) return { changes: [] };
@@ -2002,13 +2116,54 @@ async function ensureSandcastleCliScaffold(cwd: string, cfg: SandcastleConfig, o
 		"--install-template-deps", "true",
 	];
 	if (cfg.defaultModel && cfg.defaultModel !== DEFAULT_MODEL) args.splice(5, 0, "--model", cfg.defaultModel);
-	await runProcess(cwd, "sandcastle", args);
-	if ((cfg.issueTracker || "github-issues") === "custom" && cfg.issueTrackerSetupCommand) await runProcess(cwd, process.env.SHELL || "sh", ["-lc", cfg.issueTrackerSetupCommand]);
+	await runProcess(cwd, "npx", ["@ai-hero/sandcastle", ...args]);
+	if (options.runIssueTrackerSetup && (cfg.issueTracker || "github-issues") === "custom" && cfg.issueTrackerSetupCommand) await runProcess(cwd, process.env.SHELL || "sh", ["-lc", cfg.issueTrackerSetupCommand]);
+	writeScaffoldSetupSignature(cwd, cfg);
 	return { changes: [options.reinitialize ? "reinitialized .sandcastle/" : "wrote .sandcastle/"] };
 }
 
 function requireSandcastleCliScaffold(cwd: string): void {
 	if (!existsSync(join(cwd, ".sandcastle"))) throw new Error(missingSandcastleCliScaffoldMessage());
+}
+
+function defaultSandboxContainerfile(): string {
+	return [
+		"FROM node:22-bookworm",
+		"",
+		"RUN apt-get update && apt-get install -y git curl jq && rm -rf /var/lib/apt/lists/*",
+		"RUN corepack enable && corepack prepare pnpm@latest --activate",
+		"",
+		"ARG AGENT_UID=1000",
+		"ARG AGENT_GID=1000",
+		"RUN groupmod -o -g $AGENT_GID node && usermod -o -u $AGENT_UID -g $AGENT_GID -d /home/agent -m -l agent node",
+		"USER ${AGENT_UID}:${AGENT_GID}",
+		"WORKDIR /home/agent",
+		"ENTRYPOINT [\"sleep\", \"infinity\"]",
+		"",
+	].join("\n");
+}
+
+function ensureSandboxContainerfile(cwd: string, provider: "docker" | "podman", notify?: (message: string, type?: string) => void): void {
+	const sandcastleDir = join(cwd, ".sandcastle");
+	const dockerfile = join(sandcastleDir, "Dockerfile");
+	const containerfile = join(sandcastleDir, "Containerfile");
+	if (existsSync(dockerfile) || existsSync(containerfile)) return;
+	mkdirSync(sandcastleDir, { recursive: true });
+	const target = provider === "podman" ? containerfile : dockerfile;
+	writeFileSync(target, defaultSandboxContainerfile());
+	notify?.(`Wrote missing ${provider === "podman" ? "Containerfile" : "Dockerfile"} for sandbox image build.`, "info");
+}
+
+async function ensureScaffoldForImageBuild(cwd: string, cfg: SandcastleConfig, provider: "docker" | "podman", notify?: (message: string, type?: string) => void): Promise<void> {
+	const scaffoldPath = join(cwd, ".sandcastle");
+	if (!existsSync(scaffoldPath)) {
+		notify?.("Execution runtime scaffold .sandcastle/ is missing; running unattended npx @ai-hero/sandcastle init before building.", "info");
+		await ensureSandcastleCliScaffold(cwd, cfg, { runIssueTrackerSetup: true });
+	} else if (scaffoldSetupNeedsReinit(cwd, cfg)) {
+		notify?.("Sandcastle setup settings changed; reinitializing .sandcastle/ before rebuilding the sandbox image.", "info");
+		await ensureSandcastleCliScaffold(cwd, cfg, { reinitialize: true, runIssueTrackerSetup: true });
+	}
+	ensureSandboxContainerfile(cwd, provider, notify);
 }
 
 async function buildSandboxImage(cwd: string, provider: "docker" | "podman", imageName: string): Promise<void> {
@@ -3049,7 +3204,7 @@ export default function piSandcastle(
 		if (configImageRebuild) return configImageRebuild;
 		ctx.ui.notify(`Rebuilding Sandcastle ${provider} image ${imageName}. Commands using the sandbox should be retried after this completes.`, "info");
 		configImageRebuild = (async () => {
-			requireSandcastleCliScaffold(ctx.cwd);
+			await ensureScaffoldForImageBuild(ctx.cwd, cfg, provider, (message, type) => ctx.ui.notify(message, type));
 			await buildSandboxImageOnce(ctx.cwd, provider, imageName, deps.image?.buildImage || buildSandboxImage);
 		})().then(() => {
 			ctx.ui.notify(`Rebuilt Sandcastle ${provider} image ${imageName}. Retry any command that was waiting for the rebuild.`, "success");
@@ -3112,8 +3267,29 @@ Backlog views and processing:
 
 	async function notifyBacklogPlan(args: string, ctx: any, overrides?: { iterations?: number }): Promise<void> {
 		try {
+			const { buildBacklogPlan, formatBacklogPlan } = await loadBacklogPlannerModule();
 			const plan = await buildBacklogPlan(ctx.cwd, args, overrides);
-			ctx.ui.notify(formatBacklogPlan(plan), "info");
+			const createdAt = getBacklogTimestamp(backlogDeps.now);
+			const record = { id: createBacklogPlanId(createdAt), kind: "backlog-plan", createdAt, args, plan };
+			const recordPath = writeBacklogPlanRecord(ctx.cwd, record);
+			ctx.ui.notify(`${formatBacklogPlan(plan)}\n\nCached plan: ${record.id}\nRecord: ${recordPath}`, "info");
+		} catch (error) {
+			ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+		}
+	}
+
+	async function notifyBacklogReady(args: string, ctx: any): Promise<void> {
+		try {
+			const { buildBacklogPlan } = await loadBacklogPlannerModule();
+			const plan = await buildBacklogPlan(ctx.cwd, args, { iterations: 1 });
+			const items = plan.groups.flatMap((group: any) => group.items);
+			ctx.ui.notify([
+				"Ready work candidates",
+				`Candidates: ${items.length}`,
+				"",
+				"Selected",
+				...(items.length ? items.map((item: any) => `- ${item.issueId} | ${item.title} | ${item.filePath.replace(`${ctx.cwd}/`, "")}`) : ["- none"]),
+			].join("\n"), "info");
 		} catch (error) {
 			ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 		}
@@ -3398,7 +3574,7 @@ Backlog views and processing:
 			const imageName = defaultSandcastleImageName(ctx.cwd, cfg.imageNamePattern);
 			try {
 				ensureScaffold(ctx.cwd, { hydrate: true });
-				requireSandcastleCliScaffold(ctx.cwd);
+				await ensureScaffoldForImageBuild(ctx.cwd, cfg, provider, (message, type) => ctx.ui.notify(message, type));
 				ctx.ui.notify(`Building Sandcastle ${provider} image ${imageName}...`, "info");
 				await buildSandboxImageOnce(ctx.cwd, provider, imageName, deps.image?.buildImage || buildSandboxImage);
 				ctx.ui.notify(`Built Sandcastle ${provider} image ${imageName}.`, "success");
@@ -3479,7 +3655,7 @@ Backlog views and processing:
 						const cfg = await loadConfig(ctx.cwd).catch(() => ({ defaultSandbox: DEFAULT_SANDBOX, prompts: {}, agents: {}, chains: {}, pipelines: {} }) as SandcastleConfig);
 						const provider = imageProviderForSandbox(cfg.defaultSandbox) || "docker";
 						const imageName = defaultSandcastleImageName(ctx.cwd, cfg.imageNamePattern);
-						requireSandcastleCliScaffold(ctx.cwd);
+						await ensureScaffoldForImageBuild(ctx.cwd, cfg, provider, (message, type) => ctx.ui.notify(message, type));
 						ctx.ui.notify(`Building Sandcastle ${provider} image ${imageName}...`, "info");
 						await buildSandboxImageOnce(ctx.cwd, provider, imageName, deps.image?.buildImage || buildSandboxImage);
 						ctx.ui.notify(`Built Sandcastle ${provider} image ${imageName}.`, "success");
@@ -3655,7 +3831,7 @@ Backlog views and processing:
 		getArgumentCompletions: (prefix: string) => {
 			const pipelineMatch = prefix.match(/(?:^|\s)(?:--pipeline\s+|-p\s+)(\S*)$/);
 			if (pipelineMatch) return pipelineCompletionItems(pipelineMatch[1] || "");
-			return flagCompletionItems(["--pipeline", "-p"], tokenAfterLastSpace(prefix));
+			return flagCompletionItems(["--pipeline", "-p", "--plan"], tokenAfterLastSpace(prefix));
 		},
 		handler: async (args, ctx) => {
 			if (isConfigImageRebuildInProgress()) {
@@ -3664,8 +3840,9 @@ Backlog views and processing:
 			}
 			let baseRecord: BacklogProcessRecord | undefined;
 			try {
-				const { query, pipeline: explicitPipeline } = parseBacklogProcessArgs(args);
-				const planning = await planBacklogProcessing(ctx.cwd, query);
+				const { query, pipeline: explicitPipeline, planId } = parseBacklogProcessArgs(args);
+				const cachedPlan = planId ? readBacklogPlanRecord(ctx.cwd, planId).plan : undefined;
+				const planning = cachedPlan ? { iterations: cachedPlan.groups.map((group: any) => ({ items: group.items, recommendedPipeline: group.recommendedPipelines?.[0], supportsParallel: group.items.length > 1 })) } : await planBacklogProcessing(ctx.cwd, query);
 				const iteration = planning.iterations[0];
 				if (!iteration) {
 					ctx.ui.notify("No backlog items were selected for processing.", "error");
@@ -3678,9 +3855,10 @@ Backlog views and processing:
 				baseRecord = {
 					id: runId,
 					kind: BACKLOG_PROCESS_RUN_KIND,
-					query,
+					query: cachedPlan?.query || query,
 					resolvedItems: iteration.items,
 					pipeline,
+					planId,
 					status: "running",
 					branches: [],
 					logs: [],
@@ -3718,8 +3896,13 @@ Backlog views and processing:
 		},
 	});
 
+	pi.registerCommand("backlog:ready", {
+		description: "List deterministic ready work candidates, similar to dv work ready: /backlog:ready [query]",
+		handler: async (args, ctx) => notifyBacklogReady(args, ctx),
+	});
+
 	pi.registerCommand("backlog:plan", {
-		description: "Plan read-only backlog iterations: /backlog:plan [query] --iterations N",
+		description: "Run and cache the backlog planning phase: /backlog:plan [query] --iterations N",
 		getArgumentCompletions: (prefix: string) => flagCompletionItems(["--iterations", "--iterations=2", "--all", "--include-terminal"], tokenAfterLastSpace(prefix)),
 		handler: async (args, ctx) => notifyBacklogPlan(args, ctx),
 	});

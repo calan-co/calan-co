@@ -29,14 +29,15 @@ function makeRepo(name = 'doc-vader', defaultSandbox = 'docker', options = {}) {
   return cwd;
 }
 
-test('/backlog:build-image reports clear next steps when Sandcastle CLI scaffold is missing', async () => {
+test('/backlog:build-image initializes a missing Sandcastle scaffold before building', async () => {
   const cwd = makeRepo('missing-scaffold', 'podman', { skipSandcastleDir: true });
   const pi = fakePi();
   const notifications = [];
+  const calls = [];
   piSandcastle(pi, {
     image: {
-      async buildImage() {
-        throw new Error('should not build without .sandcastle');
+      async buildImage(repo, provider, imageName) {
+        calls.push({ repo, provider, imageName });
       },
     },
   });
@@ -46,9 +47,10 @@ test('/backlog:build-image reports clear next steps when Sandcastle CLI scaffold
     ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
   });
 
-  assert.equal(notifications.at(-1).type, 'error');
-  assert.match(notifications.at(-1).message, /Execution runtime scaffold is missing/);
-  assert.match(notifications.at(-1).message, /\/backlog:config-raw init|\/backlog:config/);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].provider, 'podman');
+  assert.equal(notifications.some((entry) => /running unattended npx @ai-hero\/sandcastle init/.test(entry.message)), true);
+  assert.equal(notifications.at(-1).type, 'success');
 });
 
 function fakePi() {

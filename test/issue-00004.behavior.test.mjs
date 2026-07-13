@@ -106,6 +106,58 @@ test('parseSimpleYaml keeps chain and pipeline step indentation rules aligned wi
   assert.match(parsed.pipelines.implement.steps[0].prompt, /Implement the requested work\.\n\$INPUT/);
 });
 
+test('parseSimpleYaml preserves unsupported pipeline step keys for validation', () => {
+  const parsed = parseSimpleYaml([
+    'roles:',
+    '  worker:',
+    '    description: Worker',
+    '    systemPrompt: Worker system prompt.',
+    '',
+    'pipelines:',
+    '  simple-loop:',
+    '    steps:',
+    '      - agent: worker',
+    '        prompt: do work',
+  ].join('\n'));
+
+  assert.equal(parsed.agents.worker.systemPrompt, 'Worker system prompt.');
+  assert.equal(parsed.pipelines['simple-loop'].steps[0].agent, 'worker');
+  assert.equal(parsed.pipelines['simple-loop'].steps[0].role, '');
+});
+
+test('/backlog:config-raw validate rejects agent terminology where role is required', async () => {
+  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-sandcastle-agent-term-'));
+  await fs.mkdir(path.join(repoRoot, '.pi/sandcastle'), { recursive: true });
+  await fs.writeFile(path.join(repoRoot, '.pi/sandcastle', 'run-job.mjs'), '', 'utf8');
+  await fs.writeFile(path.join(repoRoot, '.pi/sandcastle', 'config.yaml'), [
+    'agents:',
+    '  worker:',
+    '    description: Worker',
+    '',
+    'roles:',
+    '  reviewer:',
+    '    description: Reviewer',
+    '',
+    'pipelines:',
+    '  simple-loop:',
+    '    steps:',
+    '      - agent: worker',
+    '        prompt: do work',
+  ].join('\n'), 'utf8');
+
+  const pi = createFakePi();
+  piSandcastle(pi);
+  const notifications = [];
+  await pi.commands.get('backlog:config-raw')('validate', {
+    cwd: repoRoot,
+    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  });
+
+  assert.equal(notifications[0].type, 'error');
+  assert.match(notifications[0].message, /config\.agents is not supported/);
+  assert.match(notifications[0].message, /config\.pipelines\.simple-loop\.steps\[0\]\.agent is not supported/);
+});
+
 test('/backlog:pipeline registers and parses prompt text deterministically', async () => {
   const repoRoot = await createRepo();
   const fakePi = createFakePi();

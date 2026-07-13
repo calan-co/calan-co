@@ -91,7 +91,7 @@
     },
     "role": {
       "type": "object",
-      "additionalProperties": true,
+      "additionalProperties": false,
       "properties": {
         "description": { "type": "string" },
         "model": { "type": "string", "minLength": 1 },
@@ -117,7 +117,7 @@
     },
     "pipelineStep": {
       "type": "object",
-      "additionalProperties": true,
+      "additionalProperties": false,
       "properties": {
         "kind": {
           "type": "string",
@@ -142,7 +142,7 @@
     },
     "pipeline": {
       "type": "object",
-      "additionalProperties": true,
+      "additionalProperties": false,
       "properties": {
         "description": { "type": "string" },
         "branchStrategy": { "$ref": "#/$defs/branchStrategy" },
@@ -162,7 +162,7 @@
     },
     "chainStep": {
       "type": "object",
-      "additionalProperties": true,
+      "additionalProperties": false,
       "properties": {
         "role": { "type": "string" },
         "prompt": { "type": "string" }

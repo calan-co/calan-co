@@ -80,6 +80,7 @@ test('piSandcastle registers only the updated /backlog:* and /backlog:* slash-co
     'backlog:pipeline',
     'backlog:plan',
     'backlog:process',
+    'backlog:ready',
     'backlog:resume',
     'backlog:run',
     'backlog:runs',
