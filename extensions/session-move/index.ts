@@ -844,7 +844,7 @@ async function showTurnDetailOverlay(turns: TurnInfo[], initialTurn: TurnInfo, c
           ...border,
           titleLine(width),
           ...renderBody(width).map((line) => ` ${line}`),
-          ` ${theme.fg("dim", "←/→ previous/next turn • ↑↓/pgup/pgdn scroll • esc back to turns")}`,
+          ` ${theme.fg("dim", "←/→ previous/next turn • ↑↓/pgup/pgdn scroll • esc back to list")}`,
           ...border,
         ];
       },
@@ -860,7 +860,7 @@ async function showTurnDetailOverlay(turns: TurnInfo[], initialTurn: TurnInfo, c
         tui.requestRender();
       },
     };
-  }, { overlay: true, overlayOptions: { width: "90%", maxHeight: turnPickerVisibleCount() + TURN_PICKER_CHROME_LINES, anchor: "bottom-center", margin: { bottom: turnOverlayBottomMargin(), left: 2, right: 2 } } });
+  }, { overlay: true, overlayOptions: { width: 104, maxWidth: "90%", maxHeight: turnPickerVisibleCount() + TURN_PICKER_CHROME_LINES, anchor: "bottom-center", margin: { bottom: turnOverlayBottomMargin(), left: 2, right: 2 } } });
 }
 
 async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: any, initialTurnId?: string): Promise<void> {
@@ -922,7 +922,7 @@ async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: an
     };
   }, {
     overlay: true,
-    overlayOptions: { width: "90%", maxHeight: visibleTurns + TURN_PICKER_CHROME_LINES, anchor: "bottom-center", margin: { bottom: turnOverlayBottomMargin(), left: 2, right: 2 } },
+    overlayOptions: { width: 104, maxWidth: "90%", maxHeight: visibleTurns + TURN_PICKER_CHROME_LINES, anchor: "bottom-center", margin: { bottom: turnOverlayBottomMargin(), left: 2, right: 2 } },
   }).then(async (selectedTurnId: string | null | undefined) => {
     if (!selectedTurnId) return;
     const selected = turns.find((turn) => String(turn.turnId) === selectedTurnId);
