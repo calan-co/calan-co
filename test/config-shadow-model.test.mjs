@@ -69,3 +69,21 @@ test('ConfigShadowModel adds and deletes pipeline steps', () => {
   assert.equal(model.snapshot().pipelines.loop.steps[0].role, 'worker');
   assert.deepEqual(changes.map((change) => change.type), ['add-pipeline-step', 'delete-pipeline-step']);
 });
+
+test('ConfigShadowModel creates missing nested pipeline and role entries when edited', () => {
+  const model = new ConfigShadowModel(baseConfig());
+  model.setConfigValue('defaultAgent', 'pi');
+  model.setConfigValue('roles.newRole.sandbox', 'podman');
+  model.setConfigValue('pipelines.newPipeline.description', 'New pipeline');
+  model.setConfigValue('pipelines.newPipeline.steps.1.sandbox', 'podman');
+  model.setConfigValue('pipelines.newPipeline.steps.1.sandbox', 'default');
+  model.addPipelineStep('createdByStep');
+  model.deletePipelineStep('missing', 0);
+  const snapshot = model.snapshot();
+  assert.equal(snapshot.defaultAgent, 'pi');
+  assert.equal(snapshot.agents.newRole.sandbox, 'podman');
+  assert.equal(snapshot.pipelines.newPipeline.description, 'New pipeline');
+  assert.equal(snapshot.pipelines.newPipeline.steps[1].role, 'worker');
+  assert.equal(snapshot.pipelines.newPipeline.steps[1].sandbox, undefined);
+  assert.equal(snapshot.pipelines.createdByStep.steps.length, 1);
+});

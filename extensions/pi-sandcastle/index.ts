@@ -171,6 +171,8 @@ interface BacklogItemDispatchResult {
 }
 
 interface BacklogProcessPlanDeps {
+	ready?: (cwd: string, args: string) => Promise<string>;
+	planPhase?: (cwd: string, args: string) => Promise<any>;
 	plan?: (cwd: string, query: string) => Promise<BacklogPlanResult>;
 	execute?: (
 		cwd: string,
@@ -2047,17 +2049,6 @@ async function inspectImageCreated(cwd: string, provider: "docker" | "podman", i
 	}
 }
 
-async function loadBacklogPlannerModule(): Promise<typeof import("./backlog-planner.mjs")> {
-	const plannerUrl = new URL("./backlog-planner.mjs", import.meta.url);
-	let version = Date.now();
-	try {
-		version = statSync(plannerUrl).mtimeMs;
-	} catch {
-		// Fall back to a per-call cache buster so /reload still sees planner edits.
-	}
-	return import(`${plannerUrl.href}?reload=${version}`);
-}
-
 function missingSandcastleCliScaffoldMessage(): string {
 	return [
 		"Execution runtime scaffold is missing: .sandcastle/.",
@@ -3265,14 +3256,35 @@ Backlog views and processing:
 
 	registerScRunCommand(pi, sandcastle, { ...deps, isConfigImageRebuildInProgress });
 
+	function formatAuthoritativePlan(plan: any): string {
+		if (typeof plan === "string") return plan;
+		if (plan?.summary) return [plan.summary, ...(Array.isArray(plan.iterations) ? plan.iterations.map((iteration: any, index: number) => `Iteration ${index + 1}: ${iteration.pipeline || iteration.recommendedPipeline || "pipeline TBD"} · ${(iteration.items || []).length} item(s)`) : [])].join("\n");
+		return JSON.stringify(plan, null, 2);
+	}
+
+	async function runPlannerPhase(args: string, ctx: any): Promise<any> {
+		if (backlogDeps.planPhase) return backlogDeps.planPhase(ctx.cwd, args);
+		const cfg = await loadConfig(ctx.cwd);
+		const agent = cfg.agents.planner ? "planner" : Object.keys(cfg.agents)[0];
+		if (!agent) throw new Error("No planner role configured. Run /backlog:config and configure a planner role.");
+		const readyOutput = backlogDeps.ready
+			? await backlogDeps.ready(ctx.cwd, args)
+			: (await runProcess(ctx.cwd, "dv", ["work", "ready"])).stdout.trim();
+		const task = `Run the backlog planning phase for this repository.\n\nRequested plan arguments: ${args || "(none)"}\n\nReady work input from Doc-Vader:\n${readyOutput}\n\nReturn an authoritative plan with iterations, item ids, risk rationale, recommended pipeline per iteration, and any HITL or dependency constraints. End with <promise>COMPLETE</promise>.`;
+		const run = await dispatch(ctx.cwd, agent, task, ctx);
+		await new Promise<void>((resolve) => run.proc?.on("close", () => resolve()));
+		if (run.status !== "done") throw new Error(`Planner role failed: ${run.lastLine}`);
+		return JSON.parse(readFileSync(run.resultPath!, "utf8"));
+	}
+
 	async function notifyBacklogPlan(args: string, ctx: any, overrides?: { iterations?: number }): Promise<void> {
 		try {
-			const { buildBacklogPlan, formatBacklogPlan } = await loadBacklogPlannerModule();
-			const plan = await buildBacklogPlan(ctx.cwd, args, overrides);
+			const effectiveArgs = overrides?.iterations && !/--iterations(?:=|\s|$)/.test(args) ? `${args} --iterations=${overrides.iterations}`.trim() : args;
+			const plan = await runPlannerPhase(effectiveArgs, ctx);
 			const createdAt = getBacklogTimestamp(backlogDeps.now);
-			const record = { id: createBacklogPlanId(createdAt), kind: "backlog-plan", createdAt, args, plan };
+			const record = { id: createBacklogPlanId(createdAt), kind: "backlog-plan", createdAt, args: effectiveArgs, plan };
 			const recordPath = writeBacklogPlanRecord(ctx.cwd, record);
-			ctx.ui.notify(`${formatBacklogPlan(plan)}\n\nCached plan: ${record.id}\nRecord: ${recordPath}`, "info");
+			ctx.ui.notify(`${formatAuthoritativePlan(plan)}\n\nCached plan: ${record.id}\nRecord: ${recordPath}`, "info");
 		} catch (error) {
 			ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 		}
@@ -3280,16 +3292,10 @@ Backlog views and processing:
 
 	async function notifyBacklogReady(args: string, ctx: any): Promise<void> {
 		try {
-			const { buildBacklogPlan } = await loadBacklogPlannerModule();
-			const plan = await buildBacklogPlan(ctx.cwd, args, { iterations: 1 });
-			const items = plan.groups.flatMap((group: any) => group.items);
-			ctx.ui.notify([
-				"Ready work candidates",
-				`Candidates: ${items.length}`,
-				"",
-				"Selected",
-				...(items.length ? items.map((item: any) => `- ${item.issueId} | ${item.title} | ${item.filePath.replace(`${ctx.cwd}/`, "")}`) : ["- none"]),
-			].join("\n"), "info");
+			const output = backlogDeps.ready
+				? await backlogDeps.ready(ctx.cwd, args)
+				: (await runProcess(ctx.cwd, "dv", ["work", "ready", ...tokenizeCommandArgs(args)])).stdout.trim();
+			ctx.ui.notify(output || "No ready work candidates.", "info");
 		} catch (error) {
 			ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 		}
@@ -3842,7 +3848,7 @@ Backlog views and processing:
 			try {
 				const { query, pipeline: explicitPipeline, planId } = parseBacklogProcessArgs(args);
 				const cachedPlan = planId ? readBacklogPlanRecord(ctx.cwd, planId).plan : undefined;
-				const planning = cachedPlan ? { iterations: cachedPlan.groups.map((group: any) => ({ items: group.items, recommendedPipeline: group.recommendedPipelines?.[0], supportsParallel: group.items.length > 1 })) } : await planBacklogProcessing(ctx.cwd, query);
+				const planning = cachedPlan ? { iterations: (cachedPlan.iterations || cachedPlan.groups || []).map((entry: any) => ({ items: entry.items || [], recommendedPipeline: entry.pipeline || entry.recommendedPipeline || entry.recommendedPipelines?.[0], supportsParallel: (entry.items || []).length > 1 })) } : await planBacklogProcessing(ctx.cwd, query);
 				const iteration = planning.iterations[0];
 				if (!iteration) {
 					ctx.ui.notify("No backlog items were selected for processing.", "error");

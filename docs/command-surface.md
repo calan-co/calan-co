@@ -6,7 +6,7 @@ Pi-Sandcastle separates `/backlog:*` for Sandcastle configuration, primitive exe
 
 Run `/backlog:config-raw init` to hydrate local Sandcastle support files. `/backlog:config-raw init` hydrates missing repo-local files and prompt templates without overwriting existing edits.
 
-Durable run records and logs are stored under `.pi/sandcastle/results`. Durable state begins when `/backlog:process` or `/backlog:resume` executes a Sandcastle-backed pipeline.
+Durable run records and logs are stored under `.pi/sandcastle/runs` and `.pi/sandcastle/results`. Cached planning artifacts are stored under `.pi/sandcastle/plans`. Durable state begins when `/backlog:process` or `/backlog:resume` executes a Sandcastle-backed pipeline.
 
 ## Sandcastle primitive commands
 
@@ -22,10 +22,12 @@ Durable run records and logs are stored under `.pi/sandcastle/results`. Durable 
 ## Backlog commands
 
 - `/backlog:list [query]` lists matching backlog items without starting work.
-- `/backlog:plan [query] --iterations N` produces a read-only multi-iteration processing plan.
+- `/backlog:ready [query]` delegates readiness selection to Doc-Vader (`dv work ready` or the configured Doc-Vader API/capability).
+- `/backlog:plan [query] --iterations N` runs the configured planner/orchestrator planning phase and caches an authoritative plan.
 - `/backlog:next [query]` is a thin alias for `/backlog:plan --iterations 1`.
 - `/backlog:inspect <item>` returns item-level analysis, risks, relevant files, testing notes, and a recommended pipeline.
 - `/backlog:process [query] --pipeline <pipeline>` starts durable processing for the resolved backlog query.
+- `/backlog:process --plan <plan-id> [--pipeline <pipeline>]` starts durable processing from a previously cached authoritative plan, optionally overriding the plan pipeline.
 - `/backlog:runs` lists durable backlog process runs.
 - `/backlog:status [run-id]` inspects the current, latest, or specified backlog process run.
 - `/backlog:resume [run-id]` resumes a durable backlog process run when metadata and provider support make that safe.
@@ -38,4 +40,4 @@ Example: `/backlog:process auth bugs --pipeline implement` uses `auth bugs` as q
 
 ## Boundary
 
-Read-only commands never create durable records. Durable state begins when `/backlog:process` or `/backlog:resume` executes a Sandcastle-backed pipeline. Future PR workflow belongs under a separate `/pr:*` namespace.
+Discovery commands such as `/backlog:list`, `/backlog:inspect`, and `/backlog:ready` do not create durable records. `/backlog:plan` creates a cached plan artifact but does not execute implementation work. Durable state begins when `/backlog:process` or `/backlog:resume` executes a Sandcastle-backed pipeline. Future PR workflow belongs under a separate `/pr:*` namespace.
