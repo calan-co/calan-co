@@ -815,15 +815,12 @@ function turnBaseDate(turns: TurnInfo[]): Date | null {
   return date;
 }
 
-function formatTurnTime(turn: TurnInfo, base: Date | null): string {
+function formatTurnTime(turn: TurnInfo, _base: Date | null): string {
   const date = new Date(turn.timestamp);
-  if (Number.isNaN(date.getTime())) return "?:??";
+  if (Number.isNaN(date.getTime())) return "??-?? ??:??";
+  const monthDay = `${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
   const hhmm = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-  if (!base) return hhmm;
-  const day = new Date(date);
-  day.setHours(0, 0, 0, 0);
-  const offset = Math.round((day.getTime() - base.getTime()) / 86_400_000);
-  return offset === 0 ? hhmm : `+${offset}d ${hhmm}`;
+  return `${monthDay} ${hhmm}`;
 }
 
 function highlightedPromptLines(text: string, width: number, theme: any): string[] {
@@ -914,7 +911,6 @@ async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: an
   const visibleTurns = Math.min(turns.length, turnPickerVisibleCount());
   const turnNumberWidth = String(turns.length).length;
   const baseDate = turnBaseDate(turns);
-  const baseDateText = baseDate ? baseDate.toISOString().slice(0, 10) : "unknown date";
   const sessionId = sessionIdFromLabel(sessionLabel);
 
   await ctx.ui.custom<string | null>((tui: any, theme: any, _keybindings: any, done: (value: string | null) => void) => {
@@ -934,7 +930,7 @@ async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: an
       const selected = index === selectedIndex;
       const marker = selected ? "→" : " ";
       const number = String(turn.turnId).padStart(turnNumberWidth, "0");
-      const time = formatTurnTime(turn, baseDate).padStart(10, " ");
+      const time = formatTurnTime(turn, baseDate).padStart(11, " ");
       const prefix = `${marker} ${number} ${time}  `;
       const promptWidth = Math.max(8, width - visibleWidth(prefix) - 2);
       const prompt = truncateToWidth(turn.preview, promptWidth, "…");
@@ -946,9 +942,9 @@ async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: an
         syncScroll();
         const border = new DynamicBorder(accent).render(width);
         const title = accent(theme.bold("Session Turns"));
-        const meta = theme.fg("dim", `${sessionId} • ${baseDateText}`);
+        const meta = theme.fg("dim", sessionId);
         const spaces = " ".repeat(Math.max(1, width - visibleWidth(title) - visibleWidth(meta) - 2));
-        const header = theme.fg("dim", `  ${"#".padStart(turnNumberWidth)}  ${"when".padStart(10)}  prompt`);
+        const header = theme.fg("dim", `  ${"#".padStart(turnNumberWidth)}  ${"when".padStart(11)}  prompt`);
         const visible = turns.slice(scrollStart, scrollStart + visibleTurns);
         const rows = visible.map((turn, offset) => renderRow(turn, scrollStart + offset, width));
         while (rows.length < visibleTurns) rows.push("");
