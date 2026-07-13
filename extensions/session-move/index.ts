@@ -944,7 +944,7 @@ async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: an
         const title = accent(theme.bold("Session Turns"));
         const meta = theme.fg("dim", sessionId);
         const spaces = " ".repeat(Math.max(1, width - visibleWidth(title) - visibleWidth(meta) - 2));
-        const header = theme.fg("dim", `  ${"#".padStart(turnNumberWidth)}  ${"when".padStart(11)}  prompt`);
+        const header = theme.fg("dim", `  ${"#".padEnd(turnNumberWidth)} ${"date/time".padEnd(11)}  prompt`);
         const visible = turns.slice(scrollStart, scrollStart + visibleTurns);
         const rows = visible.map((turn, offset) => renderRow(turn, scrollStart + offset, width));
         while (rows.length < visibleTurns) rows.push("");
