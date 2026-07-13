@@ -7,7 +7,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { DynamicBorder, SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Container, SelectList, Text, truncateToWidth, wrapTextWithAnsi, type AutocompleteItem, type AutocompleteProvider, type AutocompleteSuggestions, type SelectItem } from "@earendil-works/pi-tui";
+import { Container, SelectList, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi, type AutocompleteItem, type AutocompleteProvider, type AutocompleteSuggestions, type SelectItem } from "@earendil-works/pi-tui";
 
 const execFileAsync = promisify(execFile);
 
@@ -775,6 +775,14 @@ function isPageDownKey(data: string): boolean {
   return data === "\x1b[6~" || data.toLowerCase() === "pagedown" || data.toLowerCase() === "page down" || data.toLowerCase() === "pgdn" || data.toLowerCase() === "pgdown";
 }
 
+function isLeftKey(data: string): boolean {
+  return data === "\x1b[D" || data.toLowerCase() === "left" || data.toLowerCase() === "arrowleft";
+}
+
+function isRightKey(data: string): boolean {
+  return data === "\x1b[C" || data.toLowerCase() === "right" || data.toLowerCase() === "arrowright";
+}
+
 function highlightedPromptLines(text: string, width: number, theme: any): string[] {
   const lines: string[] = [];
   let inFence = false;
@@ -788,14 +796,23 @@ function highlightedPromptLines(text: string, width: number, theme: any): string
   return lines;
 }
 
-async function showTurnDetailOverlay(turn: TurnInfo, ctx: any): Promise<void> {
-  await ctx.ui.custom<void>((tui: any, theme: any, _keybindings: any, done: () => void) => {
+async function showTurnDetailOverlay(turns: TurnInfo[], initialTurn: TurnInfo, ctx: any): Promise<string | undefined> {
+  return await ctx.ui.custom<string | undefined>((tui: any, theme: any, _keybindings: any, done: (value: string | undefined) => void) => {
     const accent = (text: string) => theme.fg("accent", text);
     const label = (text: string) => accent(theme.bold(text));
     const value = (text: string) => theme.fg("dim", text);
+    let currentIndex = Math.max(0, turns.findIndex((turn) => turn.turnId === initialTurn.turnId));
     let scroll = 0;
     const visibleBodyLines = turnPickerVisibleCount();
+    const currentTurn = () => turns[currentIndex] ?? initialTurn;
+    const titleLine = (width: number): string => {
+      const title = accent(theme.bold("Turn Detail"));
+      const count = theme.fg("dim", `${currentIndex + 1}/${turns.length}`);
+      const spaces = " ".repeat(Math.max(1, width - visibleWidth(title) - visibleWidth(count) - 2));
+      return ` ${title}${spaces}${count}`;
+    };
     const renderBody = (width: number): string[] => {
+      const turn = currentTurn();
       const metadata = [
         `${label("Turn")} ${value(`${turn.turnId} (${turn.relativeTurnId})`)}`,
         `${label("entryId")} ${value(turn.entryId)}`,
@@ -813,24 +830,33 @@ async function showTurnDetailOverlay(turn: TurnInfo, ctx: any): Promise<void> {
       while (slice.length < visibleBodyLines) slice.push("");
       return slice;
     };
+    const moveTurn = (delta: number) => {
+      const next = Math.max(0, Math.min(turns.length - 1, currentIndex + delta));
+      if (next !== currentIndex) {
+        currentIndex = next;
+        scroll = 0;
+      }
+    };
     return {
       render(width: number) {
         const border = new DynamicBorder(accent).render(width);
         return [
           ...border,
-          ` ${accent(theme.bold("Turn Detail"))}`,
+          titleLine(width),
           ...renderBody(width).map((line) => ` ${line}`),
-          ` ${theme.fg("dim", "↑↓/pgup/pgdn scroll • esc back to turns")}`,
+          ` ${theme.fg("dim", "←/→ previous/next turn • ↑↓/pgup/pgdn scroll • esc back to turns")}`,
           ...border,
         ];
       },
       invalidate() {},
       handleInput(data: string) {
-        if (isPageUpKey(data)) scroll -= visibleBodyLines;
+        if (isLeftKey(data)) moveTurn(-1);
+        else if (isRightKey(data)) moveTurn(1);
+        else if (isPageUpKey(data)) scroll -= visibleBodyLines;
         else if (isPageDownKey(data)) scroll += visibleBodyLines;
         else if (data === "\x1b[A" || data.toLowerCase() === "up") scroll -= 1;
         else if (data === "\x1b[B" || data.toLowerCase() === "down") scroll += 1;
-        else return done();
+        else return done(String(currentTurn().turnId));
         tui.requestRender();
       },
     };
@@ -901,8 +927,8 @@ async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: an
     if (!selectedTurnId) return;
     const selected = turns.find((turn) => String(turn.turnId) === selectedTurnId);
     if (!selected) return;
-    await showTurnDetailOverlay(selected, ctx);
-    await showTurnsOverlay(turns, sessionLabel, ctx, selectedTurnId);
+    const detailTurnId = await showTurnDetailOverlay(turns, selected, ctx);
+    await showTurnsOverlay(turns, sessionLabel, ctx, detailTurnId ?? selectedTurnId);
   });
 }
 
