@@ -848,6 +848,7 @@ async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: an
     label: `${turn.eligible ? " " : "·"} ${turnLabel(turn)}`,
     description: `${turn.timestamp}  ${turn.preview}${turn.ineligibleReason ? `  — ${turn.ineligibleReason}` : ""}`,
   }));
+  const visibleTurns = Math.min(turns.length, turnPickerVisibleCount());
 
   await ctx.ui.custom<string | null>((tui: any, theme: any, _keybindings: any, done: (value: string | null) => void) => {
     const container = new Container();
@@ -856,7 +857,6 @@ async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: an
     container.addChild(new Text(accent(theme.bold("Session Turns")), 1, 0));
     container.addChild(new Text(theme.fg("dim", sessionLabel), 1, 0));
 
-    const visibleTurns = Math.min(turns.length, turnPickerVisibleCount());
     let selectedIndex = initialTurnId ? Math.max(0, items.findIndex((item) => item.value === initialTurnId)) : 0;
     const list = new SelectList(items, visibleTurns, {
       selectedPrefix: accent,
