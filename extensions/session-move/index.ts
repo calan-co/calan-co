@@ -7,7 +7,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { DynamicBorder, SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Container, SelectList, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi, type AutocompleteItem, type AutocompleteProvider, type AutocompleteSuggestions, type SelectItem } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi, type AutocompleteItem, type AutocompleteProvider, type AutocompleteSuggestions } from "@earendil-works/pi-tui";
 
 const execFileAsync = promisify(execFile);
 
@@ -783,6 +783,33 @@ function isRightKey(data: string): boolean {
   return data === "\x1b[C" || data.toLowerCase() === "right" || data.toLowerCase() === "arrowright";
 }
 
+function sessionIdFromLabel(sessionLabel: string): string {
+  const uuid = sessionLabel.match(/[0-9a-f]{8}-[0-9a-f-]{18,}/i)?.[0];
+  if (uuid) return uuid;
+  const paren = sessionLabel.match(/\(([^)]+)\)/)?.[1];
+  if (!paren || paren === "current in-memory session") return paren || "current";
+  return basename(paren).replace(/\.jsonl$/, "");
+}
+
+function turnBaseDate(turns: TurnInfo[]): Date | null {
+  const first = turns.find((turn) => !Number.isNaN(Date.parse(turn.timestamp)));
+  if (!first) return null;
+  const date = new Date(first.timestamp);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+function formatTurnTime(turn: TurnInfo, base: Date | null): string {
+  const date = new Date(turn.timestamp);
+  if (Number.isNaN(date.getTime())) return "?:??";
+  const hhmm = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  if (!base) return hhmm;
+  const day = new Date(date);
+  day.setHours(0, 0, 0, 0);
+  const offset = Math.round((day.getTime() - base.getTime()) / 86_400_000);
+  return offset === 0 ? hhmm : `+${offset}d ${hhmm}`;
+}
+
 function highlightedPromptLines(text: string, width: number, theme: any): string[] {
   const lines: string[] = [];
   let inFence = false;
@@ -869,54 +896,67 @@ async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: an
     return;
   }
 
-  const items: SelectItem[] = turns.map((turn) => ({
-    value: String(turn.turnId),
-    label: `${turn.eligible ? " " : "·"} ${turnLabel(turn)}`,
-    description: `${turn.timestamp}  ${turn.preview}${turn.ineligibleReason ? `  — ${turn.ineligibleReason}` : ""}`,
-  }));
   const visibleTurns = Math.min(turns.length, turnPickerVisibleCount());
+  const turnNumberWidth = String(turns.length).length;
+  const baseDate = turnBaseDate(turns);
+  const baseDateText = baseDate ? baseDate.toISOString().slice(0, 10) : "unknown date";
+  const sessionId = sessionIdFromLabel(sessionLabel);
 
   await ctx.ui.custom<string | null>((tui: any, theme: any, _keybindings: any, done: (value: string | null) => void) => {
-    const container = new Container();
     const accent = (text: string) => theme.fg("accent", text);
-    container.addChild(new DynamicBorder(accent));
-    container.addChild(new Text(accent(theme.bold("Session Turns")), 1, 0));
-    container.addChild(new Text(theme.fg("dim", sessionLabel), 1, 0));
-
-    let selectedIndex = initialTurnId ? Math.max(0, items.findIndex((item) => item.value === initialTurnId)) : 0;
-    const list = new SelectList(items, visibleTurns, {
-      selectedPrefix: accent,
-      selectedText: (text: string) => text.includes("(ineligible)") ? theme.fg("dim", text) : accent(text),
-      description: (text: string) => text.includes("would create empty") ? theme.fg("dim", text) : theme.fg("muted", text),
-      scrollInfo: (text: string) => theme.fg("dim", text),
-      noMatch: (text: string) => theme.fg("warning", text),
-    }, {
-      minPrimaryColumnWidth: 20,
-      maxPrimaryColumnWidth: 28,
-      truncatePrimary: ({ text, maxWidth, isSelected }: any) => {
-        const turnMatch = text.match(/^(Turn\s+\d+)/);
-        if (!turnMatch) return truncateToWidth(text, maxWidth, "…");
-        const emphasized = theme.bold(turnMatch[1]) + text.slice(turnMatch[1].length);
-        return isSelected ? truncateToWidth(emphasized, maxWidth, "…") : truncateToWidth(emphasized, maxWidth, "…");
-      },
-    });
-
-    list.setSelectedIndex(selectedIndex);
-    list.onSelectionChange = (item) => { selectedIndex = Math.max(0, items.findIndex((candidate) => candidate.value === item.value)); };
-    list.onSelect = (item) => done(item.value);
-    list.onCancel = () => done(null);
-    container.addChild(list);
-    container.addChild(new Text(theme.fg("dim", "↑↓ navigate • pgup/pgdn page • enter show turn details • esc close"), 1, 0));
-    container.addChild(new DynamicBorder(accent));
-
+    let selectedIndex = initialTurnId ? Math.max(0, turns.findIndex((turn) => String(turn.turnId) === initialTurnId)) : 0;
+    let scrollStart = Math.max(0, Math.min(selectedIndex, Math.max(0, turns.length - visibleTurns)));
+    const syncScroll = () => {
+      if (selectedIndex < scrollStart) scrollStart = selectedIndex;
+      if (selectedIndex >= scrollStart + visibleTurns) scrollStart = selectedIndex - visibleTurns + 1;
+      scrollStart = Math.max(0, Math.min(scrollStart, Math.max(0, turns.length - visibleTurns)));
+    };
+    const move = (delta: number) => {
+      selectedIndex = Math.max(0, Math.min(turns.length - 1, selectedIndex + delta));
+      syncScroll();
+    };
+    const renderRow = (turn: TurnInfo, index: number, width: number): string => {
+      const selected = index === selectedIndex;
+      const marker = selected ? "→" : " ";
+      const number = String(turn.turnId).padStart(turnNumberWidth, "0");
+      const status = turn.eligible ? " " : "!";
+      const time = formatTurnTime(turn, baseDate).padStart(10, " ");
+      const prefix = `${marker} ${number}${status} ${time}  `;
+      const promptWidth = Math.max(8, width - visibleWidth(prefix) - 2);
+      const prompt = truncateToWidth(turn.preview, promptWidth, "…");
+      const row = `${prefix}${prompt}`;
+      return selected ? accent(row) : status === "!" ? theme.fg("dim", row) : row;
+    };
     return {
-      render(width: number) { return container.render(width); },
-      invalidate() { container.invalidate(); },
+      render(width: number) {
+        syncScroll();
+        const border = new DynamicBorder(accent).render(width);
+        const title = accent(theme.bold("Session Turns"));
+        const meta = theme.fg("dim", `${sessionId} • ${baseDateText}`);
+        const spaces = " ".repeat(Math.max(1, width - visibleWidth(title) - visibleWidth(meta) - 2));
+        const header = theme.fg("dim", `  ${"#".padStart(turnNumberWidth)}  ${"when".padStart(10)}  prompt`);
+        const visible = turns.slice(scrollStart, scrollStart + visibleTurns);
+        const rows = visible.map((turn, offset) => renderRow(turn, scrollStart + offset, width));
+        while (rows.length < visibleTurns) rows.push("");
+        const scroll = turns.length > visibleTurns ? theme.fg("dim", `  (${selectedIndex + 1}/${turns.length})`) : "";
+        return [
+          ...border,
+          ` ${title}${spaces}${meta}`,
+          header,
+          ...rows,
+          scroll,
+          ` ${theme.fg("dim", "↑↓ navigate • pgup/pgdn page • enter show details • esc close")}`,
+          ...border,
+        ].filter((line) => line !== "");
+      },
+      invalidate() {},
       handleInput(data: string) {
-        if (isPageUpKey(data) || isPageDownKey(data)) {
-          selectedIndex = Math.max(0, Math.min(items.length - 1, selectedIndex + (isPageUpKey(data) ? -visibleTurns : visibleTurns)));
-          list.setSelectedIndex(selectedIndex);
-        } else list.handleInput(data);
+        if (isPageUpKey(data)) move(-visibleTurns);
+        else if (isPageDownKey(data)) move(visibleTurns);
+        else if (data === "\x1b[A" || data.toLowerCase() === "up") move(-1);
+        else if (data === "\x1b[B" || data.toLowerCase() === "down") move(1);
+        else if (data === "\r" || data === "\n" || data.toLowerCase() === "enter") return done(String(turns[selectedIndex]?.turnId ?? ""));
+        else if (data === "\x1b" || data.toLowerCase() === "escape") return done(null);
         tui.requestRender();
       },
     };
