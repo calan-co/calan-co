@@ -7,7 +7,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { DynamicBorder, SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth, wrapTextWithAnsi, type AutocompleteItem, type AutocompleteProvider, type AutocompleteSuggestions } from "@earendil-works/pi-tui";
+import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type AutocompleteItem, type AutocompleteProvider, type AutocompleteSuggestions } from "@earendil-works/pi-tui";
 
 const execFileAsync = promisify(execFile);
 
@@ -768,19 +768,35 @@ function turnOverlayBottomMargin(): number {
 }
 
 function isPageUpKey(data: string): boolean {
-  return data === "\x1b[5~" || data.toLowerCase() === "pageup" || data.toLowerCase() === "page up" || data.toLowerCase() === "pgup";
+  return matchesKey(data, "pageup") || data === "\x1b[5~" || data.toLowerCase() === "pageup" || data.toLowerCase() === "page up" || data.toLowerCase() === "pgup";
 }
 
 function isPageDownKey(data: string): boolean {
-  return data === "\x1b[6~" || data.toLowerCase() === "pagedown" || data.toLowerCase() === "page down" || data.toLowerCase() === "pgdn" || data.toLowerCase() === "pgdown";
+  return matchesKey(data, "pagedown") || data === "\x1b[6~" || data.toLowerCase() === "pagedown" || data.toLowerCase() === "page down" || data.toLowerCase() === "pgdn" || data.toLowerCase() === "pgdown";
 }
 
 function isLeftKey(data: string): boolean {
-  return data === "\x1b[D" || data.toLowerCase() === "left" || data.toLowerCase() === "arrowleft";
+  return matchesKey(data, Key.left) || data === "\x1b[D" || data.toLowerCase() === "left" || data.toLowerCase() === "arrowleft";
 }
 
 function isRightKey(data: string): boolean {
-  return data === "\x1b[C" || data.toLowerCase() === "right" || data.toLowerCase() === "arrowright";
+  return matchesKey(data, Key.right) || data === "\x1b[C" || data.toLowerCase() === "right" || data.toLowerCase() === "arrowright";
+}
+
+function isUpKey(data: string): boolean {
+  return matchesKey(data, Key.up) || data === "\x1b[A" || data.toLowerCase() === "up";
+}
+
+function isDownKey(data: string): boolean {
+  return matchesKey(data, Key.down) || data === "\x1b[B" || data.toLowerCase() === "down";
+}
+
+function isEnterKey(data: string): boolean {
+  return matchesKey(data, Key.enter) || data === "\r" || data === "\n" || data.toLowerCase() === "enter";
+}
+
+function isCancelKey(data: string): boolean {
+  return matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c")) || data === "\x1b" || data.toLowerCase() === "escape";
 }
 
 function sessionIdFromLabel(sessionLabel: string): string {
@@ -845,8 +861,6 @@ async function showTurnDetailOverlay(turns: TurnInfo[], initialTurn: TurnInfo, c
         `${label("entryId")} ${value(turn.entryId)}`,
         `${label("parentId")} ${value(turn.parentId ?? "null")}`,
         `${label("timestamp")} ${value(turn.timestamp)}`,
-        `${label("eligible split target")} ${value(turn.eligible ? "yes" : "no")}`,
-        ...(turn.ineligibleReason ? [`${label("reason")} ${value(turn.ineligibleReason)}`] : []),
         "",
         label("Prompt"),
       ];
@@ -881,9 +895,10 @@ async function showTurnDetailOverlay(turns: TurnInfo[], initialTurn: TurnInfo, c
         else if (isRightKey(data)) moveTurn(1);
         else if (isPageUpKey(data)) scroll -= visibleBodyLines;
         else if (isPageDownKey(data)) scroll += visibleBodyLines;
-        else if (data === "\x1b[A" || data.toLowerCase() === "up") scroll -= 1;
-        else if (data === "\x1b[B" || data.toLowerCase() === "down") scroll += 1;
-        else return done(String(currentTurn().turnId));
+        else if (isUpKey(data)) scroll -= 1;
+        else if (isDownKey(data)) scroll += 1;
+        else if (isCancelKey(data)) return done(String(currentTurn().turnId));
+        else return;
         tui.requestRender();
       },
     };
@@ -919,13 +934,12 @@ async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: an
       const selected = index === selectedIndex;
       const marker = selected ? "→" : " ";
       const number = String(turn.turnId).padStart(turnNumberWidth, "0");
-      const status = turn.eligible ? " " : "!";
       const time = formatTurnTime(turn, baseDate).padStart(10, " ");
-      const prefix = `${marker} ${number}${status} ${time}  `;
+      const prefix = `${marker} ${number} ${time}  `;
       const promptWidth = Math.max(8, width - visibleWidth(prefix) - 2);
       const prompt = truncateToWidth(turn.preview, promptWidth, "…");
       const row = `${prefix}${prompt}`;
-      return selected ? accent(row) : status === "!" ? theme.fg("dim", row) : row;
+      return selected ? accent(row) : row;
     };
     return {
       render(width: number) {
@@ -953,10 +967,10 @@ async function showTurnsOverlay(turns: TurnInfo[], sessionLabel: string, ctx: an
       handleInput(data: string) {
         if (isPageUpKey(data)) move(-visibleTurns);
         else if (isPageDownKey(data)) move(visibleTurns);
-        else if (data === "\x1b[A" || data.toLowerCase() === "up") move(-1);
-        else if (data === "\x1b[B" || data.toLowerCase() === "down") move(1);
-        else if (data === "\r" || data === "\n" || data.toLowerCase() === "enter") return done(String(turns[selectedIndex]?.turnId ?? ""));
-        else if (data === "\x1b" || data.toLowerCase() === "escape") return done(null);
+        else if (isUpKey(data)) move(-1);
+        else if (isDownKey(data)) move(1);
+        else if (isEnterKey(data)) return done(String(turns[selectedIndex]?.turnId ?? ""));
+        else if (isCancelKey(data)) return done(null);
         tui.requestRender();
       },
     };
