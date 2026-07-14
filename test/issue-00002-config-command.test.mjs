@@ -9,7 +9,7 @@ test('issue 00002 registers /work:config-raw and manages repo-local config', () 
     import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
     import { tmpdir } from 'node:os';
     import { join } from 'node:path';
-    import piSandcastle from './extensions/pi-sandcastle/index.ts';
+    import agentWorkflows from './extensions/agent-workflows/index.ts';
 
     const commands = new Map();
     const notifications = [];
@@ -21,10 +21,10 @@ test('issue 00002 registers /work:config-raw and manages repo-local config', () 
       registerTool() {},
     };
 
-    piSandcastle(api);
+    agentWorkflows(api);
     assert.ok(commands.has('work:config-raw'));
 
-    const cwd = mkdtempSync(join(tmpdir(), 'pi-sandcastle-config-'));
+    const cwd = mkdtempSync(join(tmpdir(), 'agent-workflows-config-'));
     const configDir = join(cwd, '.pi', 'sandcastle');
     const configPath = join(configDir, 'config.yaml');
     const runnerPath = join(configDir, 'run-job.mjs');

@@ -6,8 +6,8 @@
   "type": "module",
   "scripts": {
     "test": "node --import tsx --test test/*.test.mjs test/*.test.cjs",
-    "coverage": "node --experimental-test-coverage --test-coverage-include='extensions/pi-sandcastle/*.mjs' --test-coverage-include='extensions/pi-sandcastle/*.ts' --test-coverage-exclude='extensions/pi-sandcastle/index.ts' --test-coverage-lines=89 --test-coverage-branches=60 --import tsx --test test/*.test.mjs",
-    "check": "node --check extensions/pi-sandcastle/work-source.mjs && node --check extensions/pi-sandcastle/run-management.mjs"
+    "coverage": "node --experimental-test-coverage --test-coverage-include='extensions/agent-workflows/*.mjs' --test-coverage-include='extensions/agent-workflows/*.ts' --test-coverage-exclude='extensions/agent-workflows/index.ts' --test-coverage-lines=89 --test-coverage-branches=60 --import tsx --test test/*.test.mjs",
+    "check": "node --check extensions/agent-workflows/work-source.mjs && node --check extensions/agent-workflows/run-management.mjs"
   },
   "devEngines": {
     "packageManager": {
@@ -35,7 +35,7 @@
       "extensions/handoff/index.ts",
       "extensions/pi-autoname/index.ts",
       "extensions/pi-rewind/index.ts",
-      "extensions/pi-sandcastle/index.ts",
+      "extensions/agent-workflows/index.ts",
       "extensions/session-move/index.ts"
     ]
   }

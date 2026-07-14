@@ -32,7 +32,7 @@ The command surface should organize init-style hydration, full config display, t
 
 ## Tasks
 
-- [x] Register /work:config-raw in extensions/pi-sandcastle/index.ts and route show/init/get/set/edit/editor/reset/validate subcommands through one handler.
+- [x] Register /work:config-raw in extensions/agent-workflows/index.ts and route show/init/get/set/edit/editor/reset/validate subcommands through one handler.
 - [x] Create a config capability that reads and writes .pi/sandcastle/agents.yaml through injected filesystem/path dependencies.
 - [x] Implement init idempotency so missing scaffold files are created while existing user edits are preserved unless reset/force is explicit.
 - [x] Implement show/get/set/reset for supported scalar config paths with clear missing-path and unsupported-path errors.

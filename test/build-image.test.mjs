@@ -3,10 +3,10 @@ import test from 'node:test';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { buildSandcastleImage, resolveBuildSandcastleImageCommand } from '../extensions/pi-sandcastle/build-image.ts';
+import { buildSandcastleImage, resolveBuildSandcastleImageCommand } from '../extensions/agent-workflows/build-image.ts';
 
 function repo() {
-  const cwd = mkdtempSync(join(tmpdir(), 'pi-sandcastle-build-image-'));
+  const cwd = mkdtempSync(join(tmpdir(), 'agent-workflows-build-image-'));
   mkdirSync(join(cwd, '.sandcastle'), { recursive: true });
   return cwd;
 }
@@ -52,6 +52,6 @@ test('buildSandcastleImage executes provider directly without sandcastle CLI', a
 });
 
 test('buildSandcastleImage requires .sandcastle scaffold', async () => {
-  const cwd = mkdtempSync(join(tmpdir(), 'pi-sandcastle-build-image-missing-'));
+  const cwd = mkdtempSync(join(tmpdir(), 'agent-workflows-build-image-missing-'));
   await assert.rejects(() => buildSandcastleImage({ cwd, provider: 'docker', imageName: 'sandcastle:test', execFile: async () => ({ stdout: '', stderr: '' }) }), /\.sandcastle/);
 });

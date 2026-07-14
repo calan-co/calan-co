@@ -10,10 +10,10 @@ import {
   createMemoryRunStore,
   createRunManagementService,
   registerRunManagementCommands,
-} from '../extensions/pi-sandcastle/run-management.mjs';
+} from '../extensions/agent-workflows/run-management.mjs';
 
 function makeTempRepo() {
-  return mkdtempSync(join(tmpdir(), 'pi-sandcastle-runs-'));
+  return mkdtempSync(join(tmpdir(), 'agent-workflows-runs-'));
 }
 
 function fakePi() {
@@ -40,7 +40,7 @@ test('registerRunManagementCommands registers the /work:* run management surface
   ]);
 });
 
-test('piSandcastle registers only the updated /work:* and /work:* slash-command surface on reload', () => {
+test('agentWorkflows registers only the updated /work:* and /work:* slash-command surface on reload', () => {
   const repoRoot = fileURLToPath(new URL('..', import.meta.url));
   const output = execFileSync(
     process.execPath,
@@ -50,14 +50,14 @@ test('piSandcastle registers only the updated /work:* and /work:* slash-command 
       '--input-type=module',
       '-e',
       `
-        import piSandcastle from './extensions/pi-sandcastle/index.ts';
+        import agentWorkflows from './extensions/agent-workflows/index.ts';
         const commands = [];
         const pi = {
           on() {},
           registerCommand(name) { commands.push(name); },
           registerTool() {},
         };
-        piSandcastle(pi);
+        agentWorkflows(pi);
         console.log(JSON.stringify(commands.sort()));
       `,
     ],

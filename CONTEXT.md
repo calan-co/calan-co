@@ -14,7 +14,7 @@ _Avoid_: Role, agent
 
 **Agent Workflows**:
 The portable orchestration model and renamed component that defines roles, prompts, pipelines, policies, issue trackers, providers, and adapters for agent-driven work. Agent Workflows may be hosted by Pi and may use Sandcastle as an execution adapter, but neither Pi nor Sandcastle defines the core model.
-_Avoid_: Pi-Sandcastle runtime, Sandcastle config, template pack
+_Avoid_: Agent Workflows runtime, Sandcastle config, template pack
 
 **Orchestrator**:
 The deterministic Agent Workflows module that owns workflow control: planning gates, pipeline selection policy, branch naming, fan-out/fan-in, durable Run Records, resume/cancel, and execution-context lifecycle. The Orchestrator invokes Roles for bounded reasoning or execution; it is not itself a configurable Role.

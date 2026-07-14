@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { renderWorkBrief } from '../extensions/pi-sandcastle/work-brief.mjs';
+import { renderWorkBrief } from '../extensions/agent-workflows/work-brief.mjs';
 
 test('renderWorkBrief deterministically renders normalized Work Item detail with preserved source', () => {
   const brief = renderWorkBrief({

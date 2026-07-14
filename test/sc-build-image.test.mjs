@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import piSandcastle from '../extensions/pi-sandcastle/index.ts';
+import agentWorkflows from '../extensions/agent-workflows/index.ts';
 
 function makeRepo(name = 'doc-vader', defaultSandbox = 'docker', options = {}) {
   const cwd = mkdtempSync(join(tmpdir(), `${name}-`));
@@ -34,7 +34,7 @@ test('/work:build-image initializes a missing Sandcastle scaffold before buildin
   const pi = fakePi();
   const notifications = [];
   const calls = [];
-  piSandcastle(pi, {
+  agentWorkflows(pi, {
     image: {
       async buildImage(repo, provider, imageName) {
         calls.push({ repo, provider, imageName });
@@ -70,7 +70,7 @@ test('/work:build-image builds the default repo image through injectable image c
   const pi = fakePi();
   const calls = [];
   const notifications = [];
-  piSandcastle(pi, {
+  agentWorkflows(pi, {
     image: {
       async buildImage(repo, provider, imageName) {
         calls.push({ repo, provider, imageName });
@@ -91,7 +91,7 @@ test('/work:build-image defaults to configured defaultSandbox when provider is o
   const cwd = makeRepo('doc-vader', 'podman');
   const pi = fakePi();
   const calls = [];
-  piSandcastle(pi, {
+  agentWorkflows(pi, {
     image: {
       async buildImage(repo, provider, imageName) {
         calls.push({ repo, provider, imageName });
@@ -112,7 +112,7 @@ test('/work:run auto-builds a missing docker image before starting Sandcastle', 
   const pi = fakePi();
   const calls = [];
   const notifications = [];
-  piSandcastle(pi, {
+  agentWorkflows(pi, {
     randomId: () => 'run-1',
     now: () => 100,
     image: {
@@ -149,7 +149,7 @@ test('/work:config-raw set does not initialize or build the sandbox image', asyn
   const pi = fakePi();
   const calls = [];
   const notifications = [];
-  piSandcastle(pi, {
+  agentWorkflows(pi, {
     image: {
       async buildImage(repo, provider, imageName) {
         calls.push({ repo, provider, imageName });

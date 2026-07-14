@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import piSandcastle from '../extensions/pi-sandcastle/index.ts';
+import agentWorkflows from '../extensions/agent-workflows/index.ts';
 
 function fakePi() {
   const commands = new Map();
@@ -16,14 +16,14 @@ function fakePi() {
 }
 
 function makeRepo() {
-  const cwd = mkdtempSync(join(tmpdir(), 'pi-sandcastle-plan-'));
+  const cwd = mkdtempSync(join(tmpdir(), 'agent-workflows-plan-'));
   mkdirSync(join(cwd, '.pi', 'sandcastle'), { recursive: true });
   return cwd;
 }
 
 test('Agent Workflows registers /work planning commands without legacy /backlog aliases', async () => {
   const pi = fakePi();
-  piSandcastle(pi, {});
+  agentWorkflows(pi, {});
 
   for (const name of ['work:ready', 'work:plan', 'work:next', 'work:process']) {
     assert.equal(pi.commands.has(name), true, `${name} should be registered`);
@@ -38,7 +38,7 @@ test('/work:plan runs planning phase and caches authoritative plan output', asyn
   const pi = fakePi();
   const calls = [];
   const notifications = [];
-  piSandcastle(pi, {
+  agentWorkflows(pi, {
     work: {
       now: () => 123456,
       async planPhase(repo, args) {
@@ -68,7 +68,7 @@ test('/work:plan fails closed and caches invalid planner output for inspection',
   const cwd = makeRepo();
   const pi = fakePi();
   const notifications = [];
-  piSandcastle(pi, {
+  agentWorkflows(pi, {
     work: {
       now: () => 123456,
       async planPhase() {
@@ -106,7 +106,7 @@ test('/work:process --plan refuses cached invalid planner output', async () => {
     validationErrors: ['Plan group 1 item 1 is missing a canonical item id.'],
     rawOutput: { iterations: [{ items: [{ title: 'Missing id' }] }] },
   }, null, 2)));
-  piSandcastle(pi, {
+  agentWorkflows(pi, {
     work: {
       async execute(repo, input) {
         calls.push({ repo, input });
@@ -137,7 +137,7 @@ test('/work:process --plan uses a cached authoritative plan', async () => {
     kind: 'work-plan',
     plan: { iterations: [{ pipeline: 'simple-loop', items: [{ id: 'wi-001', title: 'One', sourcePath: 'backlog/001.md' }] }] },
   }, null, 2)));
-  piSandcastle(pi, {
+  agentWorkflows(pi, {
     work: {
       now: () => 123456,
       async execute(repo, input) {
@@ -163,7 +163,7 @@ test('/work:ready delegates readiness to Doc-Vader capability', async () => {
   const pi = fakePi();
   const calls = [];
   const notifications = [];
-  piSandcastle(pi, {
+  agentWorkflows(pi, {
     work: {
       async ready(repo, args) {
         calls.push({ repo, args });

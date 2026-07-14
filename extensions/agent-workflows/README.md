@@ -32,7 +32,7 @@ Then reload Pi from this repo with `/reload`.
 
 ## Runtime packs
 
-The current default runtime pack remains at `extensions/pi-sandcastle/runtime-packs/sandcastle-templates.json` during the rename-and-seam slice. It ports Sandcastle template concepts into explicit Agent Workflows runtime data:
+The current default runtime pack remains at `extensions/agent-workflows/runtime-packs/sandcastle-templates.json` during the rename-and-seam slice. It ports Sandcastle template concepts into explicit Agent Workflows runtime data:
 
 - prompts
 - roles
@@ -43,7 +43,7 @@ The current default runtime pack remains at `extensions/pi-sandcastle/runtime-pa
 - policies
 - adapter metadata
 
-The schema is `extensions/pi-sandcastle/schema/execution-runtime.schema.json`.
+The schema is `extensions/agent-workflows/schema/execution-runtime.schema.json`.
 
 ## LLM tool
 

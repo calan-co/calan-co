@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import piSandcastle from '../extensions/pi-sandcastle/index.ts';
+import agentWorkflows from '../extensions/agent-workflows/index.ts';
 
 function makeFakeExtensionAPI() {
   const commands = new Map();
@@ -19,7 +19,7 @@ function makeFakeExtensionAPI() {
 }
 
 test('issue 00003 registers /work:run and uses the injected Sandcastle capability', async () => {
-  const repoDir = await mkdtemp(join(tmpdir(), 'pi-sandcastle-sc-run-'));
+  const repoDir = await mkdtemp(join(tmpdir(), 'agent-workflows-sc-run-'));
   try {
     const configDir = join(repoDir, '.pi', 'sandcastle');
     await mkdir(configDir, { recursive: true });
@@ -74,7 +74,7 @@ test('issue 00003 registers /work:run and uses the injected Sandcastle capabilit
     };
     const fakePi = makeFakeExtensionAPI();
 
-    piSandcastle(fakePi, {
+    agentWorkflows(fakePi, {
       sandcastle,
       now: () => 1700000000000,
       randomId: () => 'run-123',

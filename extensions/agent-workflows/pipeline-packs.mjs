@@ -85,7 +85,7 @@ export function buildDefaultConfigText(defaults = {}) {
   const cfg = packsToConfig(undefined, defaults);
   return [
     '# Agent Workflows config.',
-    '# Runtime inventory is compiled from extensions/pi-sandcastle/runtime-packs/sandcastle-templates.json.',
+    '# Runtime inventory is compiled from extensions/agent-workflows/runtime-packs/sandcastle-templates.json.',
     '',
     'runtimeVersion: 1',
     `defaultSandbox: ${yamlScalar(cfg.defaultSandbox)}`,

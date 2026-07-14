@@ -16,10 +16,10 @@ import {
   selectBacklogRunForStatus,
   backlogRunRecordPath,
   writeBacklogRunRecord,
-} from '../extensions/pi-sandcastle/work-runs.mjs';
+} from '../extensions/agent-workflows/work-runs.mjs';
 
 async function withTempDir(fn) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-sandcastle-backlog-'));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-backlog-'));
   try {
     await fn(root);
   } finally {
@@ -230,7 +230,7 @@ test('returns clear errors for missing and non-resumable backlog runs without mu
 });
 
 test('registers the backlog run-management commands in the extension source', async () => {
-  const extensionText = await fs.readFile(new URL('../extensions/pi-sandcastle/index.ts', import.meta.url), 'utf8');
+  const extensionText = await fs.readFile(new URL('../extensions/agent-workflows/index.ts', import.meta.url), 'utf8');
 
   assert.match(extensionText, /registerCommand\("work:runs"/);
   assert.match(extensionText, /registerCommand\("work:status"/);

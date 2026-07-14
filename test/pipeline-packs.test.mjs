@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { loadExecutionRuntimePack } from '../extensions/pi-sandcastle/execution-runtime.ts';
-import { loadPipelinePacks, packsToConfig, buildDefaultConfigText, configToYaml } from '../extensions/pi-sandcastle/pipeline-packs.mjs';
+import { loadExecutionRuntimePack } from '../extensions/agent-workflows/execution-runtime.ts';
+import { loadPipelinePacks, packsToConfig, buildDefaultConfigText, configToYaml } from '../extensions/agent-workflows/pipeline-packs.mjs';
 
-test('pipeline packs are discovered from the Pi-Sandcastle execution runtime pack', () => {
+test('pipeline packs are discovered from the Agent Workflows execution runtime pack', () => {
   const packs = loadPipelinePacks();
   const names = packs.map((pack) => pack.name).sort();
   assert.deepEqual(names, ['archive', 'blank', 'parallel-planner', 'parallel-planner-with-review', 'sequential-reviewer', 'simple-loop']);
@@ -12,7 +12,7 @@ test('pipeline packs are discovered from the Pi-Sandcastle execution runtime pac
   assert.equal(runtime.pipelines['parallel-planner'].steps[0].role, 'planner');
 });
 
-test('pipeline packs map into pi-sandcastle agent and pipeline inventory', () => {
+test('pipeline packs map into agent-workflows agent and pipeline inventory', () => {
   const cfg = packsToConfig(loadPipelinePacks());
   assert.ok(cfg.agents.planner);
   assert.ok(cfg.agents.worker);

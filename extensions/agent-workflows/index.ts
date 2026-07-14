@@ -1,5 +1,5 @@
-// Pi Sandcastle extension: Pi-native delegation UI backed by Sandcastle sandboxes.
-// Commands: /work:* command surfaces backed by a Pi-Sandcastle execution runtime adapter.
+// Agent Workflows extension: Pi-native delegation UI backed by Sandcastle sandboxes.
+// Commands: /work:* command surfaces backed by an Agent Workflows execution runtime adapter.
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { SelectList as PiSelectList, matchesKey } from "@earendil-works/pi-tui";
@@ -245,7 +245,7 @@ const PIPELINE_RUN_KIND = "pipeline";
 const BACKLOG_PROCESS_RUN_KIND = "work-process";
 const EDITOR_PREF_PATH = `${CONFIG_DIR}/editor`;
 const SCAFFOLD_STATE_PATH = `${CONFIG_DIR}/scaffold-state.json`;
-const CONFIG_SCHEMA_PATH = new URL("./schema/sandcastle-config.schema.json", import.meta.url);
+const CONFIG_SCHEMA_PATH = new URL("./schema/config.schema.json", import.meta.url);
 const inFlightImageBuilds = new Map<string, Promise<void>>();
 
 
@@ -259,7 +259,7 @@ if (!jobPath) throw new Error("Usage: node run-job.mjs <job.json>");
 const job = JSON.parse(readFileSync(jobPath, "utf8"));
 
 function emit(event) {
-  console.log(JSON.stringify({ source: "pi-sandcastle", ...event }));
+  console.log(JSON.stringify({ source: "agent-workflows", ...event }));
 }
 
 const userNodeModules = process.env.PI_AGENT_NODE_MODULES || join(process.env.HOME || "", ".pi", "agent", "npm", "node_modules");
@@ -326,7 +326,7 @@ try {
 }
 `;
 
-const LEGACY_SAMPLE_CONFIG = `# Pi Sandcastle delegation config.
+const LEGACY_SAMPLE_CONFIG = `# Agent Workflows delegation config.
 # Mirrors the out-of-the-box @ai-hero/sandcastle templates.
 # Install runtime once with: npm install --save-dev @ai-hero/sandcastle
 # Optional first-time Sandcastle setup: npx @ai-hero/sandcastle init
@@ -2903,7 +2903,7 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 			subtitle: "Operational commands around config editing",
 			items: [
 				{ value: "action:validate", label: "Validate Config", description: "Check for missing roles, invalid providers, and pipeline errors" },
-				{ value: "action:init", label: "Reset to System Defaults", description: "Restore the default Pi-Sandcastle configuration" },
+				{ value: "action:init", label: "Reset to System Defaults", description: "Restore the default Agent Workflows configuration" },
 				{ value: "nav:packs", label: "Import Bundled Template", description: "Replace this draft with a built-in template" },
 				{ value: "text:import-config-file", label: "Import Config File", description: "Enter a path to a custom .pi/sandcastle/config.yaml-compatible file" },
 				{ value: "action:edit", label: `Edit Config in ${getPreferredEditor(ctx.cwd)}`, description: "Open the current unsaved draft in your preferred editor" },
@@ -3008,7 +3008,7 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 		};
 
 		const openDraftInEditor = () => {
-			const tmpRoot = mkdtempSync(join(tmpdir(), "pi-sandcastle-config-"));
+			const tmpRoot = mkdtempSync(join(tmpdir(), "agent-workflows-config-"));
 			const draftPath = join(tmpRoot, "config.yaml");
 			writeFileSync(draftPath, configToYaml(cfg));
 			tui.stop?.();
@@ -3055,7 +3055,7 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 			if (value.startsWith("add-pipeline-step:")) { const pipeline = value.slice("add-pipeline-step:".length); model.addPipelineStep(pipeline); return queueAction({ type: "add-pipeline-step", pipeline }); }
 			if (value.startsWith("delete-pipeline-step:")) { const [, pipeline, indexText] = value.split(":"); const index = Number(indexText); model.deletePipelineStep(pipeline, index); route = ["main", "pipelines", `pipeline:${pipeline}`]; return queueAction({ type: "delete-pipeline-step", pipeline, index }); }
 			if (value.startsWith("pack:")) { pendingPack = value.slice(5); return replace("confirm-pack"); }
-			if (value.startsWith("editor:")) { setPreferredEditor(ctx.cwd, value.slice(7)); route = ["main", "actions"]; selected = 0; ctx.ui.notify(`Preferred Pi-Sandcastle config editor set to: ${value.slice(7)}`, "success"); return tui.requestRender(); }
+			if (value.startsWith("editor:")) { setPreferredEditor(ctx.cwd, value.slice(7)); route = ["main", "actions"]; selected = 0; ctx.ui.notify(`Preferred Agent Workflows config editor set to: ${value.slice(7)}`, "success"); return tui.requestRender(); }
 			if (value === "action:init") { replaceDraftConfig(DEFAULT_CONFIG); return; }
 			if (value === "action:edit") return openDraftInEditor();
 			if (value === "action:validate") return done({ type: "validate" });
@@ -3198,7 +3198,7 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 	}, { overlay: true, overlayOptions: { width: "80%", maxHeight: "80%", minWidth: 60, anchor: "center", margin: 1 } });
 }
 
-export default function piSandcastle(
+export default function agentWorkflows(
 	pi: ExtensionAPI,
 	deps: PiSandcastleDependencies = {},
 ) {
@@ -3225,7 +3225,7 @@ export default function piSandcastle(
 	};
 
 	function refreshWidget() {
-		widgetCtx?.ui.setWidget("pi-sandcastle", renderWidget(runs));
+		widgetCtx?.ui.setWidget("agent-workflows", renderWidget(runs));
 	}
 
 	function helpText(): string {
@@ -3586,7 +3586,7 @@ Work views and processing:
 			await loadConfig(ctx.cwd);
 			refreshWidget();
 		} catch (error) {
-			ctx.ui.notify(`pi-sandcastle config error: ${error instanceof Error ? error.message : String(error)}`, "error");
+			ctx.ui.notify(`agent-workflows config error: ${error instanceof Error ? error.message : String(error)}`, "error");
 		}
 	});
 
@@ -3596,7 +3596,7 @@ Work views and processing:
 			const agentLines = Object.entries(cfg.agents).map(([name, agent]) => `- ${name}: ${agent?.description || "configured delegation agent"}`).join("\n");
 			if (!agentLines) return;
 			return {
-				systemPrompt: `${event.systemPrompt}\n\n## Pi Sandcastle delegation mode\nAvailable agents:\n${agentLines}\n\nPrefer delegate_agent for delegable research, implementation, review, and AFK work. Dispatch prompts must be self-contained and include expected output/artifacts. Use /work:list and /work:inspect to inspect work, /work:run to start agent work, and /work:runs to inspect progress.`,
+				systemPrompt: `${event.systemPrompt}\n\n## Agent Workflows delegation mode\nAvailable agents:\n${agentLines}\n\nPrefer delegate_agent for delegable research, implementation, review, and AFK work. Dispatch prompts must be self-contained and include expected output/artifacts. Use /work:list and /work:inspect to inspect work, /work:run to start agent work, and /work:runs to inspect progress.`,
 			};
 		} catch {
 			return;
@@ -3649,7 +3649,7 @@ Work views and processing:
 				if (action.type === "batch" && action.config) {
 					ensureScaffold(ctx.cwd, { hydrate: true });
 					writeFileSync(join(ctx.cwd, CONFIG_PATH), configToYaml(action.config));
-					ctx.ui.notify(`Saved ${action.actions.length} Pi-Sandcastle config change(s).${action.rebuildImage ? " Starting sandbox image rebuild." : " Rebuild the sandbox image separately when needed."}`, "success");
+					ctx.ui.notify(`Saved ${action.actions.length} Agent Workflows config change(s).${action.rebuildImage ? " Starting sandbox image rebuild." : " Rebuild the sandbox image separately when needed."}`, "success");
 					if (action.rebuildImage) startConfigImageRebuild(ctx, action.config);
 					return;
 				}
@@ -3657,7 +3657,7 @@ Work views and processing:
 				for (const action of actions) {
 					if (action.type === "init") {
 						const result = ensureScaffold(ctx.cwd, { overwrite: true, hydrate: false });
-						ctx.ui.notify(`Reset Pi-Sandcastle config: ${result.changes.length ? result.changes.join("; ") : "no changes needed"}. Rebuild the sandbox image separately when needed.`, "success");
+						ctx.ui.notify(`Reset Agent Workflows config: ${result.changes.length ? result.changes.join("; ") : "no changes needed"}. Rebuild the sandbox image separately when needed.`, "success");
 					}
 					if (action.type === "apply-pack") {
 						ensureScaffold(ctx.cwd, { hydrate: false });
@@ -3666,7 +3666,7 @@ Work views and processing:
 					}
 					if (action.type === "set-editor") {
 						setPreferredEditor(ctx.cwd, action.editor);
-						ctx.ui.notify(`Preferred Pi-Sandcastle config editor set to: ${action.editor}`, "success");
+						ctx.ui.notify(`Preferred Agent Workflows config editor set to: ${action.editor}`, "success");
 					}
 					if (action.type === "set-config") {
 						if (!supportedConfigPath(action.path)) throw new Error(`Unsupported config path '${action.path}'.`);
@@ -3701,7 +3701,7 @@ Work views and processing:
 					if (action.type === "validate") {
 						const cfg = await loadExistingConfig(ctx.cwd);
 						const issues = validateConfig(ctx.cwd, cfg);
-						ctx.ui.notify(issues.length ? `Pi-Sandcastle config validation failed:\n- ${issues.join("\n- ")}` : "Pi-Sandcastle config validation passed.", issues.length ? "error" : "success");
+						ctx.ui.notify(issues.length ? `Agent Workflows config validation failed:\n- ${issues.join("\n- ")}` : "Agent Workflows config validation passed.", issues.length ? "error" : "success");
 					}
 					if (action.type === "build-image") {
 						const cfg = await loadConfig(ctx.cwd).catch(() => ({ defaultSandbox: DEFAULT_SANDBOX, prompts: {}, agents: {}, chains: {}, pipelines: {} }) as SandcastleConfig);
@@ -3719,7 +3719,7 @@ Work views and processing:
 					}
 				}
 				if (actions.length > 1) {
-					ctx.ui.notify(`Saved ${actions.length} Pi-Sandcastle config change(s). Rebuild the sandbox image separately when needed.`, "success");
+					ctx.ui.notify(`Saved ${actions.length} Agent Workflows config change(s). Rebuild the sandbox image separately when needed.`, "success");
 				}
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -3750,7 +3750,7 @@ Work views and processing:
 						const result = ensureScaffold(ctx.cwd, { overwrite, hydrate: false });
 						const changeSummary = result.changes.length ? result.changes.join("; ") : "no changes needed";
 						const overwriteSummary = result.overwritten.length ? ` Overwrote: ${result.overwritten.join(", ")}.` : "";
-						ctx.ui.notify(`Pi-Sandcastle config init complete: ${changeSummary}.${overwriteSummary} Rebuild the sandbox image separately when needed.`, "success");
+						ctx.ui.notify(`Agent Workflows config init complete: ${changeSummary}.${overwriteSummary} Rebuild the sandbox image separately when needed.`, "success");
 						break;
 					}
 					case "edit": {

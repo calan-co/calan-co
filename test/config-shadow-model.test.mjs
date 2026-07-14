@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ConfigShadowModel } from '../extensions/pi-sandcastle/config-shadow-model.ts';
+import { ConfigShadowModel } from '../extensions/agent-workflows/config-shadow-model.ts';
 
 const baseConfig = () => ({
   defaultSandbox: 'docker',

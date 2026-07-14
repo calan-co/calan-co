@@ -7,7 +7,7 @@ import os from 'node:os';
 import test from 'node:test';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
-const extensionPath = fileURLToPath(new URL('../extensions/pi-sandcastle/index.ts', import.meta.url));
+const extensionPath = fileURLToPath(new URL('../extensions/agent-workflows/index.ts', import.meta.url));
 const backlogProcessItem = {
   id: '00008',
   title: 'Backlog Process with Deterministic Pipeline Parsing',
@@ -69,7 +69,7 @@ function runBacklogProcessFixture() {
   const script = `
 import fs from 'node:fs';
 import { join } from 'node:path';
-import piSandcastle, { parseBacklogProcessArgs } from ${JSON.stringify(extensionPath)};
+import agentWorkflows, { parseBacklogProcessArgs } from ${JSON.stringify(extensionPath)};
 
 const cwd = ${JSON.stringify(cwd)};
 const planIterations = ${JSON.stringify(backlogPlanIterations, null, 2)};
@@ -85,7 +85,7 @@ const api = {
   registerTool() {},
 };
 
-piSandcastle(api, {
+agentWorkflows(api, {
   work: {
     now: () => 1710000000000 + calls.length,
     plan: async (_cwd, query) => {

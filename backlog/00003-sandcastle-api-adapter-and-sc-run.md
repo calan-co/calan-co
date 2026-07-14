@@ -35,7 +35,7 @@ The extension should stop shelling out to a Sandcastle CLI and instead resolve c
 ## Tasks
 
 - [x] Add a SandcastleRunCapability boundary that exposes run/createSandbox operations and is supplied to command handlers at composition time.
-- [x] Register /work:run in extensions/pi-sandcastle/index.ts and parse optional agent plus free-form prompt text deterministically.
+- [x] Register /work:run in extensions/agent-workflows/index.ts and parse optional agent plus free-form prompt text deterministically.
 - [x] Resolve agent defaults, model, sandbox provider, branch strategy, environment, logging path, and prompt into Sandcastle run(...) options.
 - [x] Write durable run records under .pi/sandcastle/runs with started/running/completed/failed states, timestamps, branch, commits, and log path.
 - [x] Return a user-visible run summary containing run id, final status, branch, commits, and log path.

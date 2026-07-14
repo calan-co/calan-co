@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import piSandcastle, { parseSimpleYaml } from '../extensions/pi-sandcastle/index.ts';
+import agentWorkflows, { parseSimpleYaml } from '../extensions/agent-workflows/index.ts';
 
 function createFakePi() {
   const commands = new Map();
@@ -71,7 +71,7 @@ function createTempRepoConfig() {
 }
 
 async function createRepo() {
-  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-sandcastle-'));
+  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-'));
   await fs.mkdir(path.join(repoRoot, '.pi/sandcastle'), { recursive: true });
   await fs.writeFile(path.join(repoRoot, '.pi/sandcastle/config.yaml'), createTempRepoConfig(), 'utf8');
   return repoRoot;
@@ -126,7 +126,7 @@ test('parseSimpleYaml preserves unsupported pipeline step keys for validation', 
 });
 
 test('/work:config-raw validate rejects agent terminology where role is required', async () => {
-  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-sandcastle-agent-term-'));
+  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-agent-term-'));
   await fs.mkdir(path.join(repoRoot, '.pi/sandcastle'), { recursive: true });
   await fs.writeFile(path.join(repoRoot, '.pi/sandcastle', 'run-job.mjs'), '', 'utf8');
   await fs.writeFile(path.join(repoRoot, '.pi/sandcastle', 'config.yaml'), [
@@ -146,7 +146,7 @@ test('/work:config-raw validate rejects agent terminology where role is required
   ].join('\n'), 'utf8');
 
   const pi = createFakePi();
-  piSandcastle(pi);
+  agentWorkflows(pi);
   const notifications = [];
   await pi.commands.get('work:config-raw')('validate', {
     cwd: repoRoot,
@@ -164,7 +164,7 @@ test('/work:pipeline registers and parses prompt text deterministically', async 
   const calls = [];
   const notifications = [];
 
-  piSandcastle(fakePi, {
+  agentWorkflows(fakePi, {
     pipeline: {
       now: () => 1700000000000,
       createWorktree: async () => ({
@@ -231,7 +231,7 @@ test('/work:pipeline rejects unknown pipelines with available options', async ()
   const notifications = [];
   let createWorktreeCalls = 0;
 
-  piSandcastle(fakePi, {
+  agentWorkflows(fakePi, {
     pipeline: {
       createWorktree: async () => {
         createWorktreeCalls += 1;
@@ -263,7 +263,7 @@ test('/work:pipeline records failed steps and stops after the first error', asyn
   const notifications = [];
   let runCalls = 0;
 
-  piSandcastle(fakePi, {
+  agentWorkflows(fakePi, {
     pipeline: {
       now: () => 1700000001000,
       createWorktree: async () => ({

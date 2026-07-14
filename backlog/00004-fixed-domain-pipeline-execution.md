@@ -35,7 +35,7 @@ Pipelines are extension-level orchestration over Sandcastle primitives. They sho
 
 ## Tasks
 
-- [x] Register /work:pipeline in extensions/pi-sandcastle/index.ts and parse <pipeline> plus optional prompt text.
+- [x] Register /work:pipeline in extensions/agent-workflows/index.ts and parse <pipeline> plus optional prompt text.
 - [x] Extend config loading to expose fixed pipeline definitions with ordered agent steps, branch strategy, and sandbox options.
 - [x] Use injected Sandcastle createWorktree/worktree.run capability to create or reuse the configured branch/worktree.
 - [x] Execute each configured pipeline step in order, passing role-specific prompts and preserving per-step logs.

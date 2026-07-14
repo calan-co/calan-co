@@ -8,11 +8,11 @@ test('backlog config TUI no longer exposes team editing; pack-derived roles rema
     import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
     import { tmpdir } from 'node:os';
     import { join } from 'node:path';
-    import piSandcastle from './extensions/pi-sandcastle/index.ts';
+    import agentWorkflows from './extensions/agent-workflows/index.ts';
 
     const commands = new Map();
-    piSandcastle({ on() {}, registerCommand(name, spec) { commands.set(name, spec); }, registerTool() {} });
-    const cwd = mkdtempSync(join(tmpdir(), 'pi-sandcastle-no-teams-'));
+    agentWorkflows({ on() {}, registerCommand(name, spec) { commands.set(name, spec); }, registerTool() {} });
+    const cwd = mkdtempSync(join(tmpdir(), 'agent-workflows-no-teams-'));
     const configDir = join(cwd, '.pi', 'sandcastle');
     mkdirSync(configDir, { recursive: true });
     writeFileSync(join(configDir, 'config.yaml'), [

@@ -7,8 +7,8 @@ import {
   loadExecutionRuntimePack,
   runtimeToSandcastleConfig,
   validateExecutionRuntimePack,
-} from '../extensions/pi-sandcastle/execution-runtime.ts';
-import { configToYaml, packsToConfig } from '../extensions/pi-sandcastle/pipeline-packs.mjs';
+} from '../extensions/agent-workflows/execution-runtime.ts';
+import { configToYaml, packsToConfig } from '../extensions/agent-workflows/pipeline-packs.mjs';
 
 test('execution runtime pack ports prompts, roles, and pipelines', () => {
   const pack = loadExecutionRuntimePack();
