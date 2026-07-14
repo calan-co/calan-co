@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -41,9 +41,9 @@ test('/work:plan runs planning phase and caches authoritative plan output', asyn
   agentWorkflows(pi, {
     work: {
       now: () => 123456,
-      async planPhase(repo, args) {
-        calls.push({ repo, args });
-        return { summary: 'Planner chose implementation first.', iterations: [{ items: [{ id: 'wi-001' }], pipeline: 'simple-loop' }] };
+      async runPlanWorkRole({ cwd: repo, args, role, snapshotCwd }) {
+        calls.push({ repo, args, role, snapshotHasMarker: existsSync(join(snapshotCwd, '.agent-workflows-planner-snapshot')) });
+        return { summary: 'Planner classified implementation first.', iterations: [{ items: [{ id: 'wi-001' }], classifications: { risk: 'low' }, rationale: 'Ready to execute.' }] };
       },
     },
   });
@@ -53,15 +53,15 @@ test('/work:plan runs planning phase and caches authoritative plan output', asyn
     ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
   });
 
-  assert.deepEqual(calls, [{ repo: cwd, args: '--iterations=2' }]);
-  assert.match(notifications[0].message, /Planner chose implementation first/);
+  assert.deepEqual(calls, [{ repo: cwd, args: '--iterations=2', role: 'planner', snapshotHasMarker: true }]);
+  assert.match(notifications[0].message, /Planner classified implementation first/);
   assert.match(notifications[0].message, /Cached plan: plan-/);
   const planId = notifications[0].message.match(/Cached plan: (\S+)/)[1];
   const recordPath = join(cwd, '.pi', 'sandcastle', 'plans', `${planId}.json`);
   assert.equal(existsSync(recordPath), true);
   const record = JSON.parse(readFileSync(recordPath, 'utf8'));
   assert.equal(record.kind, 'work-plan');
-  assert.equal(record.plan.summary, 'Planner chose implementation first.');
+  assert.equal(record.plan.summary, 'Planner classified implementation first.');
 });
 
 test('selectPlanWorkRoleName uses explicit role kind rather than role name', () => {
@@ -108,7 +108,7 @@ test('/work:plan fails closed and caches invalid planner output for inspection',
   agentWorkflows(pi, {
     work: {
       now: () => 123456,
-      async planPhase() {
+      async runPlanWorkRole() {
         return { summary: 'not executable', iterations: [{ items: [{ title: 'Missing id' }] }] };
       },
     },
@@ -129,6 +129,34 @@ test('/work:plan fails closed and caches invalid planner output for inspection',
   assert.equal(record.kind, 'invalid-work-plan');
   assert.equal(record.rawOutput.summary, 'not executable');
   assert.match(record.validationErrors.join('\n'), /item id/);
+});
+
+test('/work:plan rejects planner-authored pipeline and branch mechanics', async () => {
+  const cwd = makeRepo();
+  const pi = fakePi();
+  const notifications = [];
+  agentWorkflows(pi, {
+    work: {
+      now: () => 123456,
+      async runPlanWorkRole() {
+        return {
+          summary: 'tries to decide execution mechanics',
+          iterations: [{ pipeline: 'implement', recommendedPipeline: 'review', branchName: 'feature/from-plan', items: [{ id: 'wi-001', branch: 'feature/item' }] }],
+        };
+      },
+    },
+  });
+
+  await pi.commands.get('work:plan').handler('', {
+    cwd,
+    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  });
+
+  assert.equal(notifications[0].type, 'error');
+  assert.match(notifications[0].message, /must not author execution field 'pipeline'/);
+  assert.match(notifications[0].message, /must not author execution field 'recommendedPipeline'/);
+  assert.match(notifications[0].message, /must not author execution field 'branchName'/);
+  assert.match(notifications[0].message, /must not author execution field 'branch'/);
 });
 
 test('/work:process --plan refuses cached invalid planner output', async () => {
@@ -162,18 +190,83 @@ test('/work:process --plan refuses cached invalid planner output', async () => {
   assert.match(notifications[0].message, /not an executable Work Plan/);
 });
 
-test('/work:process --plan uses a cached authoritative plan', async () => {
+test('/work:process --plan fails closed when cached Work Plan payload is missing', async () => {
+  const cwd = makeRepo();
+  const pi = fakePi();
+  const calls = [];
+  const notifications = [];
+  mkdirSync(join(cwd, '.pi', 'sandcastle', 'plans'), { recursive: true });
+  const planId = 'plan-missing-payload';
+  writeFileSync(join(cwd, '.pi', 'sandcastle', 'plans', `${planId}.json`), JSON.stringify({
+    id: planId,
+    kind: 'work-plan',
+  }, null, 2));
+  agentWorkflows(pi, {
+    work: {
+      async execute(repo, input) {
+        calls.push({ repo, input });
+        return { status: 'done' };
+      },
+    },
+  });
+
+  await pi.commands.get('work:process').handler(`--plan ${planId}`, {
+    cwd,
+    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  });
+
+  assert.equal(calls.length, 0);
+  assert.equal(notifications[0].type, 'error');
+  assert.match(notifications[0].message, /Cached Work Plan 'plan-missing-payload' is not executable/);
+  assert.match(notifications[0].message, /Planner output must be a JSON object/);
+});
+
+test('/work:process --plan refuses cached Work Plans with planner-authored execution mechanics', async () => {
+  const cwd = makeRepo();
+  const pi = fakePi();
+  const calls = [];
+  const notifications = [];
+  mkdirSync(join(cwd, '.pi', 'sandcastle', 'plans'), { recursive: true });
+  const planId = 'plan-with-execution-mechanics';
+  writeFileSync(join(cwd, '.pi', 'sandcastle', 'plans', `${planId}.json`), JSON.stringify({
+    id: planId,
+    kind: 'work-plan',
+    plan: { iterations: [{ recommendedPipeline: 'planner-chosen-pipeline', branchName: 'feature/from-plan', items: [{ id: 'wi-001' }] }] },
+  }, null, 2));
+  agentWorkflows(pi, {
+    work: {
+      async execute(repo, input) {
+        calls.push({ repo, input });
+        return { status: 'done' };
+      },
+    },
+  });
+
+  await pi.commands.get('work:process').handler(`--plan ${planId}`, {
+    cwd,
+    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  });
+
+  assert.equal(calls.length, 0);
+  assert.equal(notifications[0].type, 'error');
+  assert.match(notifications[0].message, /Cached Work Plan 'plan-with-execution-mechanics' is not executable/);
+  assert.match(notifications[0].message, /recommendedPipeline/);
+  assert.match(notifications[0].message, /branchName/);
+});
+
+test('/work:process --plan derives pipeline from config and preserves explicit parallelizable classification', async () => {
   const cwd = makeRepo();
   const pi = fakePi();
   const calls = [];
   const notifications = [];
   mkdirSync(join(cwd, '.pi', 'sandcastle', 'plans'), { recursive: true });
   const planId = 'plan-test';
-  await import('node:fs').then(({ writeFileSync }) => writeFileSync(join(cwd, '.pi', 'sandcastle', 'plans', `${planId}.json`), JSON.stringify({
+  writeFileSync(join(cwd, '.pi', 'sandcastle', 'config.yaml'), 'defaultPipeline: sequential-reviewer\n');
+  writeFileSync(join(cwd, '.pi', 'sandcastle', 'plans', `${planId}.json`), JSON.stringify({
     id: planId,
     kind: 'work-plan',
-    plan: { iterations: [{ pipeline: 'simple-loop', items: [{ id: 'wi-001', title: 'One', sourcePath: 'backlog/001.md' }] }] },
-  }, null, 2)));
+    plan: { iterations: [{ parallelizable: false, items: [{ id: 'wi-001', title: 'One', sourcePath: 'backlog/001.md' }, { id: 'wi-002', title: 'Two', sourcePath: 'backlog/002.md' }] }] },
+  }, null, 2));
   agentWorkflows(pi, {
     work: {
       now: () => 123456,
@@ -190,8 +283,9 @@ test('/work:process --plan uses a cached authoritative plan', async () => {
   });
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].input.pipeline, 'simple-loop');
-  assert.deepEqual(calls[0].input.items.map((item) => item.id), ['wi-001']);
+  assert.equal(calls[0].input.pipeline, 'sequential-reviewer');
+  assert.equal(calls[0].input.parallel, false);
+  assert.deepEqual(calls[0].input.items.map((item) => item.id), ['wi-001', 'wi-002']);
   assert.match(notifications.at(-1).message, /Work process done/);
 });
 

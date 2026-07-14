@@ -174,9 +174,18 @@ interface BacklogItemDispatchResult {
 	status: BacklogProcessStatus;
 }
 
+interface RunPlanWorkRoleInput {
+	cwd: string;
+	args: string;
+	role: string;
+	task: string;
+	snapshotCwd: string;
+	ctx?: any;
+}
+
 interface BacklogProcessPlanDeps {
 	ready?: (cwd: string, args: string) => Promise<string>;
-	planPhase?: (cwd: string, args: string) => Promise<any>;
+	runPlanWorkRole?: (input: RunPlanWorkRoleInput) => Promise<any>;
 	plan?: (cwd: string, query: string) => Promise<BacklogPlanResult>;
 	execute?: (
 		cwd: string,
@@ -3323,23 +3332,40 @@ Work views and processing:
 
 	function formatAuthoritativePlan(plan: any): string {
 		if (typeof plan === "string") return plan;
-		if (plan?.summary) return [plan.summary, ...(Array.isArray(plan.iterations) ? plan.iterations.map((iteration: any, index: number) => `Iteration ${index + 1}: ${iteration.pipeline || iteration.recommendedPipeline || "pipeline TBD"} · ${(iteration.items || []).length} item(s)`) : [])].join("\n");
+		if (plan?.summary) return [plan.summary, ...(Array.isArray(plan.iterations) ? plan.iterations.map((iteration: any, index: number) => `Iteration ${index + 1}: ${(iteration.items || []).length} item(s)`) : [])].join("\n");
 		return JSON.stringify(plan, null, 2);
 	}
 
 	function validateExecutablePlanArtifact(plan: any): string[] {
 		const errors: string[] = [];
+		const forbiddenExecutionFields = new Set(["pipeline", "pipelines", "pipelineName", "recommendedPipeline", "recommendedPipelines", "branch", "branches", "branchName"]);
 		if (!plan || typeof plan !== "object" || Array.isArray(plan)) return ["Planner output must be a JSON object."];
-		const groups = Array.isArray(plan.iterations) ? plan.iterations : Array.isArray(plan.groups) ? plan.groups : Array.isArray(plan.items) ? [{ items: plan.items }] : undefined;
-		if (!groups) return ["Planner output must contain an items, iterations, or groups array."];
-		for (const [groupIndex, group] of groups.entries()) {
-			if (!group || typeof group !== "object" || !Array.isArray(group.items)) {
-				errors.push(`Plan group ${groupIndex + 1} must contain an items array.`);
+		for (const field of Object.keys(plan)) {
+			if (forbiddenExecutionFields.has(field)) errors.push(`Plan must not author execution field '${field}'.`);
+		}
+		if (!Array.isArray(plan.iterations)) return [...errors, "Planner output must contain an iterations array."];
+		for (const [iterationIndex, iteration] of plan.iterations.entries()) {
+			if (!iteration || typeof iteration !== "object" || Array.isArray(iteration)) {
+				errors.push(`Plan iteration ${iterationIndex + 1} must be an object.`);
 				continue;
 			}
-			for (const [itemIndex, item] of group.items.entries()) {
-				if (!item || typeof item !== "object" || typeof item.id !== "string" || !item.id.trim()) {
-					errors.push(`Plan group ${groupIndex + 1} item ${itemIndex + 1} is missing a canonical item id.`);
+			for (const field of Object.keys(iteration)) {
+				if (forbiddenExecutionFields.has(field)) errors.push(`Plan iteration ${iterationIndex + 1} must not author execution field '${field}'.`);
+			}
+			if (!Array.isArray(iteration.items)) {
+				errors.push(`Plan iteration ${iterationIndex + 1} must contain an items array.`);
+				continue;
+			}
+			for (const [itemIndex, item] of iteration.items.entries()) {
+				if (!item || typeof item !== "object" || Array.isArray(item)) {
+					errors.push(`Plan iteration ${iterationIndex + 1} item ${itemIndex + 1} must be an object.`);
+					continue;
+				}
+				for (const field of Object.keys(item)) {
+					if (forbiddenExecutionFields.has(field)) errors.push(`Plan iteration ${iterationIndex + 1} item ${itemIndex + 1} must not author execution field '${field}'.`);
+				}
+				if (typeof item.id !== "string" || !item.id.trim()) {
+					errors.push(`Plan iteration ${iterationIndex + 1} item ${itemIndex + 1} is missing a canonical item id.`);
 				}
 			}
 		}
@@ -3347,7 +3373,6 @@ Work views and processing:
 	}
 
 	async function runPlannerPhase(args: string, ctx: any): Promise<any> {
-		if (backlogDeps.planPhase) return backlogDeps.planPhase(ctx.cwd, args);
 		const cfg = await loadConfig(ctx.cwd);
 		const agent = selectPlanWorkRoleName(cfg);
 		const readyOutput = backlogDeps.ready
@@ -3355,7 +3380,8 @@ Work views and processing:
 			: (await runProcess(ctx.cwd, "dv", ["work", "ready"])).stdout.trim();
 		const snapshotCwd = createPlannerSnapshot(ctx.cwd);
 		try {
-			const task = `Run the Work planning phase for this repository.\n\nGuardrails: you are running inside a disposable planner snapshot. Do not attempt to update the source repository, create branches for execution, or perform Work Source mutations. Any filesystem changes you make are discarded after planning.\n\nRequested plan arguments: ${args || "(none)"}\n\nReady Work input from the configured Work Source:\n${readyOutput}\n\nReturn an authoritative plan with iterations, item ids, risk rationale, recommended pipeline per iteration, and any HITL or dependency constraints. End with <promise>COMPLETE</promise>.`;
+			const task = `Run the Work planning phase for this repository.\n\nGuardrails: you are running inside a disposable planner snapshot. Do not attempt to update the source repository, create branches for execution, or perform Work Source mutations. Any filesystem changes you make are discarded after planning.\n\nRequested plan arguments: ${args || "(none)"}\n\nReady Work input from the configured Work Source:\n${readyOutput}\n\nReturn an authoritative Work Plan JSON object with an iterations array, item ids, dependency/classification/risk rationale, and any HITL constraints. Do not author execution mechanics such as pipeline names or branch names. End with <promise>COMPLETE</promise>.`;
+			if (backlogDeps.runPlanWorkRole) return backlogDeps.runPlanWorkRole({ cwd: ctx.cwd, args, role: agent, task, snapshotCwd, ctx });
 			const run = await dispatch(ctx.cwd, agent, task, ctx, { executionCwd: snapshotCwd, branchPrefix: "agent-workflows/planner" });
 			await new Promise<void>((resolve) => run.proc?.on("close", () => resolve()));
 			if (run.status !== "done") throw new Error(`Planner role failed: ${run.lastLine}`);
@@ -3930,6 +3956,12 @@ Work views and processing:
 		},
 	});
 
+	function planIterationSupportsParallel(iteration: any): boolean {
+		if (typeof iteration?.parallelizable === "boolean") return iteration.parallelizable;
+		if (typeof iteration?.classifications?.parallelizable === "boolean") return iteration.classifications.parallelizable;
+		return (iteration?.items || []).length > 1;
+	}
+
 	pi.registerCommand("work:process", {
 		description: "Start durable Work processing: /work:process [query] --pipeline <pipeline>",
 		getArgumentCompletions: (prefix: string) => {
@@ -3945,15 +3977,21 @@ Work views and processing:
 			let baseRecord: BacklogProcessRecord | undefined;
 			try {
 				const { query, pipeline: explicitPipeline, planId } = parseBacklogProcessArgs(args);
-				const cachedPlan = planId ? readBacklogPlanRecord(ctx.cwd, planId).plan : undefined;
-				const planning = cachedPlan ? { iterations: (cachedPlan.iterations || cachedPlan.groups || []).map((entry: any) => ({ items: entry.items || [], recommendedPipeline: entry.pipeline || entry.recommendedPipeline || entry.recommendedPipelines?.[0], supportsParallel: (entry.items || []).length > 1 })) } : await planBacklogProcessing(ctx.cwd, query);
+				const cfg = await loadConfig(ctx.cwd);
+				const cachedPlanRecord = planId ? readBacklogPlanRecord(ctx.cwd, planId) : undefined;
+				const cachedPlan = cachedPlanRecord?.plan;
+				if (planId) {
+					const validationErrors = validateExecutablePlanArtifact(cachedPlan);
+					if (validationErrors.length) throw new Error(`Cached Work Plan '${planId}' is not executable:\n- ${validationErrors.join("\n- ")}`);
+				}
+				const planning = cachedPlan ? { iterations: cachedPlan.iterations.map((entry: any) => ({ items: entry.items || [], supportsParallel: planIterationSupportsParallel(entry) })) } : await planBacklogProcessing(ctx.cwd, query);
 				const iteration = planning.iterations[0];
 				if (!iteration) {
 					ctx.ui.notify("No Work Items were selected for processing.", "error");
 					return;
 				}
 
-				const pipeline = explicitPipeline || iteration.recommendedPipeline || "implement";
+				const pipeline = explicitPipeline || (cachedPlan ? (cfg.defaultPipeline || "simple-loop") : (iteration.recommendedPipeline || cfg.defaultPipeline || "implement"));
 				const startedAt = getBacklogTimestamp(backlogDeps.now);
 				const runId = createBacklogRunId(startedAt);
 				baseRecord = {
