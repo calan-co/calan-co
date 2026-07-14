@@ -236,7 +236,7 @@ function unique(values) {
   return values.filter((value, index, array) => array.indexOf(value) === index);
 }
 
-function parseBacklogItem(fs, path, filePath, cwd) {
+function parseLocalMarkdownWorkItem(fs, path, filePath, cwd) {
   const raw = fs.readFileSync(filePath, "utf8");
   const { frontmatter, body } = parseFrontmatter(raw);
   const relativePath = path.relative(cwd, filePath);
@@ -246,7 +246,7 @@ function parseBacklogItem(fs, path, filePath, cwd) {
   const summary = toText(frontmatter.summary) || captureSection(body, "Goal") || captureSection(body, "Background");
   const tags = asStringList(frontmatter.tags);
   const links = frontmatter.links || {};
-  const dependsOn = asStringList(links.depends_on);
+  const dependencies = asStringList(links.depends_on);
   const references = asStringList(links.reference);
   const parents = asStringList(links.parent);
   const goal = captureSection(body, "Goal");
@@ -260,7 +260,7 @@ function parseBacklogItem(fs, path, filePath, cwd) {
     title,
     summary,
     tags.join(" "),
-    dependsOn.join(" "),
+    dependencies.join(" "),
     references.join(" "),
     parents.join(" "),
     goal,
@@ -273,20 +273,36 @@ function parseBacklogItem(fs, path, filePath, cwd) {
     .join("\n")
     .toLowerCase();
 
+  const estimate = Number(frontmatter.estimated || 0);
+  const source = {
+    adapter: "local-markdown",
+    kind: "markdown-file",
+    id,
+    path: relativePath,
+    absolutePath: filePath,
+    body,
+    payload: { frontmatter },
+    raw,
+  };
+
   return {
     id,
     numericId,
     title,
     titleSlug: slugify(title),
     summary,
+    body,
     tags,
     status: toText(frontmatter.status),
     priority: toText(frontmatter.priority),
-    estimated: Number(frontmatter.estimated || 0),
+    estimate,
+    estimated: estimate,
     type: toText(frontmatter.type),
     subtype: toText(frontmatter.subtype),
     lifecycle: toText(frontmatter.lifecycle),
     statusReason: toText(frontmatter.status_reason),
+    source,
+    sourcePath: relativePath,
     filePath,
     relativePath,
     goal,
@@ -294,14 +310,15 @@ function parseBacklogItem(fs, path, filePath, cwd) {
     tasks,
     deliverables,
     acceptanceCriteria,
-    dependsOn,
+    dependencies,
+    dependsOn: dependencies,
     references,
     parents,
     searchable,
   };
 }
 
-function discoverBacklogItems(fs, path, cwd, sources) {
+function discoverWorkItems(fs, path, cwd, sources) {
   const resolvedRoots = resolveSourceRoots({ cwd, path, sources });
   if (resolvedRoots.length === 0) {
     throw new Error("No Work Source configured. Provide at least one Work directory.");
@@ -317,7 +334,7 @@ function discoverBacklogItems(fs, path, cwd, sources) {
 
   return files
     .sort((left, right) => left.localeCompare(right))
-    .map((filePath) => parseBacklogItem(fs, path, filePath, cwd));
+    .map((filePath) => parseLocalMarkdownWorkItem(fs, path, filePath, cwd));
 }
 
 function comparePriority(left, right) {
@@ -347,7 +364,7 @@ function itemMatchesTarget(item, path, target) {
   );
 }
 
-function resolveBacklogItem(items, path, cwd, target) {
+function resolveWorkItem(items, path, cwd, target) {
   const normalized = normalizeTarget(target);
   if (!normalized) return null;
 
@@ -391,7 +408,7 @@ function deriveRecommendedPipeline(item) {
   if (tags.has("process") || tags.has("pipeline")) return { name: "implement", rationale: "Process items are execution-oriented and should use the implementation pipeline." };
   if (tags.has("runs") || tags.has("resume")) return { name: "run-management", rationale: "Run management items align with stateful run tooling." };
   if (tags.has("inspect") || tags.has("readonly")) return { name: "research-review", rationale: "Read-only discovery work should use research before review." };
-  return { name: "research-review", rationale: "Default to read-only discovery for backlog inspection." };
+  return { name: "research-review", rationale: "Default to read-only discovery for Work Source inspection." };
 }
 
 function deriveRisks(item) {
@@ -412,7 +429,7 @@ function deriveTestingNotes(item) {
     "Cover missing-source and missing-item errors with deterministic fixtures.",
   ];
   if (item.tags.includes("backlog")) {
-    notes.push("Assert deterministic ordering across multiple backlog files.");
+    notes.push("Assert deterministic ordering across multiple Work Source files.");
   }
   return notes;
 }
@@ -463,7 +480,7 @@ function describeError(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
-function createBacklogCommandHandler(runCommand, capabilityFactory) {
+function createWorkSourceCommandHandler(runCommand, capabilityFactory) {
   return async (args, ctx) => {
     try {
       const capability = capabilityFactory(ctx.cwd);
@@ -475,7 +492,7 @@ function createBacklogCommandHandler(runCommand, capabilityFactory) {
   };
 }
 
-export function createBacklogCapability({
+export function createWorkSourceCapability({
   cwd,
   fs = {
     existsSync: nodeExistsSync,
@@ -486,10 +503,10 @@ export function createBacklogCapability({
   path = { basename, isAbsolute, join, relative, resolve },
   sources = DEFAULT_SOURCE_DIRS,
 } = {}) {
-  if (!cwd) throw new Error("Work capability requires a cwd.");
+  if (!cwd) throw new Error("Work Source capability requires a cwd.");
 
   function loadItems() {
-    return discoverBacklogItems(fs, path, cwd, sources);
+    return discoverWorkItems(fs, path, cwd, sources);
   }
 
   return {
@@ -504,7 +521,7 @@ export function createBacklogCapability({
 
     async inspect(target) {
       const items = loadItems();
-      const resolved = resolveBacklogItem(items, path, cwd, target);
+      const resolved = resolveWorkItem(items, path, cwd, target);
       if (!resolved) {
         throw new Error(`No Work Item matched '${toText(target)}'.`);
       }
@@ -535,18 +552,18 @@ export function createBacklogCapability({
   };
 }
 
-export const createWorkSourceCapability = createBacklogCapability;
+export const createBacklogCapability = createWorkSourceCapability;
 
-export function registerBacklogCommands(pi, { capabilityFactory = (cwd) => createBacklogCapability({ cwd }) } = {}) {
+export function registerWorkCommands(pi, { capabilityFactory = (cwd) => createWorkSourceCapability({ cwd }) } = {}) {
   pi.registerCommand("work:list", {
     description: "List read-only Work Items",
-    handler: createBacklogCommandHandler((capability, args) => capability.list(args), capabilityFactory),
+    handler: createWorkSourceCommandHandler((capability, args) => capability.list(args), capabilityFactory),
   });
 
   pi.registerCommand("work:inspect", {
     description: "Inspect a Work Item without mutating source state",
-    handler: createBacklogCommandHandler((capability, args) => capability.inspect(args), capabilityFactory),
+    handler: createWorkSourceCommandHandler((capability, args) => capability.inspect(args), capabilityFactory),
   });
 }
 
-export const registerWorkCommands = registerBacklogCommands;
+export const registerBacklogCommands = registerWorkCommands;

@@ -8,12 +8,15 @@ test('renderWorkBrief deterministically renders normalized Work Item detail with
     id: 'GH-123',
     title: 'Fix auth callback',
     summary: 'OAuth callback fails on retry.',
-    sourcePath: 'https://github.test/repo/issues/123',
     tags: ['bug', 'auth'],
     acceptanceCriteria: ['retry succeeds', 'regression test added'],
     dependencies: ['GH-100'],
     source: {
+      adapter: 'github-issues',
+      kind: 'github-issue',
+      url: 'https://github.test/repo/issues/123',
       body: 'Original issue body with exact user wording.',
+      payload: { number: 123, labels: ['bug', 'auth'] },
     },
   });
 
@@ -46,6 +49,20 @@ test('renderWorkBrief deterministically renders normalized Work Item detail with
     '',
     'Original issue body with exact user wording.',
   ].join('\n'));
+});
+
+test('renderWorkBrief keeps compatibility aliases for existing Work Item callers', () => {
+  const brief = renderWorkBrief({
+    id: 'WI-7',
+    title: 'Legacy source fields',
+    sourcePath: 'backlog/00007-legacy.md',
+    sourceBody: 'Legacy preserved body.',
+    dependsOn: ['WI-6'],
+  });
+
+  assert.match(brief, /## Source\n\nbacklog\/00007-legacy\.md/);
+  assert.match(brief, /## Dependencies\n\n- WI-6/);
+  assert.match(brief, /## Preserved Source\n\nLegacy preserved body\./);
 });
 
 test('renderWorkBrief requires canonical Work Item id and title', () => {

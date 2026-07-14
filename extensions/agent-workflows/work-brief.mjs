@@ -27,8 +27,8 @@ export function renderWorkBrief(workItem) {
   if (!title) throw new Error("Work Brief requires a Work Item title.");
 
   const source = workItem?.source || {};
-  const sourceRef = toText(workItem?.sourcePath || workItem?.detailRef || source.path || source.url || source.id);
-  const sourceBody = toText(workItem?.sourceBody || source.body || source.text || workItem?.body);
+  const sourceRef = toText(source.path || source.url || source.id || workItem?.sourcePath || workItem?.detailRef);
+  const sourceBody = toText(source.body || source.text || workItem?.sourceBody || workItem?.body);
 
   return [
     `# Work Item ${id}: ${title}`,

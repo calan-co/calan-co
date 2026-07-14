@@ -179,6 +179,17 @@ test("backlog list and inspect use a fake filesystem without writes", async () =
   const listResult = await capability.list("backlog");
   assert.equal(listResult.items.length, 3);
   assert.equal(listResult.items[0].id, "wi-00002");
+  assert.deepEqual(listResult.items[0].dependencies, ["[[00002-sandcastle-config-scaffolding-and-validation]]"]);
+  assert.deepEqual(listResult.items[0].dependsOn, listResult.items[0].dependencies);
+  assert.equal(listResult.items[0].estimate, 5);
+  assert.equal(listResult.items[0].estimated, listResult.items[0].estimate);
+  assert.equal(listResult.items[0].source.adapter, "local-markdown");
+  assert.equal(listResult.items[0].source.kind, "markdown-file");
+  assert.equal(listResult.items[0].source.path, "backlog/00002-sandcastle-config-scaffolding-and-validation.md");
+  assert.equal(listResult.items[0].source.absolutePath, "/repo/backlog/00002-sandcastle-config-scaffolding-and-validation.md");
+  assert.match(listResult.items[0].source.body, /## Goal\n\nImplement \/work:config-raw/);
+  assert.equal(listResult.items[0].source.payload.frontmatter.title, "Sandcastle Config Scaffolding and Validation");
+  assert.match(listResult.items[0].source.raw, /^---\nid: wi-00002/);
   assert.match(listResult.text, /Matching Work Items:/);
   assert.equal(fakeFs.writes.length, 0);
 

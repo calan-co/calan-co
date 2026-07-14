@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import os from 'node:os';
 import test from 'node:test';
+
+import agentWorkflows from '../extensions/agent-workflows/index.ts';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const extensionPath = fileURLToPath(new URL('../extensions/agent-workflows/index.ts', import.meta.url));
@@ -151,6 +153,69 @@ test('parseBacklogProcessArgs keeps query text separate from pipeline selection'
   assert.deepEqual(parsed.review, { query: 'review' });
   assert.deepEqual(parsed.explicit, { query: 'auth bugs', pipeline: 'implement' });
   assert.deepEqual(parsed.shortFlag, { query: 'label:small', pipeline: 'review' });
+});
+
+test('work:process passes canonical Work Items with preserved source to execution', async () => {
+  const cwd = mkdtempSync(join(os.tmpdir(), 'pi-work-process-source-'));
+  try {
+    mkdirSync(join(cwd, 'backlog'), { recursive: true });
+    writeFileSync(join(cwd, 'backlog', '00042-preserve-source.md'), `---
+id: wi-00042
+title: Preserve Work Source
+summary: Keep source payloads for role briefs.
+estimated: 3
+links:
+  depends_on:
+    - 'wi-00041'
+tags:
+  - afk
+  - work
+---
+
+## Goal
+
+Preserve this exact markdown body.
+
+## Acceptance Criteria
+
+- [ ] Source body is available to Work Brief rendering.
+`);
+
+    const commands = new Map();
+    let capturedItems = [];
+    agentWorkflows({
+      registerCommand(name, spec) {
+        commands.set(name, spec);
+      },
+      on() {},
+      registerTool() {},
+    }, {
+      work: {
+        now: () => 1710000000000,
+        execute: async (_cwd, input) => {
+          capturedItems = input.items;
+          return { branches: [], logs: [], status: 'done' };
+        },
+      },
+    });
+
+    await commands.get('work:process').handler('preserve', {
+      cwd,
+      ui: { notify() {} },
+    });
+
+    assert.equal(capturedItems.length, 1);
+    const [item] = capturedItems;
+    assert.equal(item.id, 'wi-00042');
+    assert.equal(item.source.path, 'backlog/00042-preserve-source.md');
+    assert.equal(item.source.absolutePath, join(cwd, 'backlog', '00042-preserve-source.md'));
+    assert.match(item.source.body, /## Goal\n\nPreserve this exact markdown body\./);
+    assert.equal(item.source.payload.frontmatter.title, 'Preserve Work Source');
+    assert.deepEqual(item.dependencies, ['wi-00041']);
+    assert.deepEqual(item.dependsOn, item.dependencies);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 test('work:process uses explicit pipeline or deterministic default and writes durable run records', () => {

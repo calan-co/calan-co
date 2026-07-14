@@ -126,16 +126,37 @@ interface SandcastleConfig {
 }
 
 type SandcastleProcess = ReturnType<typeof spawn>;
-interface BacklogItem {
+interface WorkItemSource {
+	adapter: string;
+	id?: string;
+	kind?: string;
+	path?: string;
+	absolutePath?: string;
+	url?: string;
+	body?: string;
+	payload?: unknown;
+	raw?: string;
+}
+
+interface WorkItem {
 	id: string;
 	title: string;
 	summary?: string;
+	body?: string;
 	tags: string[];
+	source: WorkItemSource;
 	sourcePath: string;
+	dependencies: string[];
+	dependsOn: string[];
+	acceptanceCriteria: string[];
+	estimate?: number;
+	estimated?: number;
 }
 
+type BacklogItem = WorkItem;
+
 interface BacklogPlanIteration {
-	items: BacklogItem[];
+	items: WorkItem[];
 	recommendedPipeline?: string;
 	supportsParallel: boolean;
 	rationale: string;
@@ -1275,37 +1296,105 @@ function parseFrontmatterList(raw: string | undefined): string[] {
 	}
 	return value
 		.split("\n")
-		.map((part) => part.replace(/^-+\s*/, "").trim())
+		.map((part) => part.replace(/^-+\s*/, "").trim().replace(/^['"]|['"]$/g, ""))
 		.filter(Boolean);
 }
 
-function readBacklogItems(cwd: string): BacklogItem[] {
+function splitMarkdownFrontmatter(text: string): { frontmatter: Record<string, string>; body: string } {
+	const match = text.match(/^---\n([\s\S]*?)\n---\n?/);
+	if (!match) return { frontmatter: {}, body: text };
+	return { frontmatter: readFrontmatter(text), body: text.slice(match[0].length) };
+}
+
+function parseNestedFrontmatterList(raw: string | undefined, key: string): string[] {
+	if (!raw) return [];
+	const values: string[] = [];
+	let active = false;
+	for (const line of raw.split("\n")) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		const keyMatch = trimmed.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+		if (keyMatch) {
+			active = keyMatch[1] === key;
+			if (active && keyMatch[2]) values.push(keyMatch[2].replace(/^['"]|['"]$/g, ""));
+			continue;
+		}
+		if (active && trimmed.startsWith("- ")) values.push(trimmed.slice(2).trim().replace(/^['"]|['"]$/g, ""));
+	}
+	return values.filter(Boolean);
+}
+
+function captureMarkdownSection(body: string, heading: string): string {
+	const pattern = new RegExp(`^## ${heading}\\s*\\n([\\s\\S]*?)(?=\\n## |\\s*$)`, "m");
+	return body.match(pattern)?.[1]?.trim() || "";
+}
+
+function captureChecklistItems(sectionText: string): string[] {
+	return sectionText
+		.split("\n")
+		.map((line) => line.trim())
+		.filter((line) => /^- \[[ x]\] /.test(line))
+		.map((line) => line.replace(/^- \[[ x]\] /, ""));
+}
+
+function readWorkItems(cwd: string): WorkItem[] {
 	const backlogDir = join(cwd, "backlog");
 	if (!existsSync(backlogDir)) return [];
 	return readdirSync(backlogDir, { withFileTypes: true })
 		.filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
 		.map((entry) => {
-			const sourcePath = join(backlogDir, entry.name);
-			const text = readFileSync(sourcePath, "utf8");
-			const frontmatter = readFrontmatter(text);
+			const absolutePath = join(backlogDir, entry.name);
+			const sourcePath = `backlog/${entry.name}`;
+			const text = readFileSync(absolutePath, "utf8");
+			const { frontmatter, body } = splitMarkdownFrontmatter(text);
 			const title = frontmatter.title || entry.name.replace(/^\d+-/, "").replace(/\.md$/, "");
-			const summary = frontmatter.summary || undefined;
+			const summary = frontmatter.summary || captureMarkdownSection(body, "Goal") || captureMarkdownSection(body, "Background") || undefined;
 			const tags = parseFrontmatterList(frontmatter.tags);
+			const dependencies = parseNestedFrontmatterList(frontmatter.links, "depends_on");
+			const acceptanceCriteria = captureChecklistItems(captureMarkdownSection(body, "Acceptance Criteria"));
 			const id = frontmatter.id || entry.name.slice(0, 5);
-			return { id, title, summary, tags, sourcePath };
+			const estimate = Number(frontmatter.estimated || 0);
+			return {
+				id,
+				title,
+				summary,
+				body,
+				tags,
+				source: {
+					adapter: "local-markdown",
+					kind: "markdown-file",
+					id,
+					path: sourcePath,
+					absolutePath,
+					body,
+					payload: { frontmatter },
+					raw: text,
+				},
+				sourcePath,
+				dependencies,
+				dependsOn: dependencies,
+				acceptanceCriteria,
+				estimate,
+				estimated: estimate,
+			};
 		})
 		.sort((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true }));
 }
 
+const readBacklogItems = readWorkItems;
+
 const SAMPLE_CONFIG = configToYaml(packsToConfig());
 
-function matchesBacklogQuery(item: BacklogItem, query: string): boolean {
+function matchesWorkQuery(item: WorkItem, query: string): boolean {
 	const raw = query.trim().toLowerCase();
 	if (!raw) return true;
-	const haystack = [item.id, item.title, item.summary || "", item.sourcePath, ...item.tags].join(" ").toLowerCase();
+	const source = item.source || {};
+	const haystack = [item.id, item.title, item.summary || "", item.sourcePath, source.path || "", source.url || "", source.id || "", source.body || "", ...item.tags].join(" ").toLowerCase();
 	const tokens = raw.split(/\s+/).filter(Boolean);
 	return tokens.every((token) => haystack.includes(token));
 }
+
+const matchesBacklogQuery = matchesWorkQuery;
 
 function inferRecommendedPipeline(query: string, items: BacklogItem[]): string {
 	const haystack = `${query} ${items
@@ -4159,7 +4248,7 @@ Work views and processing:
 
 	registerWorkCommands(pi);
 	pi.registerCommand("work:runs", {
-		description: "List backlog processing runs: /work:runs [query]",
+		description: "List Work Process runs: /work:runs [query]",
 		handler: async (args, ctx) => {
 			const runs = listWorkRuns(ctx.cwd, args.trim());
 			ctx.ui.notify(formatWorkRunList(runs), "info");
@@ -4167,7 +4256,7 @@ Work views and processing:
 	});
 
 	pi.registerCommand("work:status", {
-		description: "Inspect a backlog processing run: /work:status [run-id]",
+		description: "Inspect a Work Process run: /work:status [run-id]",
 		handler: async (args, ctx) => {
 			const selection = selectWorkRunForStatus(listWorkRuns(ctx.cwd), args.trim());
 			const message = formatStatusSelection(selection);
@@ -4176,7 +4265,7 @@ Work views and processing:
 	});
 
 	pi.registerCommand("work:logs", {
-		description: "Show log paths for a backlog processing run: /work:logs [run-id]",
+		description: "Show log paths for a Work Process run: /work:logs [run-id]",
 		handler: async (args, ctx) => {
 			const selection = selectWorkRunForStatus(listWorkRuns(ctx.cwd), args.trim());
 			if (selection.kind !== "record") {
@@ -4184,19 +4273,19 @@ Work views and processing:
 				return;
 			}
 			const logs = selection.record.logs || [];
-			ctx.ui.notify(logs.length ? logs.join("\n") : `No logs recorded for backlog run ${selection.record.id}.`, "info");
+			ctx.ui.notify(logs.length ? logs.join("\n") : `No logs recorded for Work Process ${selection.record.id}.`, "info");
 		},
 	});
 
 	pi.registerCommand("work:cancel", {
-		description: "Cancel active backlog processing work: /work:cancel [run-id]",
+		description: "Cancel active Work Process work: /work:cancel [run-id]",
 		handler: async (_args, ctx) => {
-			ctx.ui.notify("Backlog run cancellation is not available for completed durable records yet.", "error");
+			ctx.ui.notify("Work Process cancellation is not available for completed durable records yet.", "error");
 		},
 	});
 
 	pi.registerCommand("work:resume", {
-		description: "Resume a backlog processing run: /work:resume [run-id]",
+		description: "Resume a Work Process run: /work:resume [run-id]",
 		handler: async (args, ctx) => {
 			const resumeCapability = getBacklogResumeCapability(ctx);
 			const result = await resumeWorkRun(ctx.cwd, args.trim(), resumeCapability);

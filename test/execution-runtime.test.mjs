@@ -76,12 +76,13 @@ test('configToYaml renders compiled runtime roles and pipelines', () => {
   assert.match(yaml, /^roles:/m);
   assert.match(yaml, /^  implementer:/m);
   assert.match(yaml, /provider: claude-code/);
-  assert.match(yaml, /systemPrompt: \|\n      You are the Sandcastle implementer role/s);
+  assert.match(yaml, /systemPrompt: \|\n      You are the Agent Workflows implementer role/s);
   assert.doesNotMatch(yaml, /^    sandbox: docker/m);
   assert.match(yaml, /^pipelines:/m);
   assert.match(yaml, /^  parallel-planner-with-review:/m);
   assert.match(yaml, /^prompts:/m);
-  assert.match(yaml, /template: \|\n      Inspect the configured issue tracker/s);
+  assert.match(yaml, /template: \|\n      Inspect the configured Work Source/s);
+  assert.doesNotMatch(yaml, /configured issue tracker|next open task|selected work item/);
   assert.match(yaml, /kind: planWork\n        role: planner\n        description: planner planWork\n        prompt: plan-work/);
   assert.doesNotMatch(yaml, /^teams:/m);
 });
