@@ -3,14 +3,14 @@ import { defineIssueDocumentTest } from './issue-document-test-helpers.mjs';
 const issueFileUrl = new URL('../backlog/00004-fixed-domain-pipeline-execution.md', import.meta.url);
 const prdFileUrl = new URL('../docs/prd/sandcastle-backlog-processing.md', import.meta.url);
 const pipelineStoryPattern =
-  /9\.\s+As a Pi user, I want `\/backlog:pipeline <pipeline> \[prompt\]`, so that I can run a fixed domain pipeline directly\./;
+  /9\.\s+As a Pi user, I want `\/work:pipeline <pipeline> \[prompt\]`, so that I can run a fixed domain pipeline directly\./;
 const pipelineAcceptanceCriteriaChecks = [
   {
-    criterion: 'After reload, /backlog:pipeline is registered by the dev extension.',
+    criterion: 'After reload, /work:pipeline is registered by the dev extension.',
     message: 'issue 00004 should require command registration',
   },
   {
-    criterion: '/backlog:pipeline validates the requested pipeline against repo config and rejects unknown names with available options.',
+    criterion: '/work:pipeline validates the requested pipeline against repo config and rejects unknown names with available options.',
     message: 'issue 00004 should require pipeline-name validation',
   },
   {
@@ -32,12 +32,12 @@ const pipelineAcceptanceCriteriaChecks = [
 ];
 
 defineIssueDocumentTest({
-  commandSurface: '/backlog:pipeline',
+  commandSurface: '/work:pipeline',
   acceptanceCriteriaChecks: pipelineAcceptanceCriteriaChecks,
   issueId: 'issue 00004',
   issueFileUrl,
   prdFileUrl,
   storyMessage:
-    'the parent PRD should contain the /backlog:pipeline user story that drives this work item',
+    'the parent PRD should contain the /work:pipeline user story that drives this work item',
   storyPattern: pipelineStoryPattern,
 });

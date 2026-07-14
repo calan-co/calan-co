@@ -42,7 +42,7 @@ function toTime(value, fallback = Date.now()) {
 function inferRunKind(run) {
 	if (run.kind) return run.kind;
 	if (Array.isArray(run.steps)) return "pipeline";
-	if (run.resolvedItems || run.itemIds || run.query) return "backlog-process";
+	if (run.resolvedItems || run.itemIds || run.query) return "work-process";
 	return "direct-role";
 }
 
@@ -350,35 +350,35 @@ export function registerRunManagementCommands(pi, options = {}) {
 	const service = createRunManagementService(options);
 	const commandDefs = [
 		[
-			"backlog:runs",
+			"work:runs",
 			"Show durable Sandcastle runs for the current repo",
 			async (_args, ctx) => {
 				notifyResult(ctx, await service.list(ctx.cwd), (result) => result.message);
 			},
 		],
 		[
-			"backlog:status",
+			"work:status",
 			"Inspect a durable Sandcastle run",
 			async (args, ctx) => {
 				notifyResult(ctx, await service.status(ctx.cwd, normalizeSelector(args)), (result) => result.message);
 			},
 		],
 		[
-			"backlog:logs",
+			"work:logs",
 			"Show the log path for a durable Sandcastle run",
 			async (args, ctx) => {
 				notifyResult(ctx, await service.logs(ctx.cwd, normalizeSelector(args)), (result) => `Log path: ${result.logPath}`);
 			},
 		],
 		[
-			"backlog:cancel",
+			"work:cancel",
 			"Cancel one or more active Sandcastle runs",
 			async (args, ctx) => {
 				notifyResult(ctx, await service.cancel(ctx.cwd, normalizeSelector(args)), (result) => result.message);
 			},
 		],
 		[
-			"backlog:resume",
+			"work:resume",
 			"Resume a resumable Sandcastle run",
 			async (args, ctx) => {
 				notifyResult(ctx, await service.resume(ctx.cwd, normalizeSelector(args)), (result) => result.message);

@@ -1,6 +1,6 @@
-# Pi Sandcastle extension
+# Agent Workflows extension
 
-Project-local Pi extension that exposes a Pi-native `/backlog:*` command surface backed by an ExecutionRuntime. Sandcastle is a background adapter for sandboxed agent execution, not a user-facing command namespace. Deterministic backlog readiness belongs to Doc-Vader; Pi-Sandcastle delegates readiness to `dv` and uses configured execution roles for planning/execution.
+Project-local Pi extension that exposes a Pi-hosted `/work:*` command surface backed by the Agent Workflows runtime model. The core runtime language is intentionally portable: Pi is the host integration layer, and Sandcastle is an execution adapter for sandboxed agent execution rather than the product model.
 
 ## Install/runtime prerequisites
 
@@ -10,36 +10,36 @@ npm install --save-dev @ai-hero/sandcastle
 
 Then reload Pi from this repo with `/reload`.
 
-## Backlog execution commands
+## Work commands
 
-- `/backlog:config` — friendly BIOS-style TUI for runtime configuration.
-- `/backlog:config-raw show|init|get|set|edit|editor|reset|validate` — advanced config utility actions.
-- `/backlog:build-image [docker|podman]` — build the repo execution sandbox image.
-- `/backlog:run [agent] <prompt>` — run one configured execution agent directly.
-- `/backlog:pipeline <pipeline> [prompt]` — run a fixed runtime pipeline.
-- `/backlog:list [query]` — list backlog items without mutation.
-- `/backlog:inspect <item-id>` — inspect one backlog item without mutation.
-- `/backlog:ready [query]` — list deterministic ready work candidates via Doc-Vader (`dv work ready`).
-- `/backlog:plan [query] --iterations N` — run the configured planner/orchestrator planning phase and cache an authoritative plan under `.pi/sandcastle/plans/`.
-- `/backlog:next [query]` — plan the next backlog iteration.
-- `/backlog:process [query] --pipeline <pipeline>` — start durable backlog processing through the ExecutionRuntime adapter boundary.
-- `/backlog:process --plan <plan-id> [--pipeline <pipeline>]` — process a previously cached plan, optionally overriding its selected pipeline.
-- `/backlog:runs [query]` — list backlog processing runs.
-- `/backlog:status [run-id]` — inspect a backlog processing run.
-- `/backlog:logs [run-id]` — show recorded log paths for a backlog processing run.
-- `/backlog:cancel [run-id]` — reserved backlog cancellation utility.
-- `/backlog:resume [run-id]` — resume a resumable backlog processing run.
+- `/work:config` — friendly BIOS-style TUI for runtime configuration.
+- `/work:config-raw show|init|get|set|edit|editor|reset|validate` — advanced config utility actions.
+- `/work:build-image [docker|podman]` — build the repo execution sandbox image.
+- `/work:run [role] <prompt>` — run one configured Role directly.
+- `/work:pipeline <pipeline> [prompt]` — run a fixed runtime Pipeline.
+- `/work:list [query]` — list Work Items without mutation.
+- `/work:inspect <item-id>` — inspect one Work Item without mutation.
+- `/work:ready [query]` — list deterministic ready Work candidates from the configured Work Source.
+- `/work:plan [query] --iterations N` — run the configured read-only planning phase and cache a Plan Artifact under `.pi/sandcastle/plans/`.
+- `/work:next [query]` — plan the next Work iteration.
+- `/work:process [query] --pipeline <pipeline>` — start durable Work processing through the runtime adapter boundary.
+- `/work:process --plan <plan-id> [--pipeline <pipeline>]` — process a previously cached Plan Artifact, optionally overriding its selected pipeline during this transition slice.
+- `/work:runs [query]` — list Work Process runs.
+- `/work:status [run-id]` — inspect a Work Process run.
+- `/work:logs [run-id]` — show recorded log paths for a Work Process run.
+- `/work:cancel [run-id]` — reserved cancellation utility.
+- `/work:resume [run-id]` — resume a resumable Work Process run.
 
 ## Runtime packs
 
-The default runtime pack is `extensions/pi-sandcastle/runtime-packs/sandcastle-templates.json`. It ports the current Sandcastle template concepts into explicit Pi-Sandcastle runtime data:
+The current default runtime pack remains at `extensions/pi-sandcastle/runtime-packs/sandcastle-templates.json` during the rename-and-seam slice. It ports Sandcastle template concepts into explicit Agent Workflows runtime data:
 
 - prompts
 - roles
 - pipelines
 - Step Provider kinds
 - providers
-- issue trackers
+- Work Sources
 - policies
 - adapter metadata
 
@@ -51,6 +51,6 @@ The schema is `extensions/pi-sandcastle/schema/execution-runtime.schema.json`.
 
 ## Config and artifacts
 
-Edit `.pi/sandcastle/config.yaml` for local overrides. Runtime inventory is compiled from the default ExecutionRuntime pack and can be overridden by repo config.
+Edit `.pi/sandcastle/config.yaml` for local overrides during this transition slice. Runtime inventory is compiled from the default Agent Workflows pack and can be overridden by repo config.
 
-Run records are written under `.pi/sandcastle/runs/` with a `kind` field (`direct-role`, `pipeline`, or `backlog-process`). Cached plan records are written under `.pi/sandcastle/plans/` and can be reused with `/backlog:process --plan <plan-id>`. Command-specific views such as `/backlog:runs` filter run records. Logs and legacy result artifacts may still appear under `.pi/sandcastle/results/` and `.pi/sandcastle/jobs/`.
+Run records are written under `.pi/sandcastle/runs/` with a `kind` field (`direct-role`, `pipeline`, or `work-process`). Cached Plan Artifacts are written under `.pi/sandcastle/plans/` and can be reused with `/work:process --plan <plan-id>`. Command-specific views such as `/work:runs` filter Run Records. Logs and legacy result artifacts may still appear under `.pi/sandcastle/results/` and `.pi/sandcastle/jobs/`.

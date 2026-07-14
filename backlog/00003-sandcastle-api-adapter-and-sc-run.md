@@ -1,7 +1,7 @@
 ---
 id: wi-00003
-title: Sandcastle API Adapter and /backlog:run
-summary: Create the direct Sandcastle API adapter and one-shot /backlog:run command.
+title: Sandcastle API Adapter and /work:run
+summary: Create the direct Sandcastle API adapter and one-shot /work:run command.
 type: work-item
 subtype: task
 lifecycle: active
@@ -35,7 +35,7 @@ The extension should stop shelling out to a Sandcastle CLI and instead resolve c
 ## Tasks
 
 - [x] Add a SandcastleRunCapability boundary that exposes run/createSandbox operations and is supplied to command handlers at composition time.
-- [x] Register /backlog:run in extensions/pi-sandcastle/index.ts and parse optional agent plus free-form prompt text deterministically.
+- [x] Register /work:run in extensions/pi-sandcastle/index.ts and parse optional agent plus free-form prompt text deterministically.
 - [x] Resolve agent defaults, model, sandbox provider, branch strategy, environment, logging path, and prompt into Sandcastle run(...) options.
 - [x] Write durable run records under .pi/sandcastle/runs with started/running/completed/failed states, timestamps, branch, commits, and log path.
 - [x] Return a user-visible run summary containing run id, final status, branch, commits, and log path.
@@ -44,16 +44,16 @@ The extension should stop shelling out to a Sandcastle CLI and instead resolve c
 ## Deliverables
 
 - Internal Sandcastle API adapter.
-- /backlog:run command.
+- /work:run command.
 - Run record creation/update behavior.
 - Tests for option resolution and run record updates.
 
 ## Acceptance Criteria
 
-- [x] After reload, /backlog:run is registered by the dev extension.
-- [x] /backlog:run resolves the default agent when omitted and accepts free-form prompt text without treating words as flags unless explicitly declared.
-- [x] /backlog:run passes resolved Sandcastle options into the injected run capability without invoking real containers or agents in tests.
-- [x] /backlog:run writes a durable run record with status, agent, prompt summary, branch, commits, log path, and timestamps.
-- [x] /backlog:run reports the run id, final status, branch, commits, and log path to the user.
+- [x] After reload, /work:run is registered by the dev extension.
+- [x] /work:run resolves the default agent when omitted and accepts free-form prompt text without treating words as flags unless explicitly declared.
+- [x] /work:run passes resolved Sandcastle options into the injected run capability without invoking real containers or agents in tests.
+- [x] /work:run writes a durable run record with status, agent, prompt summary, branch, commits, log path, and timestamps.
+- [x] /work:run reports the run id, final status, branch, commits, and log path to the user.
 - [x] Tests fail if the handler constructs Sandcastle dependencies inline instead of using the supplied capability.
 

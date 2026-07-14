@@ -304,12 +304,12 @@ function parseBacklogItem(fs, path, filePath, cwd) {
 function discoverBacklogItems(fs, path, cwd, sources) {
   const resolvedRoots = resolveSourceRoots({ cwd, path, sources });
   if (resolvedRoots.length === 0) {
-    throw new Error("No backlog source configured. Provide at least one backlog directory.");
+    throw new Error("No Work Source configured. Provide at least one Work directory.");
   }
 
   const roots = resolvedRoots.filter((root) => fs.existsSync(root));
   if (roots.length === 0) {
-    throw new Error(`No backlog source configured. Missing sources: ${resolvedRoots.map((root) => path.relative(cwd, root) || root).join(", ")}`);
+    throw new Error(`No Work Source configured. Missing sources: ${resolvedRoots.map((root) => path.relative(cwd, root) || root).join(", ")}`);
   }
 
   const files = [];
@@ -427,9 +427,9 @@ function deriveRelevantFiles(item) {
 }
 
 function formatListResult(items) {
-  if (items.length === 0) return "No backlog items matched the query.";
+  if (items.length === 0) return "No Work Items matched the query.";
 
-  const lines = ["Matching backlog items:"];
+  const lines = ["Matching Work Items:"];
   for (const item of items) {
     const dependencyNote = item.dependsOn.length ? ` dependencies=${item.dependsOn.join(", ")}` : "";
     lines.push(
@@ -486,7 +486,7 @@ export function createBacklogCapability({
   path = { basename, isAbsolute, join, relative, resolve },
   sources = DEFAULT_SOURCE_DIRS,
 } = {}) {
-  if (!cwd) throw new Error("Backlog capability requires a cwd.");
+  if (!cwd) throw new Error("Work capability requires a cwd.");
 
   function loadItems() {
     return discoverBacklogItems(fs, path, cwd, sources);
@@ -506,7 +506,7 @@ export function createBacklogCapability({
       const items = loadItems();
       const resolved = resolveBacklogItem(items, path, cwd, target);
       if (!resolved) {
-        throw new Error(`No backlog item matched '${toText(target)}'.`);
+        throw new Error(`No Work Item matched '${toText(target)}'.`);
       }
 
       const dependencyState = deriveDependencyState(resolved, items, cwd, path);
@@ -522,7 +522,7 @@ export function createBacklogCapability({
         risks,
         testingNotes,
         relevantFiles,
-        analysis: `Read-only backlog item with ${resolved.dependsOn.length} dependent link(s).`,
+        analysis: `Read-only Work Item with ${resolved.dependsOn.length} dependent link(s).`,
         text: formatInspectResult(resolved, {
           dependencyState,
           recommendedPipeline,
@@ -536,13 +536,13 @@ export function createBacklogCapability({
 }
 
 export function registerBacklogCommands(pi, { capabilityFactory = (cwd) => createBacklogCapability({ cwd }) } = {}) {
-  pi.registerCommand("backlog:list", {
-    description: "List read-only backlog items",
+  pi.registerCommand("work:list", {
+    description: "List read-only Work Items",
     handler: createBacklogCommandHandler((capability, args) => capability.list(args), capabilityFactory),
   });
 
-  pi.registerCommand("backlog:inspect", {
-    description: "Inspect a backlog item without mutating backlog state",
+  pi.registerCommand("work:inspect", {
+    description: "Inspect a Work Item without mutating source state",
     handler: createBacklogCommandHandler((capability, args) => capability.inspect(args), capabilityFactory),
   });
 }

@@ -124,7 +124,7 @@ test("backlog commands register on the extension API", async () => {
 
   assert.deepEqual(
     registered.map(({ name }) => name),
-    ["backlog:list", "backlog:inspect"],
+    ["work:list", "work:inspect"],
   );
 });
 
@@ -135,7 +135,7 @@ test("backlog list and inspect use a fake filesystem without writes", async () =
       makeItemMarkdown({
         id: "wi-00002",
         title: "Sandcastle Config Scaffolding and Validation",
-        summary: "Implement /backlog:config-raw subcommands for setup, show, get, set, reset, and validate.",
+        summary: "Implement /work:config-raw subcommands for setup, show, get, set, reset, and validate.",
         priority: "high",
         estimated: 5,
       }),
@@ -145,7 +145,7 @@ test("backlog list and inspect use a fake filesystem without writes", async () =
       makeItemMarkdown({
         id: "wi-00006",
         title: "Read-only Backlog List and Inspect",
-        summary: "Implement ephemeral /backlog:list and /backlog:inspect commands.",
+        summary: "Implement ephemeral /work:list and /work:inspect commands.",
         priority: "medium",
         estimated: 4,
         dependsOn: ["[[00002-sandcastle-config-scaffolding-and-validation]]"],
@@ -156,7 +156,7 @@ test("backlog list and inspect use a fake filesystem without writes", async () =
       makeItemMarkdown({
         id: "wi-00007",
         title: "Backlog Plan and Next Alias",
-        summary: "Implement /backlog:plan and /backlog:next as ephemeral planning commands.",
+        summary: "Implement /work:plan and /work:next as ephemeral planning commands.",
         priority: "medium",
         estimated: 4,
         dependsOn: ["[[00006-readonly-backlog-list-and-inspect]]"],
@@ -174,7 +174,7 @@ test("backlog list and inspect use a fake filesystem without writes", async () =
   const listResult = await capability.list("backlog");
   assert.equal(listResult.items.length, 3);
   assert.equal(listResult.items[0].id, "wi-00002");
-  assert.match(listResult.text, /Matching backlog items:/);
+  assert.match(listResult.text, /Matching Work Items:/);
   assert.equal(fakeFs.writes.length, 0);
 
   const inspectResult = await capability.inspect("00006");
@@ -197,7 +197,7 @@ test("backlog capability consistently uses injected path helpers", async () => {
       makeItemMarkdown({
         id: "wi-00006",
         title: "Read-only Backlog List and Inspect",
-        summary: "Implement ephemeral /backlog:list and /backlog:inspect commands.",
+        summary: "Implement ephemeral /work:list and /work:inspect commands.",
         priority: "medium",
         estimated: 4,
         dependsOn: ["[[00002-sandcastle-config-scaffolding-and-validation]]"],
@@ -213,7 +213,7 @@ test("backlog capability consistently uses injected path helpers", async () => {
   });
 
   await capability.list("backlog");
-  await assert.rejects(() => capability.inspect("missing"), /No backlog item matched/);
+  await assert.rejects(() => capability.inspect("missing"), /No Work Item matched/);
 
   assert.ok(trackedPath.calls.resolve > 0);
   assert.ok(trackedPath.calls.join > 0);
@@ -240,7 +240,7 @@ test("backlog list and inspect report clear missing-source and missing-item erro
 
   await assert.rejects(
     () => missingSourceCapability.list("anything"),
-    /No backlog source configured/,
+    /No Work Source configured/,
   );
 
   const files = new Map([
@@ -249,7 +249,7 @@ test("backlog list and inspect report clear missing-source and missing-item erro
       makeItemMarkdown({
         id: "wi-00006",
         title: "Read-only Backlog List and Inspect",
-        summary: "Implement ephemeral /backlog:list and /backlog:inspect commands.",
+        summary: "Implement ephemeral /work:list and /work:inspect commands.",
         priority: "medium",
         estimated: 4,
         dependsOn: ["[[00002-sandcastle-config-scaffolding-and-validation]]"],
@@ -264,5 +264,5 @@ test("backlog list and inspect report clear missing-source and missing-item erro
     sources: ["backlog"],
   });
 
-  await assert.rejects(() => capability.inspect("missing"), /No backlog item matched/);
+  await assert.rejects(() => capability.inspect("missing"), /No Work Item matched/);
 });

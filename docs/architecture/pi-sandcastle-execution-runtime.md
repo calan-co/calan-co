@@ -1,13 +1,13 @@
-# Pi-Sandcastle execution runtime
+# Agent Workflows execution runtime
 
 ## Decision
 
-Pi-Sandcastle should define a Pi-native, deterministic workflow model and use Sandcastle as an execution-runtime adapter, not as the source of product-level workflow semantics.
+Agent Workflows defines a host-portable, deterministic workflow model and uses Sandcastle as an execution-runtime adapter, not as the source of product-level workflow semantics.
 
 In this split:
 
-- **Pi extension layer** owns slash commands, completions, TUI config editing, schema validation, run records, state freshness, and user-facing formatting.
-- **Pi-Sandcastle runtime model** owns typed definitions for roles, prompts, pipelines, issue trackers, branch policy, image policy, completion policy, and execution records.
+- **Pi extension layer** owns slash commands, completions, TUI config editing, schema validation, state freshness, and user-facing formatting.
+- **Agent Workflows runtime model** owns typed definitions for roles, prompts, pipelines, Work Sources, branch policy, image policy, completion policy, and execution records.
 - **Sandcastle adapter** owns the low-level primitive: run this agent provider with this prompt in this sandbox/worktree and return branch, commits, logs, and errors.
 
 This preserves the strengths observed from Sandcastle AFK use—robust sandboxed execution, extensibility, tailored prompts, and resilient post-processing—while removing the recurring init/post-processing friction from the user-facing model.
@@ -16,11 +16,11 @@ This preserves the strengths observed from Sandcastle AFK use—robust sandboxed
 
 All durable execution state is a unified Run Record under `.pi/sandcastle/runs/`. Records carry a `kind` discriminator:
 
-- `direct-role` for `/backlog:run` ad hoc role execution.
-- `pipeline` for `/backlog:pipeline` executions, including per-step records.
-- `backlog-process` for `/backlog:process` records with query, resolved items, selected pipeline, branches, logs, and resume metadata.
+- `direct-role` for `/work:run` ad hoc role execution.
+- `pipeline` for `/work:pipeline` executions, including per-step records.
+- `work-process` for `/work:process` records with query, resolved Work Items, selected pipeline, branches, logs, and resume metadata.
 
-Command-specific views filter these Run Records instead of maintaining separate lifecycle stores. Legacy `.pi/sandcastle/backlog-runs/` and `.pi/sandcastle/results/` backlog records may be read for migration, but new backlog process writes target the unified runs directory.
+Command-specific views filter these Run Records instead of maintaining separate lifecycle stores. Legacy `.pi/sandcastle/backlog-runs/` and `.pi/sandcastle/results/` records may be read for migration, but new Work Process writes target the unified runs directory.
 
 ## Non-goals
 
@@ -34,27 +34,27 @@ Command-specific views filter these Run Records instead of maintaining separate 
 The stable, reusable, overrideable objects are:
 
 1. `runtimeVersion`
-   - Version of the Pi-Sandcastle runtime contract.
+   - Version of the Agent Workflows runtime contract.
    - Enables migration independent of the extension package version.
 
 2. `metadata`
    - Human-readable pack identity, provenance, and compatibility notes.
 
 3. `defaults`
-   - Global fallbacks for sandbox, agent provider, model, issue tracker, image policy, branch policy, and completion policy.
+   - Global fallbacks for sandbox, agent provider, model, Work Source, image policy, branch policy, and completion policy.
 
 4. `providers`
-   - Named adapters that Pi-Sandcastle can resolve.
+   - Named adapters that Agent Workflows can resolve.
    - Includes `agentProviders` and `sandboxProviders`.
    - Provider entries describe capabilities and defaults; they do not execute workflows themselves.
 
-5. `issueTrackers`
-   - Typed issue/backlog adapters such as `github-issues`, `beads`, `doc-vader`, or `custom`.
+5. `workSources`
+   - Typed Work Source adapters such as `github-issues`, `beads`, `doc-vader`, or `custom`.
    - Replaces template placeholder substitution with an explicit contract.
 
 6. `roles`
    - Reusable named execution identities.
-   - Roles are globally scoped by default because they are reused across pipelines and surfaced in `/backlog:run`.
+   - Roles are globally scoped by default because they are reused across pipelines and surfaced in `/work:run`.
    - Pipelines may override agent settings per step without mutating the shared agent.
 
 7. `prompts`
@@ -63,7 +63,7 @@ The stable, reusable, overrideable objects are:
 
 8. `pipelines`
    - User-facing workflows composed from prompt+agent execution steps and deterministic control steps.
-   - Pipelines are the primary command targets for `/backlog:pipeline` and `/backlog:process`.
+   - Pipelines are the primary command targets for `/work:pipeline` and `/work:process`.
 
 9. `policies`
    - Reusable named policies for branches, images, concurrency, retry, completion, and post-processing.
@@ -71,7 +71,7 @@ The stable, reusable, overrideable objects are:
 
 10. `adapters`
     - Runtime adapter bindings, initially including `sandcastle`.
-    - This is the explicit seam that lets Pi-Sandcastle keep Sandcastle now and replace or supplement it later.
+    - This is the explicit seam that lets Agent Workflows keep Sandcastle now and replace or supplement it later.
 
 ## Role scoping
 
@@ -112,8 +112,8 @@ Built-in step kinds are unqualified. Custom Step Providers may register provider
 ```yaml
 runtimeVersion: 1
 metadata:
-  id: pi-sandcastle.default
-  label: Pi-Sandcastle Default Runtime
+  id: agent-workflows.default
+  label: Agent Workflows Default Runtime
   inspiredBy:
     - sandcastle@0.12.0 templates/simple-loop
     - sandcastle@0.12.0 templates/parallel-planner-with-review
@@ -122,7 +122,7 @@ defaults:
   agentProvider: pi
   sandboxProvider: podman
   model: Agent Default
-  issueTracker: doc-vader
+  workSource: doc-vader
   imagePolicy: repo-default
   branchPolicy: branch-per-run
   completionPolicy: promise-complete
@@ -144,11 +144,11 @@ providers:
     no-sandbox:
       adapter: sandcastle
 
-issueTrackers:
+workSources:
   doc-vader:
-    kind: filesystem-backlog
-    listCommand: /backlog:list
-    inspectCommand: /backlog:inspect
+    kind: filesystem-work-source
+    listCommand: /work:list
+    inspectCommand: /work:inspect
 
 roles:
   planner:
@@ -268,21 +268,21 @@ interface ExecutionAdapter {
 }
 ```
 
-The Sandcastle implementation maps `runRole` onto `@ai-hero/sandcastle.run()` with provider and sandbox constructors. It must not know about `/backlog:*`, TUI state, config editing, or pipeline planning.
+The Sandcastle implementation maps `runRole` onto `@ai-hero/sandcastle.run()` with provider and sandbox constructors. It must not know about `/work:*`, TUI state, config editing, or pipeline planning.
 
 ## Migration path
 
 1. Freeze current config and command surface at `v0.1.0`.
 2. Add `execution-runtime.schema.json` as the new contract for packs.
-3. Convert current Sandcastle-inspired packs into explicit Pi-Sandcastle runtime YAML fixtures.
+3. Convert current Sandcastle-inspired packs into explicit Agent Workflows runtime YAML fixtures.
 4. Compile runtime pipelines into the existing `executePipeline` path.
-5. Move prompt and policy editing into `/backlog:config` once shadow-model editing can operate on runtime objects.
+5. Move prompt and policy editing into `/work:config` once shadow-model editing can operate on runtime objects.
 6. Keep the Sandcastle CLI scaffold path as compatibility-only until no command requires it.
 
 ## Open questions
 
 - Should `prompts` remain top-level for all users, or should simple users only see prompt references inside pipelines?
 - Should `fanOut` be a first-class pipeline step or compiled from a higher-level `matrix` field?
-- Should `issueTrackers` include command strings, TypeScript adapter IDs, or both?
+- Should `workSources` include command strings, TypeScript adapter IDs, or both?
 - Should branch policies be globally reusable or mostly pipeline-owned?
 - What is the minimum runtime fixture set needed before replacing template-pack derivation?

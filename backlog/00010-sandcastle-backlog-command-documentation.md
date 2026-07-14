@@ -41,8 +41,8 @@ The documentation should make the deterministic parsing rules, read-only versus 
 
 ## Tasks
 
-- [x] Document the implemented /backlog:config-raw, /backlog:run, /backlog:pipeline, and /sc run-management commands with examples tied to the actual extension behavior.
-- [x] Document /backlog:list, /backlog:inspect, /backlog:plan, /backlog:next, /backlog:process, and backlog run-management commands.
+- [x] Document the implemented /work:config-raw, /work:run, /work:pipeline, and /sc run-management commands with examples tied to the actual extension behavior.
+- [x] Document /work:list, /work:inspect, /work:plan, /work:next, /work:process, and backlog run-management commands.
 - [x] Document deterministic parsing rules, especially that --pipeline/-p is the only pipeline selector.
 - [x] Document read-only versus durable commands and where run records/logs are stored.
 - [x] Document setup, validation, troubleshooting, and the boundary that PR lifecycle commands are future /pr:* work.
@@ -56,7 +56,7 @@ The documentation should make the deterministic parsing rules, read-only versus 
 
 ## Acceptance Criteria
 
-- [x] Docs list every registered /backlog:* and /backlog:* command with one working example each.
+- [x] Docs list every registered /work:* and /work:* command with one working example each.
 - [x] Docs explain read-only versus durable commands and state that durable state starts at process/resume or direct Sandcastle runs.
 - [x] Docs explain deterministic parsing rules and show --pipeline/-p examples.
 - [x] Docs identify run record and log locations used by the implementation.

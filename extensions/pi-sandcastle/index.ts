@@ -1,5 +1,5 @@
 // Pi Sandcastle extension: Pi-native delegation UI backed by Sandcastle sandboxes.
-// Commands: /backlog:* command surfaces backed by a Pi-Sandcastle execution runtime adapter.
+// Commands: /work:* command surfaces backed by a Pi-Sandcastle execution runtime adapter.
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { SelectList as PiSelectList, matchesKey } from "@earendil-works/pi-tui";
@@ -144,7 +144,7 @@ interface BacklogPlanResult {
 
 interface BacklogProcessRecord {
 	id: string;
-	kind?: "backlog-process";
+	kind?: "work-process";
 	query: string;
 	resolvedItems: BacklogItem[];
 	pipeline: string;
@@ -194,6 +194,7 @@ interface SandboxImageDeps {
 }
 
 interface PiSandcastleDependencies {
+	work?: BacklogProcessPlanDeps;
 	backlog?: BacklogProcessPlanDeps;
 	pipeline?: PipelineExecutionDeps;
 	sandcastle?: SandcastleRunCapability;
@@ -238,7 +239,7 @@ const PIPELINE_RUNS_DIR = RUNS_DIR;
 const BACKLOG_RUNS_DIR = RUNS_DIR;
 const DIRECT_ROLE_RUN_KIND = "direct-role";
 const PIPELINE_RUN_KIND = "pipeline";
-const BACKLOG_PROCESS_RUN_KIND = "backlog-process";
+const BACKLOG_PROCESS_RUN_KIND = "work-process";
 const EDITOR_PREF_PATH = `${CONFIG_DIR}/editor`;
 const SCAFFOLD_STATE_PATH = `${CONFIG_DIR}/scaffold-state.json`;
 const CONFIG_SCHEMA_PATH = new URL("./schema/sandcastle-config.schema.json", import.meta.url);
@@ -980,7 +981,7 @@ export function parseBacklogProcessArgs(raw: string): { query: string; pipeline?
 		if (token === "--pipeline" || token === "-p") {
 			const value = tokens[i + 1];
 			if (!value || value.startsWith("-")) {
-				throw new Error(`Missing value for ${token}. Use /backlog:process <query> --pipeline <pipeline>.`);
+				throw new Error(`Missing value for ${token}. Use /work:process <query> --pipeline <pipeline>.`);
 			}
 			pipeline = value;
 			i++;
@@ -989,27 +990,27 @@ export function parseBacklogProcessArgs(raw: string): { query: string; pipeline?
 		if (token.startsWith("--pipeline=")) {
 			pipeline = token.slice("--pipeline=".length);
 			if (!pipeline) {
-				throw new Error("Missing value for --pipeline. Use /backlog:process <query> --pipeline <pipeline>.");
+				throw new Error("Missing value for --pipeline. Use /work:process <query> --pipeline <pipeline>.");
 			}
 			continue;
 		}
 		if (token.startsWith("-p=")) {
 			pipeline = token.slice(3);
 			if (!pipeline) {
-				throw new Error("Missing value for -p. Use /backlog:process <query> -p <pipeline>.");
+				throw new Error("Missing value for -p. Use /work:process <query> -p <pipeline>.");
 			}
 			continue;
 		}
 		if (token === "--plan") {
 			const value = tokens[i + 1];
-			if (!value || value.startsWith("-")) throw new Error("Missing value for --plan. Use /backlog:process --plan <plan-id>.");
+			if (!value || value.startsWith("-")) throw new Error("Missing value for --plan. Use /work:process --plan <plan-id>.");
 			planId = value;
 			i++;
 			continue;
 		}
 		if (token.startsWith("--plan=")) {
 			planId = token.slice("--plan=".length);
-			if (!planId) throw new Error("Missing value for --plan. Use /backlog:process --plan <plan-id>.");
+			if (!planId) throw new Error("Missing value for --plan. Use /work:process --plan <plan-id>.");
 			continue;
 		}
 		queryTokens.push(token);
@@ -1054,7 +1055,7 @@ function writeBacklogPlanRecord(cwd: string, record: any): string {
 
 function readBacklogPlanRecord(cwd: string, planId: string): any {
 	const path = join(cwd, PLANS_DIR, `${planId}.json`);
-	if (!existsSync(path)) throw new Error(`Unknown backlog plan '${planId}'.`);
+	if (!existsSync(path)) throw new Error(`Unknown Work Plan '${planId}'.`);
 	return JSON.parse(readFileSync(path, "utf8"));
 }
 
@@ -1139,8 +1140,8 @@ async function defaultPlanBacklogProcessing(cwd: string, query: string): Promise
 	const fallbackItems = allItems.slice(0, 1);
 	const items = matchingItems.length > 0 ? matchingItems : fallbackItems;
 	const rationale = items.length > 1
-		? "The first recommended iteration contains independent backlog items that can run in parallel."
-		: "The first recommended iteration focuses on the best matching backlog item.";
+		? "The first recommended iteration contains independent Work Items that can run in parallel."
+		: "The first recommended iteration focuses on the best matching Work Item.";
 	return {
 		query,
 		iterations: [
@@ -2052,7 +2053,7 @@ async function inspectImageCreated(cwd: string, provider: "docker" | "podman", i
 function missingSandcastleCliScaffoldMessage(): string {
 	return [
 		"Execution runtime scaffold is missing: .sandcastle/.",
-		"Initialize it with /backlog:build-image or save config with rebuild enabled. The extension runs unattended npx @ai-hero/sandcastle init using values from .pi/sandcastle/config.yaml.",
+		"Initialize it with /work:build-image or save config with rebuild enabled. The extension runs unattended npx @ai-hero/sandcastle init using values from .pi/sandcastle/config.yaml.",
 	].join("\n");
 }
 
@@ -2183,7 +2184,7 @@ async function quietlyBuildConfiguredImage(cwd: string, cfg: Partial<SandcastleC
 	try {
 		await buildSandboxImageOnce(cwd, provider, imageName, deps?.buildImage || buildSandboxImage);
 	} catch {
-		// Silent by design: config saves should not become image-build UX unless the user explicitly runs /backlog:build-image.
+		// Silent by design: config saves should not become image-build UX unless the user explicitly runs /work:build-image.
 	}
 }
 
@@ -2223,22 +2224,22 @@ function registerScRunCommand(
 	sandcastle: SandcastleRunCapability,
 	deps: SandcastleRunDeps,
 ) {
-	pi.registerCommand("backlog:run", {
-		description: "Run one configured backlog execution agent: /backlog:run [agent] [prompt]",
+	pi.registerCommand("work:run", {
+		description: "Run one configured Role: /work:run [role] [prompt]",
 		getArgumentCompletions: (prefix: string) => completionItems(listRuntimeAgents(loadExecutionRuntimePack()).map((agent) => ({ value: agent.name, label: agent.name, description: agent.description })), tokenAfterLastSpace(prefix)),
 		handler: async (args, ctx) => {
 			if ((deps as any).isConfigImageRebuildInProgress?.()) {
-				ctx.ui.notify("The sandbox image is being rebuilt after config changes. Retry /backlog:run when the new image is built.", "warning");
+				ctx.ui.notify("The sandbox image is being rebuilt after config changes. Retry /work:run when the new image is built.", "warning");
 				return;
 			}
 			const cfg = await loadConfig(ctx.cwd);
 			const { agentName, prompt } = resolveRunInvocation(args, cfg);
 			if (!agentName) {
-				ctx.ui.notify("No backlog execution agents are configured. Run /backlog:config init, then edit .pi/sandcastle/config.yaml.", "error");
+				ctx.ui.notify("No Roles are configured. Run /work:config init, then edit .pi/sandcastle/config.yaml.", "error");
 				return;
 			}
 			if (!prompt) {
-				ctx.ui.notify("Usage: /backlog:run [agent] <prompt>", "error");
+				ctx.ui.notify("Usage: /work:run [agent] <prompt>", "error");
 				return;
 			}
 
@@ -2273,7 +2274,7 @@ function registerScRunCommand(
 
 			try {
 				await ensureSandboxImage(ctx.cwd, runSettings.sandbox, deps.image, (reason, imageName) => {
-					ctx.ui.notify(`Execution image ${imageName} is ${reason}; rebuilding before /backlog:run.`, "info");
+					ctx.ui.notify(`Execution image ${imageName} is ${reason}; rebuilding before /work:run.`, "info");
 				}, cfg);
 				const result = await sandcastle.run({
 					agent: sandcastle.makeAgent(runSettings.model, runSettings.provider),
@@ -3187,7 +3188,7 @@ export default function piSandcastle(
 	let widgetCtx: { ui: { setWidget: (id: string, lines: string[] | undefined) => void; notify: (message: string, type?: string) => void } } | undefined;
 	let configImageRebuild: Promise<void> | undefined;
 	const sandcastle = deps.sandcastle ?? createDefaultSandcastleRunCapability();
-	const backlogDeps = deps.backlog || {};
+	const backlogDeps = deps.work || deps.backlog || {};
 	const isConfigImageRebuildInProgress = () => !!configImageRebuild;
 	const startConfigImageRebuild = (ctx: any, cfg: SandcastleConfig) => {
 		const provider = imageProviderForSandbox(cfg.defaultSandbox) || "docker";
@@ -3210,40 +3211,40 @@ export default function piSandcastle(
 	}
 
 	function helpText(): string {
-		return `Backlog execution commands
+		return `Agent Workflows commands
 
 Setup and configuration:
-  /backlog:config [show|init|edit|editor|get|set|reset|validate]
+  /work:config [show|init|edit|editor|get|set|reset|validate]
     Open the friendly config TUI, or run raw config utility actions when arguments are supplied.
 
 Execution utilities:
-  /backlog:build-image [docker|podman]
+  /work:build-image [docker|podman]
     Build the repo execution sandbox image.
 
-  /backlog:run [agent] <prompt>
-    Run one configured execution agent directly.
+  /work:run [role] <prompt>
+    Run one configured Role directly.
 
-  /backlog:pipeline <pipeline> [prompt]
-    Run a fixed-domain runtime pipeline directly.
+  /work:pipeline <pipeline> [prompt]
+    Run a fixed-domain runtime Pipeline directly.
 
-Backlog views and processing:
-  /backlog:list [query]
-    List backlog items without mutation.
+Work views and processing:
+  /work:list [query]
+    List Work Items without mutation.
 
-  /backlog:inspect <item-id>
-    Inspect one backlog item without mutation.
+  /work:inspect <item-id>
+    Inspect one Work Item without mutation.
 
-  /backlog:plan [query] --iterations N
-    Plan read-only backlog iterations.
+  /work:plan [query] --iterations N
+    Plan read-only Work iterations.
 
-  /backlog:next [query]
-    Plan the next backlog iteration.
+  /work:next [query]
+    Plan the next Work iteration.
 
-  /backlog:process [query] --pipeline <pipeline>
-    Start durable backlog processing through the execution runtime adapter.
+  /work:process [query] --pipeline <pipeline>
+    Start durable Work processing through the execution runtime adapter.
 
-  /backlog:runs|status|resume
-    Manage durable backlog processing runs.`;
+  /work:runs|status|resume
+    Manage durable Work Process runs.`;
 	}
 
 	function getBacklogResumeCapability(ctx: any): ((record: unknown) => Promise<unknown> | unknown) | undefined {
@@ -3266,11 +3267,11 @@ Backlog views and processing:
 		if (backlogDeps.planPhase) return backlogDeps.planPhase(ctx.cwd, args);
 		const cfg = await loadConfig(ctx.cwd);
 		const agent = cfg.agents.planner ? "planner" : Object.keys(cfg.agents)[0];
-		if (!agent) throw new Error("No planner role configured. Run /backlog:config and configure a planner role.");
+		if (!agent) throw new Error("No planner role configured. Run /work:config and configure a planner role.");
 		const readyOutput = backlogDeps.ready
 			? await backlogDeps.ready(ctx.cwd, args)
 			: (await runProcess(ctx.cwd, "dv", ["work", "ready"])).stdout.trim();
-		const task = `Run the backlog planning phase for this repository.\n\nRequested plan arguments: ${args || "(none)"}\n\nReady work input from Doc-Vader:\n${readyOutput}\n\nReturn an authoritative plan with iterations, item ids, risk rationale, recommended pipeline per iteration, and any HITL or dependency constraints. End with <promise>COMPLETE</promise>.`;
+		const task = `Run the Work planning phase for this repository.\n\nRequested plan arguments: ${args || "(none)"}\n\nReady Work input from the configured Work Source:\n${readyOutput}\n\nReturn an authoritative plan with iterations, item ids, risk rationale, recommended pipeline per iteration, and any HITL or dependency constraints. End with <promise>COMPLETE</promise>.`;
 		const run = await dispatch(ctx.cwd, agent, task, ctx);
 		await new Promise<void>((resolve) => run.proc?.on("close", () => resolve()));
 		if (run.status !== "done") throw new Error(`Planner role failed: ${run.lastLine}`);
@@ -3282,7 +3283,7 @@ Backlog views and processing:
 			const effectiveArgs = overrides?.iterations && !/--iterations(?:=|\s|$)/.test(args) ? `${args} --iterations=${overrides.iterations}`.trim() : args;
 			const plan = await runPlannerPhase(effectiveArgs, ctx);
 			const createdAt = getBacklogTimestamp(backlogDeps.now);
-			const record = { id: createBacklogPlanId(createdAt), kind: "backlog-plan", createdAt, args: effectiveArgs, plan };
+			const record = { id: createBacklogPlanId(createdAt), kind: "work-plan", createdAt, args: effectiveArgs, plan };
 			const recordPath = writeBacklogPlanRecord(ctx.cwd, record);
 			ctx.ui.notify(`${formatAuthoritativePlan(plan)}\n\nCached plan: ${record.id}\nRecord: ${recordPath}`, "info");
 		} catch (error) {
@@ -3304,7 +3305,7 @@ Backlog views and processing:
 	async function dispatch(cwd: string, agentName: string, task: string, ctx?: any): Promise<RunState> {
 		const cfg = await loadConfig(cwd);
 		const agent = cfg.agents[agentName];
-		if (!agent) throw new Error(`Unknown execution agent '${agentName}'. Run /backlog:config show to inspect configured agents.`);
+		if (!agent) throw new Error(`Unknown execution agent '${agentName}'. Run /work:config show to inspect configured agents.`);
 		const id = `${Date.now().toString(36)}-${randomUUID().slice(0, 8)}-${agentName}`;
 		const resultPath = join(cwd, RESULTS_DIR, `${id}.json`);
 		const logPath = join(cwd, RESULTS_DIR, `${id}.log`);
@@ -3406,15 +3407,15 @@ Backlog views and processing:
 	async function delegateDefault(cwd: string, task: string, ctx?: any): Promise<void> {
 		const cfg = await loadConfig(cwd);
 		const agent = cfg.agents.planner ? "planner" : Object.keys(cfg.agents)[0];
-		if (!agent) throw new Error("No execution agents configured. Run /backlog:config init, then edit .pi/sandcastle/config.yaml.");
+		if (!agent) throw new Error("No execution agents configured. Run /work:config init, then edit .pi/sandcastle/config.yaml.");
 		await dispatch(cwd, agent, task, ctx);
 	}
 
 	async function delegateOpenWork(cwd: string, focus: string, ctx?: any): Promise<void> {
-		const task = `Inspect available open work for this repository and recommend what to pick up next.\n\nLook for, in order when available:\n1. GitHub issues and PRs via gh (for example: gh issue list, gh pr list).\n2. Local backlog/work-item directories, docs, TODO/FIXME comments, and project planning files.\n3. Failing or skipped tests that indicate unfinished work.\n\nFocus: ${focus || "general project work"}\n\nOutput:\n- Ranked open work items with source/link/file evidence.\n- Suggested first item to delegate next.\n- A ready-to-run /backlog:run command for the top item.\n\nDo not modify files. End with <promise>COMPLETE</promise>.`;
+		const task = `Inspect available open work for this repository and recommend what to pick up next.\n\nLook for, in order when available:\n1. GitHub issues and PRs via gh (for example: gh issue list, gh pr list).\n2. Local backlog/work-item directories, docs, TODO/FIXME comments, and project planning files.\n3. Failing or skipped tests that indicate unfinished work.\n\nFocus: ${focus || "general project work"}\n\nOutput:\n- Ranked open work items with source/link/file evidence.\n- Suggested first item to delegate next.\n- A ready-to-run /work:run command for the top item.\n\nDo not modify files. End with <promise>COMPLETE</promise>.`;
 		const cfg = await loadConfig(cwd);
 		const agent = cfg.agents.planner ? "planner" : Object.keys(cfg.agents)[0];
-		if (!agent) throw new Error("No execution agents configured. Run /backlog:config init, then edit .pi/sandcastle/config.yaml.");
+		if (!agent) throw new Error("No execution agents configured. Run /work:config init, then edit .pi/sandcastle/config.yaml.");
 		await dispatch(cwd, agent, task, ctx);
 	}
 
@@ -3437,7 +3438,7 @@ Backlog views and processing:
 	function selectAgentForPipeline(pipeline: string, cfg: SandcastleConfig): string {
 		if (!cfg.pipelines[pipeline]) {
 			const available = Object.keys(cfg.pipelines).sort();
-			throw new Error(`No configured backlog pipeline '${pipeline}'. Run /backlog:config init to hydrate default pipelines or choose one of: ${available.length ? available.join(", ") : "(none configured)"}.`);
+			throw new Error(`No configured Work pipeline '${pipeline}'. Run /work:config init to hydrate default pipelines or choose one of: ${available.length ? available.join(", ") : "(none configured)"}.`);
 		}
 		switch (pipeline) {
 			case "review":
@@ -3463,7 +3464,7 @@ Backlog views and processing:
 		item: BacklogItem,
 		ctx?: any,
 	): Promise<BacklogItemDispatchResult> {
-		const prompt = `Process backlog item ${item.id}: ${item.title}\n\nPipeline: ${record.pipeline}\nQuery: ${record.query}\n\nSource: ${item.sourcePath}\n${item.summary ? `\nSummary: ${item.summary}\n` : "\n"}\nDo not modify unrelated work. End with <promise>COMPLETE</promise>.`;
+		const prompt = `Process Work Item ${item.id}: ${item.title}\n\nPipeline: ${record.pipeline}\nQuery: ${record.query}\n\nSource: ${item.sourcePath}\n${item.summary ? `\nSummary: ${item.summary}\n` : "\n"}\nDo not modify unrelated work. End with <promise>COMPLETE</promise>.`;
 		const run = await dispatch(cwd, agentName, prompt, ctx);
 		await new Promise<void>((resolve) => run.proc?.once("close", () => resolve()));
 		return { branch: run.branch, logPath: run.logPath, status: run.status === "done" ? "done" : "error" };
@@ -3518,7 +3519,7 @@ Backlog views and processing:
 		}
 
 		const runtimePrompt = [
-			`Backlog process ${record.id}`,
+			`Work process ${record.id}`,
 			`Pipeline: ${record.pipeline}`,
 			`Query: ${record.query || "(none)"}`,
 			`Parallel requested: ${parallel ? "yes" : "no"}`,
@@ -3550,7 +3551,7 @@ Backlog views and processing:
 			const agentLines = Object.entries(cfg.agents).map(([name, agent]) => `- ${name}: ${agent?.description || "configured delegation agent"}`).join("\n");
 			if (!agentLines) return;
 			return {
-				systemPrompt: `${event.systemPrompt}\n\n## Pi Sandcastle delegation mode\nAvailable agents:\n${agentLines}\n\nPrefer delegate_agent for delegable research, implementation, review, and AFK work. Dispatch prompts must be self-contained and include expected output/artifacts. Use /backlog:list and /backlog:inspect to inspect work, /backlog:run to start agent work, and /backlog:runs to inspect progress.`,
+				systemPrompt: `${event.systemPrompt}\n\n## Pi Sandcastle delegation mode\nAvailable agents:\n${agentLines}\n\nPrefer delegate_agent for delegable research, implementation, review, and AFK work. Dispatch prompts must be self-contained and include expected output/artifacts. Use /work:list and /work:inspect to inspect work, /work:run to start agent work, and /work:runs to inspect progress.`,
 			};
 		} catch {
 			return;
@@ -3562,19 +3563,19 @@ Backlog views and processing:
 	});
 
 
-	pi.registerCommand("backlog:build-image", {
-		description: "Build the repo's execution sandbox image: /backlog:build-image [docker|podman]",
+	pi.registerCommand("work:build-image", {
+		description: "Build the repo's execution sandbox image: /work:build-image [docker|podman]",
 		getArgumentCompletions: (prefix: string) => completionItems(["docker", "podman"], tokenAfterLastSpace(prefix)),
 		handler: async (args, ctx) => {
 			if (isConfigImageRebuildInProgress()) {
-				ctx.ui.notify("A sandbox image rebuild is already running. Retry /backlog:build-image after it completes.", "warning");
+				ctx.ui.notify("A sandbox image rebuild is already running. Retry /work:build-image after it completes.", "warning");
 				return;
 			}
 			const providerArg = args.trim().split(/\s+/).filter(Boolean)[0] as "docker" | "podman" | undefined;
 			const cfg = await loadConfig(ctx.cwd).catch(() => ({ defaultSandbox: DEFAULT_SANDBOX, prompts: {}, agents: {}, chains: {}, pipelines: {} }) as SandcastleConfig);
 			const provider = providerArg || imageProviderForSandbox(cfg.defaultSandbox) || "docker";
 			if (provider !== "docker" && provider !== "podman") {
-				ctx.ui.notify("Usage: /backlog:build-image [docker|podman]", "error");
+				ctx.ui.notify("Usage: /work:build-image [docker|podman]", "error");
 				return;
 			}
 			const imageName = defaultSandcastleImageName(ctx.cwd, cfg.imageNamePattern);
@@ -3590,11 +3591,11 @@ Backlog views and processing:
 		},
 	});
 
-	pi.registerCommand("backlog:config", {
-		description: "Open the friendly backlog/Backlog execution configuration BIOS",
+	pi.registerCommand("work:config", {
+		description: "Open the friendly Agent Workflows configuration BIOS",
 		handler: async (_args, ctx) => {
 			if (ctx.mode !== "tui" || !ctx.ui?.custom) {
-				ctx.ui.notify("/backlog:config requires TUI mode. Use /backlog:config-raw for terminal commands.", "error");
+				ctx.ui.notify("/work:config requires TUI mode. Use /work:config-raw for terminal commands.", "error");
 				return;
 			}
 			const action = await showBacklogConfigTui(ctx);
@@ -3681,8 +3682,8 @@ Backlog views and processing:
 		},
 	});
 
-	pi.registerCommand("backlog:config-raw", {
-		description: "Show, init, edit, reset, or validate backlog execution config",
+	pi.registerCommand("work:config-raw", {
+		description: "Show, init, edit, reset, or validate Agent Workflows config",
 		getArgumentCompletions: (prefix: string) => scConfigCompletionItems(prefix),
 		handler: async (args, ctx) => {
 			const input = args.trim();
@@ -3698,7 +3699,7 @@ Backlog views and processing:
 						const overwrite = rest.includes("--force") || rest.includes("--overwrite");
 						if (existsSync(join(ctx.cwd, CONFIG_PATH)) && !overwrite) {
 							ensureScaffold(ctx.cwd, { hydrate: false });
-							ctx.ui.notify(`${CONFIG_PATH} already exists. Use /backlog:config-raw init --force to overwrite it with defaults.`, "warning");
+							ctx.ui.notify(`${CONFIG_PATH} already exists. Use /work:config-raw init --force to overwrite it with defaults.`, "warning");
 							break;
 						}
 						const result = ensureScaffold(ctx.cwd, { overwrite, hydrate: false });
@@ -3722,7 +3723,7 @@ Backlog views and processing:
 							});
 							ctx.ui.notify(exitCode === 0 ? `Edited ${CONFIG_PATH}.` : `Editor exited with code ${exitCode}.`, exitCode === 0 ? "success" : "error");
 						} else {
-							ctx.ui.notify(`Open ${configPath} in your editor, or run in TUI mode for /backlog:config edit.`, "info");
+							ctx.ui.notify(`Open ${configPath} in your editor, or run in TUI mode for /work:config edit.`, "info");
 						}
 						break;
 					}
@@ -3733,13 +3734,13 @@ Backlog views and processing:
 							break;
 						}
 						setPreferredEditor(ctx.cwd, editor);
-						ctx.ui.notify(`Preferred Backlog execution config editor set to: ${editor}`, "success");
+						ctx.ui.notify(`Preferred Agent Workflows config editor set to: ${editor}`, "success");
 						break;
 					}
 					case "get": {
 						const path = rest.shift();
 						if (!path) {
-							ctx.ui.notify("Usage: /backlog:config get <path>", "error");
+							ctx.ui.notify("Usage: /work:config get <path>", "error");
 							break;
 						}
 						const cfg = await loadConfig(ctx.cwd);
@@ -3755,7 +3756,7 @@ Backlog views and processing:
 						const path = rest.shift();
 						const rawValue = rest.join(" ");
 						if (!path || !rawValue) {
-							ctx.ui.notify("Usage: /backlog:config set <path> <value>", "error");
+							ctx.ui.notify("Usage: /work:config set <path> <value>", "error");
 							break;
 						}
 						if (!supportedConfigPath(path)) {
@@ -3792,12 +3793,12 @@ Backlog views and processing:
 							cfg = { prompts: {}, agents: {}, chains: {}, pipelines: {} };
 						}
 						const issues = validateConfig(ctx.cwd, cfg);
-						if (issues.length) ctx.ui.notify(`Backlog execution config validation failed:\n- ${issues.join("\n- ")}`, "error");
-						else ctx.ui.notify("Backlog execution config validation passed.", "success");
+						if (issues.length) ctx.ui.notify(`Agent Workflows config validation failed:\n- ${issues.join("\n- ")}`, "error");
+						else ctx.ui.notify("Agent Workflows config validation passed.", "success");
 						break;
 					}
 					default:
-						ctx.ui.notify(`Unknown /backlog:config subcommand '${subcommand}'. Use show, init, edit, editor, get, set, reset, or validate.`, "error");
+						ctx.ui.notify(`Unknown /work:config subcommand '${subcommand}'. Use show, init, edit, editor, get, set, reset, or validate.`, "error");
 				}
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -3806,17 +3807,17 @@ Backlog views and processing:
 		},
 	});
 
-	pi.registerCommand("backlog:pipeline", {
-		description: "Run a fixed-domain pipeline: /backlog:pipeline <pipeline> [prompt]",
+	pi.registerCommand("work:pipeline", {
+		description: "Run a fixed-domain pipeline: /work:pipeline <pipeline> [prompt]",
 		getArgumentCompletions: (prefix: string) => pipelineCompletionItems(tokenAfterLastSpace(prefix)),
 		handler: async (args, ctx) => {
 			if (isConfigImageRebuildInProgress()) {
-				ctx.ui.notify("The sandbox image is being rebuilt after config changes. Retry /backlog:pipeline when the new image is built.", "warning");
+				ctx.ui.notify("The sandbox image is being rebuilt after config changes. Retry /work:pipeline when the new image is built.", "warning");
 				return;
 			}
 			const { pipeline, prompt } = parsePipelineCommandArgs(args);
 			if (!pipeline) {
-				ctx.ui.notify("Usage: /backlog:pipeline <pipeline> [prompt]", "error");
+				ctx.ui.notify("Usage: /work:pipeline <pipeline> [prompt]", "error");
 				return;
 			}
 			try {
@@ -3832,8 +3833,8 @@ Backlog views and processing:
 		},
 	});
 
-	pi.registerCommand("backlog:process", {
-		description: "Start durable backlog processing: /backlog:process [query] --pipeline <pipeline>",
+	pi.registerCommand("work:process", {
+		description: "Start durable Work processing: /work:process [query] --pipeline <pipeline>",
 		getArgumentCompletions: (prefix: string) => {
 			const pipelineMatch = prefix.match(/(?:^|\s)(?:--pipeline\s+|-p\s+)(\S*)$/);
 			if (pipelineMatch) return pipelineCompletionItems(pipelineMatch[1] || "");
@@ -3841,7 +3842,7 @@ Backlog views and processing:
 		},
 		handler: async (args, ctx) => {
 			if (isConfigImageRebuildInProgress()) {
-				ctx.ui.notify("The sandbox image is being rebuilt after config changes. Retry /backlog:process when the new image is built.", "warning");
+				ctx.ui.notify("The sandbox image is being rebuilt after config changes. Retry /work:process when the new image is built.", "warning");
 				return;
 			}
 			let baseRecord: BacklogProcessRecord | undefined;
@@ -3851,7 +3852,7 @@ Backlog views and processing:
 				const planning = cachedPlan ? { iterations: (cachedPlan.iterations || cachedPlan.groups || []).map((entry: any) => ({ items: entry.items || [], recommendedPipeline: entry.pipeline || entry.recommendedPipeline || entry.recommendedPipelines?.[0], supportsParallel: (entry.items || []).length > 1 })) } : await planBacklogProcessing(ctx.cwd, query);
 				const iteration = planning.iterations[0];
 				if (!iteration) {
-					ctx.ui.notify("No backlog items were selected for processing.", "error");
+					ctx.ui.notify("No Work Items were selected for processing.", "error");
 					return;
 				}
 
@@ -3884,7 +3885,7 @@ Backlog views and processing:
 				};
 				writeBacklogRunRecord(ctx.cwd, finalRecord);
 				ctx.ui.notify(
-					`Backlog process ${finalRecord.status}: ${runId} · pipeline ${pipeline} · items ${finalRecord.resolvedItems.length} · record ${recordPath}${finalRecord.branches.length ? ` · branches ${finalRecord.branches.join(", ")}` : ""}${finalRecord.logs.length ? ` · logs ${finalRecord.logs.join(", ")}` : ""}`,
+					`Work process ${finalRecord.status}: ${runId} · pipeline ${pipeline} · items ${finalRecord.resolvedItems.length} · record ${recordPath}${finalRecord.branches.length ? ` · branches ${finalRecord.branches.join(", ")}` : ""}${finalRecord.logs.length ? ` · logs ${finalRecord.logs.join(", ")}` : ""}`,
 					finalRecord.status === "done" ? "success" : "error",
 				);
 			} catch (error) {
@@ -3902,33 +3903,33 @@ Backlog views and processing:
 		},
 	});
 
-	pi.registerCommand("backlog:ready", {
-		description: "List deterministic ready work candidates, similar to dv work ready: /backlog:ready [query]",
+	pi.registerCommand("work:ready", {
+		description: "List deterministic ready Work candidates from the configured Work Source: /work:ready [query]",
 		handler: async (args, ctx) => notifyBacklogReady(args, ctx),
 	});
 
-	pi.registerCommand("backlog:plan", {
-		description: "Run and cache the backlog planning phase: /backlog:plan [query] --iterations N",
+	pi.registerCommand("work:plan", {
+		description: "Run and cache the Work planning phase: /work:plan [query] --iterations N",
 		getArgumentCompletions: (prefix: string) => flagCompletionItems(["--iterations", "--iterations=2", "--all", "--include-terminal"], tokenAfterLastSpace(prefix)),
 		handler: async (args, ctx) => notifyBacklogPlan(args, ctx),
 	});
 
-	pi.registerCommand("backlog:next", {
-		description: "Plan the next backlog iteration: /backlog:next [query]",
+	pi.registerCommand("work:next", {
+		description: "Plan the next Work iteration: /work:next [query]",
 		handler: async (args, ctx) => notifyBacklogPlan(args, ctx, { iterations: 1 }),
 	});
 
 	registerBacklogCommands(pi);
-	pi.registerCommand("backlog:runs", {
-		description: "List backlog processing runs: /backlog:runs [query]",
+	pi.registerCommand("work:runs", {
+		description: "List backlog processing runs: /work:runs [query]",
 		handler: async (args, ctx) => {
 			const runs = listBacklogRuns(ctx.cwd, args.trim());
 			ctx.ui.notify(formatBacklogRunList(runs), "info");
 		},
 	});
 
-	pi.registerCommand("backlog:status", {
-		description: "Inspect a backlog processing run: /backlog:status [run-id]",
+	pi.registerCommand("work:status", {
+		description: "Inspect a backlog processing run: /work:status [run-id]",
 		handler: async (args, ctx) => {
 			const selection = selectBacklogRunForStatus(listBacklogRuns(ctx.cwd), args.trim());
 			const message = formatStatusSelection(selection);
@@ -3936,8 +3937,8 @@ Backlog views and processing:
 		},
 	});
 
-	pi.registerCommand("backlog:logs", {
-		description: "Show log paths for a backlog processing run: /backlog:logs [run-id]",
+	pi.registerCommand("work:logs", {
+		description: "Show log paths for a backlog processing run: /work:logs [run-id]",
 		handler: async (args, ctx) => {
 			const selection = selectBacklogRunForStatus(listBacklogRuns(ctx.cwd), args.trim());
 			if (selection.kind !== "record") {
@@ -3949,15 +3950,15 @@ Backlog views and processing:
 		},
 	});
 
-	pi.registerCommand("backlog:cancel", {
-		description: "Cancel active backlog processing work: /backlog:cancel [run-id]",
+	pi.registerCommand("work:cancel", {
+		description: "Cancel active backlog processing work: /work:cancel [run-id]",
 		handler: async (_args, ctx) => {
 			ctx.ui.notify("Backlog run cancellation is not available for completed durable records yet.", "error");
 		},
 	});
 
-	pi.registerCommand("backlog:resume", {
-		description: "Resume a backlog processing run: /backlog:resume [run-id]",
+	pi.registerCommand("work:resume", {
+		description: "Resume a backlog processing run: /work:resume [run-id]",
 		handler: async (args, ctx) => {
 			const resumeCapability = getBacklogResumeCapability(ctx);
 			const result = await resumeBacklogRun(ctx.cwd, args.trim(), resumeCapability);
@@ -3989,7 +3990,7 @@ Backlog views and processing:
 			onUpdate?.({ content: [{ type: "text", text: `Dispatching ${agent} via Sandcastle...` }] });
 			const run = await dispatch(ctx.cwd, agent, task, ctx);
 			return {
-				content: [{ type: "text", text: `Dispatched ${agent} as ${run.id}. Branch: ${run.branch}. Log: ${run.logPath}. Result: ${run.resultPath}. Use /backlog:runs for progress.` }],
+				content: [{ type: "text", text: `Dispatched ${agent} as ${run.id}. Branch: ${run.branch}. Log: ${run.logPath}. Result: ${run.resultPath}. Use /work:runs for progress.` }],
 				details: { id: run.id, agent, branch: run.branch, logPath: run.logPath, resultPath: run.resultPath },
 			};
 		},

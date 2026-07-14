@@ -18,7 +18,7 @@ function makeFakeExtensionAPI() {
   };
 }
 
-test('issue 00003 registers /backlog:run and uses the injected Sandcastle capability', async () => {
+test('issue 00003 registers /work:run and uses the injected Sandcastle capability', async () => {
   const repoDir = await mkdtemp(join(tmpdir(), 'pi-sandcastle-sc-run-'));
   try {
     const configDir = join(repoDir, '.pi', 'sandcastle');
@@ -69,7 +69,7 @@ test('issue 00003 registers /backlog:run and uses the injected Sandcastle capabi
         };
       },
       async createSandbox() {
-        throw new Error('createSandbox should not be called by /backlog:run');
+        throw new Error('createSandbox should not be called by /work:run');
       },
     };
     const fakePi = makeFakeExtensionAPI();
@@ -80,9 +80,9 @@ test('issue 00003 registers /backlog:run and uses the injected Sandcastle capabi
       randomId: () => 'run-123',
     });
 
-    assert.ok(fakePi.commands.has('backlog:run'), '/backlog:run should be registered');
+    assert.ok(fakePi.commands.has('work:run'), '/work:run should be registered');
 
-    const handler = fakePi.commands.get('backlog:run').handler;
+    const handler = fakePi.commands.get('work:run').handler;
     await handler('Check the docs --not-a-flag', {
       cwd: repoDir,
       ui: {

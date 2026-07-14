@@ -4,15 +4,15 @@ const issueFileUrl = new URL('../backlog/00007-backlog-plan-and-next-alias.md', 
 const prdFileUrl = new URL('../docs/prd/sandcastle-backlog-processing.md', import.meta.url);
 const backlogPlanningAcceptanceCriteriaChecks = [
   {
-    criterion: 'After reload, /backlog:plan and /backlog:next are registered.',
+    criterion: 'After reload, /work:plan and /work:next are registered.',
     message: 'issue 00007 should require command registration',
   },
   {
-    criterion: '/backlog:plan accepts free-form query text and --iterations N controls the number of recommended processing iterations.',
+    criterion: '/work:plan accepts free-form query text and --iterations N controls the number of recommended processing iterations.',
     message: 'issue 00007 should require plan query text and iteration handling',
   },
   {
-    criterion: '/backlog:next uses the same implementation as /backlog:plan --iterations 1.',
+    criterion: '/work:next uses the same implementation as /work:plan --iterations 1.',
     message: 'issue 00007 should require next alias equivalence',
   },
   {
@@ -31,17 +31,17 @@ const backlogPlanningAcceptanceCriteriaChecks = [
 const backlogPlanningPrdChecks = [
   {
     pattern:
-      /16\.\s+As a Pi user, I want `\/backlog:plan \[query\] --iterations N`, so that I can get a read-only, multi-iteration plan across backlog items\./,
+      /16\.\s+As a Pi user, I want `\/work:plan \[query\] --iterations N`, so that I can get a read-only, multi-iteration plan across backlog items\./,
     message: 'the parent PRD should contain the backlog plan user story that drives this work item',
   },
   {
     pattern:
-      /17\.\s+As a Pi user, I want `\/backlog:next \[query\]`, so that I can get the next recommended backlog processing iteration without reading a full plan\./,
+      /17\.\s+As a Pi user, I want `\/work:next \[query\]`, so that I can get the next recommended backlog processing iteration without reading a full plan\./,
     message: 'the parent PRD should contain the backlog next user story that drives this work item',
   },
   {
     pattern:
-      /18\.\s+As a Pi user, I want `\/backlog:next` to be a thin alias of `\/backlog:plan --iterations 1`, so that the semantics stay simple\./,
+      /18\.\s+As a Pi user, I want `\/work:next` to be a thin alias of `\/work:plan --iterations 1`, so that the semantics stay simple\./,
     message:
       'the parent PRD should contain the backlog next alias user story that drives this work item',
   },

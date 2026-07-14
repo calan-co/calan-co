@@ -5,91 +5,91 @@ import test from 'node:test';
 const docsFileUrl = new URL('../docs/command-surface.md', import.meta.url);
 const documentedCommandSnippets = [
   {
-    message: 'issue 00010 should document /backlog:config-raw',
-    snippet: '`/backlog:config-raw`',
+    message: 'issue 00010 should document /work:config-raw',
+    snippet: '`/work:config-raw`',
   },
   {
-    message: 'issue 00010 should document /backlog:run',
-    snippet: '`/backlog:run [agent] [prompt]`',
+    message: 'issue 00010 should document /work:run',
+    snippet: '`/work:run [role] [prompt]`',
   },
   {
-    message: 'issue 00010 should document /backlog:pipeline',
-    snippet: '`/backlog:pipeline <pipeline> [prompt]`',
+    message: 'issue 00010 should document /work:pipeline',
+    snippet: '`/work:pipeline <pipeline> [prompt]`',
   },
   {
-    message: 'issue 00010 should document /backlog:runs',
-    snippet: '`/backlog:runs`',
+    message: 'issue 00010 should document /work:runs',
+    snippet: '`/work:runs`',
   },
   {
-    message: 'issue 00010 should document /backlog:status',
-    snippet: '`/backlog:status [run-id]`',
+    message: 'issue 00010 should document /work:status',
+    snippet: '`/work:status [run-id]`',
   },
   {
-    message: 'issue 00010 should document /backlog:logs',
-    snippet: '`/backlog:logs [run-id]`',
+    message: 'issue 00010 should document /work:logs',
+    snippet: '`/work:logs [run-id]`',
   },
   {
-    message: 'issue 00010 should document /backlog:cancel',
-    snippet: '`/backlog:cancel [run-id|all]`',
+    message: 'issue 00010 should document /work:cancel',
+    snippet: '`/work:cancel [run-id|all]`',
   },
   {
-    message: 'issue 00010 should document /backlog:resume',
-    snippet: '`/backlog:resume [run-id]`',
+    message: 'issue 00010 should document /work:resume',
+    snippet: '`/work:resume [run-id]`',
   },
   {
-    message: 'issue 00010 should document /backlog:list',
-    snippet: '`/backlog:list [query]`',
+    message: 'issue 00010 should document /work:list',
+    snippet: '`/work:list [query]`',
   },
   {
-    message: 'issue 00010 should document /backlog:plan',
-    snippet: '`/backlog:plan [query] --iterations N`',
+    message: 'issue 00010 should document /work:plan',
+    snippet: '`/work:plan [query] --iterations N`',
   },
   {
-    message: 'issue 00010 should document /backlog:next',
-    snippet: '`/backlog:next [query]`',
+    message: 'issue 00010 should document /work:next',
+    snippet: '`/work:next [query]`',
   },
   {
-    message: 'issue 00010 should document /backlog:inspect',
-    snippet: '`/backlog:inspect <item>`',
+    message: 'issue 00010 should document /work:inspect',
+    snippet: '`/work:inspect <item>`',
   },
   {
-    message: 'issue 00010 should document /backlog:process',
-    snippet: '`/backlog:process [query] --pipeline <pipeline>`',
+    message: 'issue 00010 should document /work:process',
+    snippet: '`/work:process [query] --pipeline <pipeline>`',
   },
   {
-    message: 'issue 00010 should document /backlog:runs',
-    snippet: '`/backlog:runs`',
+    message: 'issue 00010 should document /work:runs',
+    snippet: '`/work:runs`',
   },
   {
-    message: 'issue 00010 should document /backlog:status',
-    snippet: '`/backlog:status [run-id]`',
+    message: 'issue 00010 should document /work:status',
+    snippet: '`/work:status [run-id]`',
   },
   {
-    message: 'issue 00010 should document /backlog:resume',
-    snippet: '`/backlog:resume [run-id]`',
+    message: 'issue 00010 should document /work:resume',
+    snippet: '`/work:resume [run-id]`',
   },
 ];
 const requiredDocsSnippets = [
   {
     message: 'issue 00010 should document the command surface heading',
-    snippet: '# Sandcastle Backlog Command Surface',
+    snippet: '# Agent Workflows command surface',
   },
   {
-    message: 'issue 00010 should explain the /backlog:* command namespace',
-    snippet: '`/backlog:*` for Sandcastle configuration, primitive execution, and run management.',
+    message: 'issue 00010 should explain the /work:* command namespace',
+    snippet: '`/work:*` commands for runtime configuration, primitive role execution, workflow runs, Work discovery, planning, durable processing, and run management.',
   },
   {
     message: 'issue 00010 should document setup and storage',
     snippet: '.pi/sandcastle/results',
   },
   {
-    message: 'issue 00010 should document /backlog:config-raw init semantics',
+    message: 'issue 00010 should document /work:config-raw init semantics',
     snippet:
-      '`/backlog:config-raw init` hydrates missing repo-local files and prompt templates without overwriting existing edits.',
+      '`/work:config-raw init` hydrates missing repo-local files and prompt templates without overwriting existing edits.',
   },
   {
     message: 'issue 00010 should document fixed pipeline execution',
-    snippet: '`/backlog:pipeline <pipeline> [prompt]` runs a fixed domain pipeline directly.',
+    snippet: '`/work:pipeline <pipeline> [prompt]` runs a fixed-domain Pipeline directly.',
   },
   {
     message: 'issue 00010 should explain deterministic query parsing',
@@ -101,12 +101,12 @@ const requiredDocsSnippets = [
   },
   {
     message: 'issue 00010 should include troubleshooting guidance',
-    snippet: 'If `/backlog:process` appears to treat query text as a pipeline',
+    snippet: 'If `/work:process` appears to treat query text as a pipeline',
   },
   {
     message: 'issue 00010 should define where durable state begins',
     snippet:
-      'Durable state begins when `/backlog:process` or `/backlog:resume` executes a Sandcastle-backed pipeline.',
+      'Durable state begins when `/work:process` or `/work:resume` executes an adapter-backed pipeline.'
   },
   {
     message: 'issue 00010 should reserve a separate namespace for PR workflows',

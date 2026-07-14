@@ -34,11 +34,11 @@ Backlog run commands should be backlog-specific views over durable Sandcastle pr
 
 ## Tasks
 
-- [x] Register /backlog:runs, /backlog:status, and /backlog:resume in the dev extension.
+- [x] Register /work:runs, /work:status, and /work:resume in the dev extension.
 - [x] Implement backlog-run store queries over durable backlog process records.
-- [x] Implement /backlog:runs [query] to filter and list backlog processing runs.
-- [x] Implement /backlog:status [run-id] with active/latest inference and ambiguity handling.
-- [x] Implement /backlog:resume <run-id> to continue only resumable backlog process runs through injected Sandcastle capabilities.
+- [x] Implement /work:runs [query] to filter and list backlog processing runs.
+- [x] Implement /work:status [run-id] with active/latest inference and ambiguity handling.
+- [x] Implement /work:resume <run-id> to continue only resumable backlog process runs through injected Sandcastle capabilities.
 - [x] Add tests for filtering, status inference, resume eligibility, missing-run errors, and non-resumable runs.
 
 ## Deliverables
@@ -50,10 +50,10 @@ Backlog run commands should be backlog-specific views over durable Sandcastle pr
 
 ## Acceptance Criteria
 
-- [x] After reload, /backlog:runs, /backlog:status, and /backlog:resume are registered.
-- [x] /backlog:runs lists backlog process runs and supports deterministic filtering by query text or item id.
-- [x] /backlog:status infers active/latest backlog run when safe and reports ambiguity when multiple candidates exist.
-- [x] /backlog:resume resumes only durable process runs with resumable provider/session metadata.
+- [x] After reload, /work:runs, /work:status, and /work:resume are registered.
+- [x] /work:runs lists backlog process runs and supports deterministic filtering by query text or item id.
+- [x] /work:status infers active/latest backlog run when safe and reports ambiguity when multiple candidates exist.
+- [x] /work:resume resumes only durable process runs with resumable provider/session metadata.
 - [x] Missing or non-resumable runs return clear user-facing errors without mutating records.
 - [x] Tests cover run-store behavior with no real Sandcastle containers.
 

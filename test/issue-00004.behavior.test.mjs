@@ -125,7 +125,7 @@ test('parseSimpleYaml preserves unsupported pipeline step keys for validation', 
   assert.equal(parsed.pipelines['simple-loop'].steps[0].role, '');
 });
 
-test('/backlog:config-raw validate rejects agent terminology where role is required', async () => {
+test('/work:config-raw validate rejects agent terminology where role is required', async () => {
   const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-sandcastle-agent-term-'));
   await fs.mkdir(path.join(repoRoot, '.pi/sandcastle'), { recursive: true });
   await fs.writeFile(path.join(repoRoot, '.pi/sandcastle', 'run-job.mjs'), '', 'utf8');
@@ -148,7 +148,7 @@ test('/backlog:config-raw validate rejects agent terminology where role is requi
   const pi = createFakePi();
   piSandcastle(pi);
   const notifications = [];
-  await pi.commands.get('backlog:config-raw')('validate', {
+  await pi.commands.get('work:config-raw')('validate', {
     cwd: repoRoot,
     ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
   });
@@ -158,7 +158,7 @@ test('/backlog:config-raw validate rejects agent terminology where role is requi
   assert.match(notifications[0].message, /config\.pipelines\.simple-loop\.steps\[0\]\.agent is not supported/);
 });
 
-test('/backlog:pipeline registers and parses prompt text deterministically', async () => {
+test('/work:pipeline registers and parses prompt text deterministically', async () => {
   const repoRoot = await createRepo();
   const fakePi = createFakePi();
   const calls = [];
@@ -187,9 +187,9 @@ test('/backlog:pipeline registers and parses prompt text deterministically', asy
     },
   });
 
-  assert.ok(fakePi.commands.has('backlog:pipeline'), '/backlog:pipeline command should be registered');
+  assert.ok(fakePi.commands.has('work:pipeline'), '/work:pipeline command should be registered');
 
-  const handler = fakePi.commands.get('backlog:pipeline');
+  const handler = fakePi.commands.get('work:pipeline');
   const ctx = {
     cwd: repoRoot,
     ui: {
@@ -225,7 +225,7 @@ test('/backlog:pipeline registers and parses prompt text deterministically', asy
   assert.equal(record.steps[1].commits[0], 'commit-2');
 });
 
-test('/backlog:pipeline rejects unknown pipelines with available options', async () => {
+test('/work:pipeline rejects unknown pipelines with available options', async () => {
   const repoRoot = await createRepo();
   const fakePi = createFakePi();
   const notifications = [];
@@ -242,7 +242,7 @@ test('/backlog:pipeline rejects unknown pipelines with available options', async
     },
   });
 
-  const handler = fakePi.commands.get('backlog:pipeline');
+  const handler = fakePi.commands.get('work:pipeline');
   await handler('missing anything at all', {
     cwd: repoRoot,
     ui: {
@@ -257,7 +257,7 @@ test('/backlog:pipeline rejects unknown pipelines with available options', async
   assert.match(notifications.at(-1).message, /Available pipelines: .*broken.*implement/);
 });
 
-test('/backlog:pipeline records failed steps and stops after the first error', async () => {
+test('/work:pipeline records failed steps and stops after the first error', async () => {
   const repoRoot = await createRepo();
   const fakePi = createFakePi();
   const notifications = [];
@@ -280,7 +280,7 @@ test('/backlog:pipeline records failed steps and stops after the first error', a
     },
   });
 
-  const handler = fakePi.commands.get('backlog:pipeline');
+  const handler = fakePi.commands.get('work:pipeline');
   await handler('broken recover from failure', {
     cwd: repoRoot,
     ui: {

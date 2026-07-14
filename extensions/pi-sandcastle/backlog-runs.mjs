@@ -4,7 +4,7 @@ import { join } from "node:path";
 export const RUNS_DIR = ".pi/sandcastle/runs";
 export const BACKLOG_RUNS_DIR = ".pi/sandcastle/backlog-runs";
 export const BACKLOG_RESULTS_DIR = ".pi/sandcastle/results";
-export const BACKLOG_PROCESS_RUN_KIND = "backlog-process";
+export const BACKLOG_PROCESS_RUN_KIND = "work-process";
 
 const ACTIVE_STATUSES = new Set([
   "active",
@@ -41,7 +41,7 @@ function safeJsonParse(raw, filePath) {
   try {
     return JSON.parse(raw);
   } catch (error) {
-    throw new Error(`Failed to parse backlog run record ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`Failed to parse work run record ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -328,12 +328,12 @@ export function summarizeBacklogRun(record) {
 }
 
 export function formatBacklogRunList(runs) {
-  if (runs.length === 0) return "No backlog runs found.";
-  return ["Backlog runs:", ...runs.map((run) => `- ${summarizeBacklogRun(run)}`)].join("\n");
+  if (runs.length === 0) return "No work runs found.";
+  return ["Work runs:", ...runs.map((run) => `- ${summarizeBacklogRun(run)}`)].join("\n");
 }
 
 function formatMissingSelection(runId, fallbackMessage) {
-  if (runId) return `No backlog run found for '${runId}'.`;
+  if (runId) return `No work run found for '${runId}'.`;
   return fallbackMessage;
 }
 
@@ -343,17 +343,17 @@ function formatAmbiguousSelection(prefix, candidates) {
 }
 
 function formatStatusPrefix(inference) {
-  if (inference === "active") return "Active backlog run";
-  if (inference === "latest") return "Latest backlog run";
-  return "Backlog run";
+  if (inference === "active") return "Active work run";
+  if (inference === "latest") return "Latest work run";
+  return "Work run";
 }
 
 export function formatStatusSelection(selection) {
   if (selection.kind === "missing") {
-    return formatMissingSelection(selection.runId, "No backlog runs are available.");
+    return formatMissingSelection(selection.runId, "No work runs are available.");
   }
   if (selection.kind === "ambiguous") {
-    return formatAmbiguousSelection("backlog run", selection.candidates);
+    return formatAmbiguousSelection("work run", selection.candidates);
   }
 
   return `${formatStatusPrefix(selection.inference)}: ${summarizeBacklogRun(selection.record)}`;
@@ -361,12 +361,12 @@ export function formatStatusSelection(selection) {
 
 export function formatResumeSelection(selection) {
   if (selection.kind === "missing") {
-    return formatMissingSelection(selection.runId, "No resumable backlog run is available.");
+    return formatMissingSelection(selection.runId, "No resumable work run is available.");
   }
   if (selection.kind === "ambiguous") {
-    return formatAmbiguousSelection("resumable backlog run", selection.candidates);
+    return formatAmbiguousSelection("resumable work run", selection.candidates);
   }
-  return `Selected backlog run for resume: ${summarizeBacklogRun(selection.record)}`;
+  return `Selected work run for resume: ${summarizeBacklogRun(selection.record)}`;
 }
 
 export function backlogRunRecordPath(cwd, runId) {
@@ -395,14 +395,14 @@ export async function resumeBacklogRun(cwd, runId, resumeCapability) {
   if (!isBacklogRunResumable(record)) {
     return {
       ok: false,
-      message: `Backlog run '${record.id}' is not resumable. It needs failed/interrupted status plus provider/session metadata.`,
+      message: `Work run '${record.id}' is not resumable. It needs failed/interrupted status plus provider/session metadata.`,
     };
   }
 
   if (typeof resumeCapability !== "function") {
     return {
       ok: false,
-      message: `Backlog run '${record.id}' is resumable, but this extension context does not provide a resume capability.`,
+      message: `Work run '${record.id}' is resumable, but this extension context does not provide a resume capability.`,
     };
   }
 
@@ -421,6 +421,6 @@ export async function resumeBacklogRun(cwd, runId, resumeCapability) {
     ok: true,
     record: resumedRecord,
     result,
-    message: `Resumed backlog run '${record.id}'.`,
+    message: `Resumed work run '${record.id}'.`,
   };
 }

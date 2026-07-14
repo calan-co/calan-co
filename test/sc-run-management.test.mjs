@@ -26,21 +26,21 @@ function fakePi() {
   };
 }
 
-test('registerRunManagementCommands registers the /backlog:* run management surface', () => {
+test('registerRunManagementCommands registers the /work:* run management surface', () => {
   const pi = fakePi();
 
   registerRunManagementCommands(pi);
 
   assert.deepEqual([...pi.commands.keys()].sort(), [
-    'backlog:cancel',
-    'backlog:logs',
-    'backlog:resume',
-    'backlog:runs',
-    'backlog:status',
+    'work:cancel',
+    'work:logs',
+    'work:resume',
+    'work:runs',
+    'work:status',
   ]);
 });
 
-test('piSandcastle registers only the updated /backlog:* and /backlog:* slash-command surface on reload', () => {
+test('piSandcastle registers only the updated /work:* and /work:* slash-command surface on reload', () => {
   const repoRoot = fileURLToPath(new URL('..', import.meta.url));
   const output = execFileSync(
     process.execPath,
@@ -69,25 +69,25 @@ test('piSandcastle registers only the updated /backlog:* and /backlog:* slash-co
 
   const commands = JSON.parse(output.trim());
   assert.deepEqual(commands, [
-    'backlog:build-image',
-    'backlog:cancel',
-    'backlog:config',
-    'backlog:config-raw',
-    'backlog:inspect',
-    'backlog:list',
-    'backlog:logs',
-    'backlog:next',
-    'backlog:pipeline',
-    'backlog:plan',
-    'backlog:process',
-    'backlog:ready',
-    'backlog:resume',
-    'backlog:run',
-    'backlog:runs',
-    'backlog:status',
+    'work:build-image',
+    'work:cancel',
+    'work:config',
+    'work:config-raw',
+    'work:inspect',
+    'work:list',
+    'work:logs',
+    'work:next',
+    'work:pipeline',
+    'work:plan',
+    'work:process',
+    'work:ready',
+    'work:resume',
+    'work:run',
+    'work:runs',
+    'work:status',
   ]);
   assert.deepEqual(commands.filter((name) => name.startsWith('sc:')), []);
-  assert.deepEqual(commands.filter((name) => !name.startsWith('backlog:')), []);
+  assert.deepEqual(commands.filter((name) => !name.startsWith('work:')), []);
 });
 
 test('sc run management lists recent runs and infers active status safely', async () => {

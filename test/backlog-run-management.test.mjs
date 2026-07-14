@@ -87,7 +87,7 @@ test('reads and filters backlog runs deterministically', async () => {
 
 test('reads backlog process records from unified run records and ignores other run kinds', async () => {
   await withTempDir(async (cwd) => {
-    await writeJson(path.join(cwd, '.pi/sandcastle/runs/backlog-1.json'), backlogRun({ id: 'backlog-1', kind: 'backlog-process' }));
+    await writeJson(path.join(cwd, '.pi/sandcastle/runs/work-1.json'), backlogRun({ id: 'work-1', kind: 'work-process' }));
     await writeJson(path.join(cwd, '.pi/sandcastle/runs/direct-1.json'), {
       id: 'direct-1',
       kind: 'direct-role',
@@ -109,8 +109,8 @@ test('reads backlog process records from unified run records and ignores other r
     });
 
     const records = readBacklogRunRecords(cwd);
-    assert.deepEqual(records.map((record) => record.id), ['backlog-1']);
-    assert.equal(records[0].kind, 'backlog-process');
+    assert.deepEqual(records.map((record) => record.id), ['work-1']);
+    assert.equal(records[0].kind, 'work-process');
   });
 });
 
@@ -132,11 +132,11 @@ test('infers backlog status safely and reports ambiguity', async () => {
 
   const latestSelection = selectBacklogRunForStatus([finished], '');
   assert.equal(latestSelection.kind, 'record');
-  assert.match(formatStatusSelection(latestSelection), /Latest backlog run/);
+  assert.match(formatStatusSelection(latestSelection), /Latest work run/);
 
   const missingSelection = selectBacklogRunForStatus([finished], 'missing');
   assert.equal(missingSelection.kind, 'missing');
-  assert.match(formatStatusSelection(missingSelection), /No backlog run found/);
+  assert.match(formatStatusSelection(missingSelection), /No work run found/);
 });
 
 test('selects resumable backlog runs and rejects non-resumable ones', async () => {
@@ -210,7 +210,7 @@ test('returns clear errors for missing and non-resumable backlog runs without mu
       throw new Error('should not be called');
     });
     assert.equal(missing.ok, false);
-    assert.match(missing.message, /No backlog run found/);
+    assert.match(missing.message, /No work run found/);
 
     const before = await fs.readFile(
       backlogRunRecordPath(cwd, 'run-nope'),
@@ -232,7 +232,7 @@ test('returns clear errors for missing and non-resumable backlog runs without mu
 test('registers the backlog run-management commands in the extension source', async () => {
   const extensionText = await fs.readFile(new URL('../extensions/pi-sandcastle/index.ts', import.meta.url), 'utf8');
 
-  assert.match(extensionText, /registerCommand\("backlog:runs"/);
-  assert.match(extensionText, /registerCommand\("backlog:status"/);
-  assert.match(extensionText, /registerCommand\("backlog:resume"/);
+  assert.match(extensionText, /registerCommand\("work:runs"/);
+  assert.match(extensionText, /registerCommand\("work:status"/);
+  assert.match(extensionText, /registerCommand\("work:resume"/);
 });

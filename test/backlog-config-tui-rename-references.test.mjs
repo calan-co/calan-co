@@ -28,7 +28,7 @@ test('backlog config TUI no longer exposes team editing; pack-derived roles rema
     const tui = { requestRender() {} };
     const theme = { fg(_name, text) { return String(text); }, bold(text) { return String(text); } };
     const ctx = { cwd, mode: 'tui', ui: { notify() {}, custom(factory) { return new Promise((resolve) => { component = factory(tui, theme, {}, resolve); }); } } };
-    const runPromise = commands.get('backlog:config').handler('', ctx);
+    const runPromise = commands.get('work:config').handler('', ctx);
     while (!component) await new Promise((resolve) => setTimeout(resolve, 0));
     const text = () => component.render(120).join('\n');
     assert.doesNotMatch(text(), /Teams/);

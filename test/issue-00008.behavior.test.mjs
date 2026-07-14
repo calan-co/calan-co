@@ -53,7 +53,7 @@ const backlogProcessInputs = [
 
 function assertBacklogRunRecord(record, expected) {
   assert.ok(record);
-  assert.equal(record.kind, 'backlog-process');
+  assert.equal(record.kind, 'work-process');
   assert.equal(record.pipeline, expected.pipeline);
   assert.equal(record.status, 'done');
   assert.equal(record.resolvedItems.length, expected.resolvedItems);
@@ -86,7 +86,7 @@ const api = {
 };
 
 piSandcastle(api, {
-  backlog: {
+  work: {
     now: () => 1710000000000 + calls.length,
     plan: async (_cwd, query) => {
       const iteration = query === 'review' ? planIterations.review : planIterations.default;
@@ -110,7 +110,7 @@ piSandcastle(api, {
   },
 });
 
-const handler = commands.get('backlog:process').handler;
+const handler = commands.get('work:process').handler;
 const parsed = Object.fromEntries(
   processInputs.map(({ key, raw }) => [key, parseBacklogProcessArgs(raw)]),
 );
@@ -128,7 +128,7 @@ const records = fs
   .filter((name) => name.endsWith('.json'))
   .sort()
   .map((name) => JSON.parse(fs.readFileSync(join(recordDir, name), 'utf8')))
-  .filter((record) => record.kind === 'backlog-process');
+  .filter((record) => record.kind === 'work-process');
 
 console.log(JSON.stringify({ parsed, calls, records, notifications }, null, 2));
 `;
@@ -153,7 +153,7 @@ test('parseBacklogProcessArgs keeps query text separate from pipeline selection'
   assert.deepEqual(parsed.shortFlag, { query: 'label:small', pipeline: 'review' });
 });
 
-test('backlog:process infers the recommended pipeline and writes durable run records', () => {
+test('work:process infers the recommended pipeline and writes durable run records', () => {
   const { calls, records, notifications } = runBacklogProcessFixture();
   const byQuery = new Map(records.map((record) => [record.query, record]));
 

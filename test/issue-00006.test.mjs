@@ -3,24 +3,24 @@ import { defineIssueDocumentTest } from './issue-document-test-helpers.mjs';
 const issueFileUrl = new URL('../backlog/00006-readonly-backlog-list-and-inspect.md', import.meta.url);
 const prdFileUrl = new URL('../docs/prd/sandcastle-backlog-processing.md', import.meta.url);
 const backlogListUserStoryPattern =
-  /15\.\s+As a Pi user, I want `\/backlog:list \[query\]`, so that I can see matching backlog items without starting work\./;
+  /15\.\s+As a Pi user, I want `\/work:list \[query\]`, so that I can see matching backlog items without starting work\./;
 const backlogInspectUserStoryPattern =
-  /19\.\s+As a Pi user, I want `\/backlog:inspect <item>`, so that I can get item-level analysis, risks, relevant files, and a recommended pipeline without starting work\./;
+  /19\.\s+As a Pi user, I want `\/work:inspect <item>`, so that I can get item-level analysis, risks, relevant files, and a recommended pipeline without starting work\./;
 const acceptanceCriteriaChecks = [
   {
-    criterion: 'After reload, /backlog:list and /backlog:inspect are registered.',
+    criterion: 'After reload, /work:list and /work:inspect are registered.',
     message: 'issue 00006 should require command registration',
   },
   {
-    criterion: '/backlog:list [query] returns matching backlog items in deterministic order and reports a clear missing-source error when no backlog source is configured.',
+    criterion: '/work:list [query] returns matching backlog items in deterministic order and reports a clear missing-source error when no backlog source is configured.',
     message: 'issue 00006 should require list behavior and missing-source handling',
   },
   {
-    criterion: '/backlog:inspect <item> returns analysis, risks, relevant files, testing notes, and recommended pipeline for a resolvable item.',
+    criterion: '/work:inspect <item> returns analysis, risks, relevant files, testing notes, and recommended pipeline for a resolvable item.',
     message: 'issue 00006 should require inspect output',
   },
   {
-    criterion: '/backlog:inspect <item> reports a clear missing-item error when the target cannot be resolved.',
+    criterion: '/work:inspect <item> reports a clear missing-item error when the target cannot be resolved.',
     message: 'issue 00006 should require missing-item handling',
   },
   {

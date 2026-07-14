@@ -29,7 +29,7 @@ function makeRepo(name = 'doc-vader', defaultSandbox = 'docker', options = {}) {
   return cwd;
 }
 
-test('/backlog:build-image initializes a missing Sandcastle scaffold before building', async () => {
+test('/work:build-image initializes a missing Sandcastle scaffold before building', async () => {
   const cwd = makeRepo('missing-scaffold', 'podman', { skipSandcastleDir: true });
   const pi = fakePi();
   const notifications = [];
@@ -42,7 +42,7 @@ test('/backlog:build-image initializes a missing Sandcastle scaffold before buil
     },
   });
 
-  await pi.commands.get('backlog:build-image').handler('', {
+  await pi.commands.get('work:build-image').handler('', {
     cwd,
     ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
   });
@@ -65,7 +65,7 @@ function fakePi() {
   };
 }
 
-test('/backlog:build-image builds the default repo image through injectable image capability', async () => {
+test('/work:build-image builds the default repo image through injectable image capability', async () => {
   const cwd = makeRepo();
   const pi = fakePi();
   const calls = [];
@@ -78,7 +78,7 @@ test('/backlog:build-image builds the default repo image through injectable imag
     },
   });
 
-  await pi.commands.get('backlog:build-image').handler('', {
+  await pi.commands.get('work:build-image').handler('', {
     cwd,
     ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
   });
@@ -87,7 +87,7 @@ test('/backlog:build-image builds the default repo image through injectable imag
   assert.equal(notifications.at(-1).type, 'success');
 });
 
-test('/backlog:build-image defaults to configured defaultSandbox when provider is omitted', async () => {
+test('/work:build-image defaults to configured defaultSandbox when provider is omitted', async () => {
   const cwd = makeRepo('doc-vader', 'podman');
   const pi = fakePi();
   const calls = [];
@@ -99,7 +99,7 @@ test('/backlog:build-image defaults to configured defaultSandbox when provider i
     },
   });
 
-  await pi.commands.get('backlog:build-image').handler('', {
+  await pi.commands.get('work:build-image').handler('', {
     cwd,
     ui: { notify() {} },
   });
@@ -107,7 +107,7 @@ test('/backlog:build-image defaults to configured defaultSandbox when provider i
   assert.equal(calls[0].provider, 'podman');
 });
 
-test('/backlog:run auto-builds a missing docker image before starting Sandcastle', async () => {
+test('/work:run auto-builds a missing docker image before starting Sandcastle', async () => {
   const cwd = makeRepo();
   const pi = fakePi();
   const calls = [];
@@ -131,7 +131,7 @@ test('/backlog:run auto-builds a missing docker image before starting Sandcastle
     },
   });
 
-  await pi.commands.get('backlog:run').handler('reviewer check this', {
+  await pi.commands.get('work:run').handler('reviewer check this', {
     cwd,
     ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
   });
@@ -144,7 +144,7 @@ test('/backlog:run auto-builds a missing docker image before starting Sandcastle
 });
 
 
-test('/backlog:config-raw set does not initialize or build the sandbox image', async () => {
+test('/work:config-raw set does not initialize or build the sandbox image', async () => {
   const cwd = makeRepo();
   const pi = fakePi();
   const calls = [];
@@ -157,7 +157,7 @@ test('/backlog:config-raw set does not initialize or build the sandbox image', a
     },
   });
 
-  await pi.commands.get('backlog:config-raw').handler('set defaultSandbox docker', {
+  await pi.commands.get('work:config-raw').handler('set defaultSandbox docker', {
     cwd,
     ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
   });

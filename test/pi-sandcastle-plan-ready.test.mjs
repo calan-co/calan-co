@@ -21,13 +21,25 @@ function makeRepo() {
   return cwd;
 }
 
-test('/backlog:plan runs planning phase and caches authoritative plan output', async () => {
+test('Agent Workflows registers /work planning commands without legacy /backlog aliases', async () => {
+  const pi = fakePi();
+  piSandcastle(pi, {});
+
+  for (const name of ['work:ready', 'work:plan', 'work:next', 'work:process']) {
+    assert.equal(pi.commands.has(name), true, `${name} should be registered`);
+  }
+  for (const name of ['backlog:ready', 'backlog:plan', 'backlog:next', 'backlog:process']) {
+    assert.equal(pi.commands.has(name), false, `${name} should not be registered`);
+  }
+});
+
+test('/work:plan runs planning phase and caches authoritative plan output', async () => {
   const cwd = makeRepo();
   const pi = fakePi();
   const calls = [];
   const notifications = [];
   piSandcastle(pi, {
-    backlog: {
+    work: {
       now: () => 123456,
       async planPhase(repo, args) {
         calls.push({ repo, args });
@@ -36,7 +48,7 @@ test('/backlog:plan runs planning phase and caches authoritative plan output', a
     },
   });
 
-  await pi.commands.get('backlog:plan').handler('--iterations=2', {
+  await pi.commands.get('work:plan').handler('--iterations=2', {
     cwd,
     ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
   });
@@ -48,11 +60,11 @@ test('/backlog:plan runs planning phase and caches authoritative plan output', a
   const recordPath = join(cwd, '.pi', 'sandcastle', 'plans', `${planId}.json`);
   assert.equal(existsSync(recordPath), true);
   const record = JSON.parse(readFileSync(recordPath, 'utf8'));
-  assert.equal(record.kind, 'backlog-plan');
+  assert.equal(record.kind, 'work-plan');
   assert.equal(record.plan.summary, 'Planner chose implementation first.');
 });
 
-test('/backlog:process --plan uses a cached authoritative plan', async () => {
+test('/work:process --plan uses a cached authoritative plan', async () => {
   const cwd = makeRepo();
   const pi = fakePi();
   const calls = [];
@@ -61,11 +73,11 @@ test('/backlog:process --plan uses a cached authoritative plan', async () => {
   const planId = 'plan-test';
   await import('node:fs').then(({ writeFileSync }) => writeFileSync(join(cwd, '.pi', 'sandcastle', 'plans', `${planId}.json`), JSON.stringify({
     id: planId,
-    kind: 'backlog-plan',
+    kind: 'work-plan',
     plan: { iterations: [{ pipeline: 'simple-loop', items: [{ id: 'wi-001', title: 'One', sourcePath: 'backlog/001.md' }] }] },
   }, null, 2)));
   piSandcastle(pi, {
-    backlog: {
+    work: {
       now: () => 123456,
       async execute(repo, input) {
         calls.push({ repo, input });
@@ -74,7 +86,7 @@ test('/backlog:process --plan uses a cached authoritative plan', async () => {
     },
   });
 
-  await pi.commands.get('backlog:process').handler('--plan plan-test', {
+  await pi.commands.get('work:process').handler('--plan plan-test', {
     cwd,
     ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
   });
@@ -82,16 +94,16 @@ test('/backlog:process --plan uses a cached authoritative plan', async () => {
   assert.equal(calls.length, 1);
   assert.equal(calls[0].input.pipeline, 'simple-loop');
   assert.deepEqual(calls[0].input.items.map((item) => item.id), ['wi-001']);
-  assert.match(notifications.at(-1).message, /Backlog process done/);
+  assert.match(notifications.at(-1).message, /Work process done/);
 });
 
-test('/backlog:ready delegates readiness to Doc-Vader capability', async () => {
+test('/work:ready delegates readiness to Doc-Vader capability', async () => {
   const cwd = makeRepo();
   const pi = fakePi();
   const calls = [];
   const notifications = [];
   piSandcastle(pi, {
-    backlog: {
+    work: {
       async ready(repo, args) {
         calls.push({ repo, args });
         return 'Ready work candidates\nCandidates: 3';
@@ -99,7 +111,7 @@ test('/backlog:ready delegates readiness to Doc-Vader capability', async () => {
     },
   });
 
-  await pi.commands.get('backlog:ready').handler('--limit 3', {
+  await pi.commands.get('work:ready').handler('--limit 3', {
     cwd,
     ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
   });

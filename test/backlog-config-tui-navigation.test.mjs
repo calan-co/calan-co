@@ -66,7 +66,7 @@ function runTuiScript(body) {
       },
     };
 
-    const command = commands.get('backlog:config');
+    const command = commands.get('work:config');
     const runPromise = command.handler('', ctx);
     while (!component) await new Promise((resolve) => setTimeout(resolve, 0));
 

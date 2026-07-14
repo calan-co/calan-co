@@ -9,11 +9,11 @@ const prdFileUrl = new URL('../docs/prd/sandcastle-backlog-processing.md', impor
 const backlogProcessAcceptanceCriteria = [
   {
     requirement: 'deterministic query parsing',
-    criterion: '- [ ] /backlog:process review treats review as query text, not a pipeline name.',
+    criterion: '- [ ] /work:process review treats review as query text, not a pipeline name.',
   },
   {
     requirement: 'explicit pipeline selection',
-    criterion: '- [ ] /backlog:process auth --pipeline implement uses auth as query and implement as pipeline.',
+    criterion: '- [ ] /work:process auth --pipeline implement uses auth as query and implement as pipeline.',
   },
   {
     requirement: 'recommended pipeline inference',
@@ -36,12 +36,12 @@ const backlogProcessStories = [
   {
     storyName: 'backlog process user story',
     pattern:
-      /20\.\s+As a Pi user, I want `\/backlog:process \[query\] --pipeline <pipeline>`, so that I can start durable Sandcastle-backed processing for a backlog item or query\./,
+      /20\.\s+As a Pi user, I want `\/work:process \[query\] --pipeline <pipeline>`, so that I can start durable Sandcastle-backed processing for a backlog item or query\./,
   },
   {
     storyName: 'query acceptance story',
     pattern:
-      /21\.\s+As a Pi user, I want `\/backlog:process` to accept a query, so that I can process “auth bugs” or “label:small” directly without first creating a persistent selection\./,
+      /21\.\s+As a Pi user, I want `\/work:process` to accept a query, so that I can process “auth bugs” or “label:small” directly without first creating a persistent selection\./,
   },
   {
     storyName: 'explicit pipeline selection story',
@@ -51,12 +51,12 @@ const backlogProcessStories = [
   {
     storyName: 'recommended pipeline inference story',
     pattern:
-      /23\.\s+As a Pi user, I want `\/backlog:process` to infer a recommended pipeline when `--pipeline` is omitted, so that common workflows require minimal typing\./,
+      /23\.\s+As a Pi user, I want `\/work:process` to infer a recommended pipeline when `--pipeline` is omitted, so that common workflows require minimal typing\./,
   },
   {
     storyName: 'multi-item processing story',
     pattern:
-      /24\.\s+As a Pi user, I want `\/backlog:process` to support multiple items when the selected pipeline supports parallelism, so that independent backlog work can proceed AFK\./,
+      /24\.\s+As a Pi user, I want `\/work:process` to support multiple items when the selected pipeline supports parallelism, so that independent backlog work can proceed AFK\./,
   },
 ];
 const backlogProcessPrdChecks = backlogProcessStories.map(({ pattern, storyName }) => ({

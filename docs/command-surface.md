@@ -1,43 +1,42 @@
-# Sandcastle Backlog Command Surface
+# Agent Workflows command surface
 
-Pi-Sandcastle separates `/backlog:*` for Sandcastle configuration, primitive execution, and run management. from `/backlog:*` for backlog discovery, planning, durable processing, and backlog run management.
+Agent Workflows exposes `/work:*` commands for runtime configuration, primitive role execution, workflow runs, Work discovery, planning, durable processing, and run management.
 
 ## Setup and storage
 
-Run `/backlog:config-raw init` to hydrate local Sandcastle support files. `/backlog:config-raw init` hydrates missing repo-local files and prompt templates without overwriting existing edits.
+Run `/work:config-raw init` to hydrate local runtime support files. `/work:config-raw init` hydrates missing repo-local files and prompt templates without overwriting existing edits.
 
-Durable run records and logs are stored under `.pi/sandcastle/runs` and `.pi/sandcastle/results`. Cached planning artifacts are stored under `.pi/sandcastle/plans`. Durable state begins when `/backlog:process` or `/backlog:resume` executes a Sandcastle-backed pipeline.
+Durable run records and logs are stored under `.pi/sandcastle/runs` and `.pi/sandcastle/results` for the current implementation slice. Cached planning artifacts are stored under `.pi/sandcastle/plans`. Durable state begins when `/work:process` or `/work:resume` executes an adapter-backed pipeline.
 
-## Sandcastle primitive commands
+## Runtime and execution commands
 
-- `/backlog:config-raw` manages repo-local Sandcastle config.
-- `/backlog:run [agent] [prompt]` runs one configured agent with free-form prompt text.
-- `/backlog:pipeline <pipeline> [prompt]` runs a fixed domain pipeline directly.
-- `/backlog:runs` lists recent primitive Sandcastle runs.
-- `/backlog:status [run-id]` inspects the current, latest, or specified primitive run.
-- `/backlog:logs [run-id]` prints or returns the log path for a primitive run.
-- `/backlog:cancel [run-id|all]` cancels active primitive run work.
-- `/backlog:resume [run-id]` resumes a primitive run when the provider supports resumable execution.
+- `/work:config` opens the friendly runtime configuration UI.
+- `/work:config-raw` manages repo-local runtime config.
+- `/work:build-image [docker|podman]` builds the repo execution sandbox image.
+- `/work:run [role] [prompt]` runs one configured Role with free-form prompt text.
+- `/work:pipeline <pipeline> [prompt]` runs a fixed-domain Pipeline directly.
+- `/work:runs` lists recent Work Process runs.
+- `/work:status [run-id]` inspects the current, latest, or specified Work Process run.
+- `/work:logs [run-id]` prints or returns the log path for a Work Process run.
+- `/work:cancel [run-id|all]` cancels active Work Process work when supported.
+- `/work:resume [run-id]` resumes a Work Process run when metadata and provider support make that safe.
 
-## Backlog commands
+## Work commands
 
-- `/backlog:list [query]` lists matching backlog items without starting work.
-- `/backlog:ready [query]` delegates readiness selection to Doc-Vader (`dv work ready` or the configured Doc-Vader API/capability).
-- `/backlog:plan [query] --iterations N` runs the configured planner/orchestrator planning phase and caches an authoritative plan.
-- `/backlog:next [query]` is a thin alias for `/backlog:plan --iterations 1`.
-- `/backlog:inspect <item>` returns item-level analysis, risks, relevant files, testing notes, and a recommended pipeline.
-- `/backlog:process [query] --pipeline <pipeline>` starts durable processing for the resolved backlog query.
-- `/backlog:process --plan <plan-id> [--pipeline <pipeline>]` starts durable processing from a previously cached authoritative plan, optionally overriding the plan pipeline.
-- `/backlog:runs` lists durable backlog process runs.
-- `/backlog:status [run-id]` inspects the current, latest, or specified backlog process run.
-- `/backlog:resume [run-id]` resumes a durable backlog process run when metadata and provider support make that safe.
+- `/work:list [query]` lists matching Work Items without starting work.
+- `/work:ready [query]` lists deterministic ready Work candidates from the configured Work Source.
+- `/work:plan [query] --iterations N` runs the configured read-only `planWork` phase and caches a schema-validated Plan Artifact.
+- `/work:next [query]` is a thin alias for `/work:plan --iterations 1`.
+- `/work:inspect <item>` returns Work Item analysis, risks, relevant files, testing notes, and planning context.
+- `/work:process [query] --pipeline <pipeline>` starts durable processing for the resolved Work query.
+- `/work:process --plan <plan-id> [--pipeline <pipeline>]` starts durable processing from a previously cached Plan Artifact, optionally overriding the policy-selected pipeline during this transition slice.
 
 ## Parsing rules
 
-Backlog commands treat all non-flag text as query text. Pipeline selection is explicit through `--pipeline` or `-p`. If `/backlog:process` appears to treat query text as a pipeline, use `--pipeline <name>` or `-p <name>` and keep the remaining words as query text.
+Work commands treat all non-flag text as query text. Pipeline selection is explicit through `--pipeline` or `-p`. If `/work:process` appears to treat query text as a pipeline, use `--pipeline <name>` or `-p <name>` and keep the remaining words as query text.
 
-Example: `/backlog:process auth bugs --pipeline implement` uses `auth bugs` as query text and `implement` as the pipeline.
+Example: `/work:process auth bugs --pipeline implement` uses `auth bugs` as query text and `implement` as the pipeline.
 
 ## Boundary
 
-Discovery commands such as `/backlog:list`, `/backlog:inspect`, and `/backlog:ready` do not create durable records. `/backlog:plan` creates a cached plan artifact but does not execute implementation work. Durable state begins when `/backlog:process` or `/backlog:resume` executes a Sandcastle-backed pipeline. Future PR workflow belongs under a separate `/pr:*` namespace.
+Discovery commands such as `/work:list`, `/work:inspect`, and `/work:ready` do not create durable records. `/work:plan` creates a cached Plan Artifact but does not execute implementation work. Durable state begins when `/work:process` or `/work:resume` executes an adapter-backed pipeline. Future PR workflow belongs under a separate `/pr:*` namespace.
