@@ -148,6 +148,7 @@
       "additionalProperties": false,
       "properties": {
         "role": { "$ref": "#/$defs/identifier" },
+        "kind": { "type": "string", "enum": ["planWork", "runRole", "review", "merge"] },
         "provider": { "$ref": "#/$defs/referenceOrDefault" },
         "model": { "type": "string", "minLength": 1 },
         "sandbox": { "$ref": "#/$defs/referenceOrDefault" },
@@ -325,7 +326,7 @@
         "kind": {
           "type": "string",
           "anyOf": [
-            { "enum": ["runRole", "selectWork", "fanOut", "fanIn", "review", "merge", "postProcess", "gate"] },
+            { "enum": ["planWork", "runRole", "selectWork", "fanOut", "fanIn", "review", "merge", "postProcess", "gate"] },
             { "pattern": "^[a-z][a-z0-9-]*\\.[A-Za-z][A-Za-z0-9_-]*$" }
           ]
         },
@@ -351,6 +352,10 @@
         "overrides": { "$ref": "#/$defs/pipelineDefaults" }
       },
       "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "planWork" } }, "required": ["kind"] },
+          "then": { "not": { "required": ["role"] } }
+        },
         {
           "if": { "properties": { "kind": { "const": "runRole" } }, "required": ["kind"] },
           "then": { "required": ["role", "prompt"] }

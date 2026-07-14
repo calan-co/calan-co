@@ -256,9 +256,8 @@
       "steps": [
         {
           "id": "plan",
-          "kind": "runRole",
-          "prompt": "plan-work",
-          "role": "planner"
+          "kind": "planWork",
+          "prompt": "plan-work"
         },
         {
           "id": "implement",
@@ -293,9 +292,8 @@
       "steps": [
         {
           "id": "plan",
-          "kind": "runRole",
-          "prompt": "plan-work",
-          "role": "planner"
+          "kind": "planWork",
+          "prompt": "plan-work"
         },
         {
           "id": "implement",

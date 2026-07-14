@@ -153,12 +153,12 @@ test('parseBacklogProcessArgs keeps query text separate from pipeline selection'
   assert.deepEqual(parsed.shortFlag, { query: 'label:small', pipeline: 'review' });
 });
 
-test('work:process infers the recommended pipeline and writes durable run records', () => {
+test('work:process uses explicit pipeline or deterministic default and writes durable run records', () => {
   const { calls, records, notifications } = runBacklogProcessFixture();
   const byQuery = new Map(records.map((record) => [record.query, record]));
 
   const expectedCalls = [
-    { query: 'review', pipeline: 'review', items: ['00008', '00009'], parallel: true },
+    { query: 'review', pipeline: 'simple-loop', items: ['00008', '00009'], parallel: true },
     { query: 'auth bugs', pipeline: 'implement', items: ['00008'], parallel: false },
     { query: 'label:small', pipeline: 'review', items: ['00008'], parallel: false },
   ];
@@ -185,7 +185,7 @@ test('work:process infers the recommended pipeline and writes durable run record
     logs: ['log-00008.txt'],
   });
   assertBacklogRunRecord(byQuery.get('review'), {
-    pipeline: 'review',
+    pipeline: 'simple-loop',
     resolvedItems: 2,
     branches: ['branch-00008', 'branch-00009'],
     logs: ['log-00008.txt', 'log-00009.txt'],

@@ -15,6 +15,7 @@ test('execution runtime pack ports prompts, roles, and pipelines', () => {
   assert.equal(pack.runtimeVersion, 1);
   assert.ok(pack.prompts['simple-loop'].template.includes('$INPUT'));
   assert.equal(pack.roles.implementer.role, 'implementer');
+  assert.equal(pack.pipelines['parallel-planner-with-review'].steps[0].kind, 'planWork');
   assert.equal(pack.pipelines['parallel-planner-with-review'].steps[2].kind, 'fanOut');
   assert.ok(listRuntimeAgents(pack).some((agent) => agent.name === 'reviewer'));
   assert.ok(listRuntimePipelines(pack).some((pipeline) => pipeline.name === 'archive'));
@@ -41,6 +42,15 @@ test('execution runtime validates negative fixtures with useful diagnostics', ()
     }),
     /fanOut must define over.*fanOut must define nested step/s,
   );
+  assert.throws(
+    () => validateExecutionRuntimePack({
+      runtimeVersion: 1,
+      roles: { planner: { kind: 'planWork' }, otherPlanner: { kind: 'planWork' } },
+      prompts: { ok: { format: 'markdown', template: 'x' } },
+      pipelines: { p: { steps: [{ id: 'plan', kind: 'planWork', role: 'planner', prompt: 'ok' }] } },
+    }),
+    /planWork must not reference a role.*exactly one role with kind planWork/s,
+  );
 });
 
 test('runtime compiler converts deterministic runtime pipelines to legacy execution config', () => {
@@ -54,7 +64,10 @@ test('runtime compiler converts deterministic runtime pipelines to legacy execut
   assert.equal(cfg.pipelines.archive.sandbox, undefined);
   assert.ok(cfg.agents.planner.systemPrompt.includes('planner'));
   assert.equal(cfg.pipelines.archive.branchStrategy.type, 'merge-to-head');
+  assert.equal(cfg.pipelines['parallel-planner'].steps[0].kind, 'planWork');
+  assert.equal(cfg.pipelines['parallel-planner'].steps[0].role, 'planner');
   assert.equal(cfg.pipelines['parallel-planner'].steps[1].role, 'implementer');
+  assert.equal(compileRuntimeSteps([{ id: 'plan', kind: 'planWork', prompt: 'plan-work' }], pack)[0].role, 'planner');
   assert.equal(compileRuntimeSteps([{ id: 'noop', kind: 'gate' }], pack)[0].prompt, '$INPUT');
 });
 
@@ -69,6 +82,6 @@ test('configToYaml renders compiled runtime roles and pipelines', () => {
   assert.match(yaml, /^  parallel-planner-with-review:/m);
   assert.match(yaml, /^prompts:/m);
   assert.match(yaml, /template: \|\n      Inspect the configured issue tracker/s);
-  assert.match(yaml, /kind: runRole\n        role: planner\n        description: planner runRole\n        prompt: plan-work/);
+  assert.match(yaml, /kind: planWork\n        role: planner\n        description: planner planWork\n        prompt: plan-work/);
   assert.doesNotMatch(yaml, /^teams:/m);
 });

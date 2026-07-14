@@ -114,7 +114,7 @@ export function validateExecutionRuntimePack(value: unknown): ExecutionRuntimePa
 	return pack as ExecutionRuntimePack;
 }
 
-const BUILT_IN_STEP_KINDS = new Set(["runRole", "selectWork", "fanOut", "fanIn", "review", "merge", "postProcess", "gate"]);
+const BUILT_IN_STEP_KINDS = new Set(["planWork", "runRole", "selectWork", "fanOut", "fanIn", "review", "merge", "postProcess", "gate"]);
 const PROVIDER_QUALIFIED_STEP_KIND = /^[a-z][a-z0-9-]*\.[A-Za-z][A-Za-z0-9_-]*$/;
 
 function validateStep(scope: string, step: RuntimePipelineStep, errors: string[], pack: ExecutionRuntimePack): void {
@@ -123,6 +123,11 @@ function validateStep(scope: string, step: RuntimePipelineStep, errors: string[]
 	else if (!BUILT_IN_STEP_KINDS.has(step.kind) && !PROVIDER_QUALIFIED_STEP_KIND.test(step.kind)) errors.push(`${scope}.${step.id || "?"} references unknown step kind '${step.kind}'`);
 	if ((step.kind === "runRole" || step.kind === "review") && !step.role) errors.push(`${scope}.${step.id} must reference a role`);
 	if ((step.kind === "runRole" || step.kind === "review") && !step.prompt) errors.push(`${scope}.${step.id} must reference a prompt`);
+	if (step.kind === "planWork") {
+		if (step.role) errors.push(`${scope}.${step.id} planWork must not reference a role; the planning role is selected by kind planWork`);
+		const planWorkRoles = Object.entries(pack.roles || {}).filter(([, role]) => role?.kind === "planWork").map(([name]) => name);
+		if (planWorkRoles.length !== 1) errors.push(`${scope}.${step.id} requires exactly one role with kind planWork`);
+	}
 	if (step.role && step.role !== "default" && !pack.roles?.[step.role]) errors.push(`${scope}.${step.id} references unknown role '${step.role}'`);
 	if (step.prompt && step.prompt !== "default" && !pack.prompts?.[step.prompt]) errors.push(`${scope}.${step.id} references unknown prompt '${step.prompt}'`);
 	if (step.kind === "fanOut") {
@@ -186,6 +191,10 @@ export function runtimeToSandcastleConfig(pack = loadExecutionRuntimePack(), def
 export function compileRuntimeSteps(steps: RuntimePipelineStep[], pack = loadExecutionRuntimePack()): any[] {
 	const compiled: any[] = [];
 	for (const step of steps) {
+		if (step.kind === "planWork") {
+			compiled.push(compilePlanWorkStep(step, pack));
+			continue;
+		}
 		if (step.kind === "runRole" || step.kind === "review") {
 			compiled.push(compileAgentStep(step, pack));
 			continue;
@@ -199,6 +208,11 @@ export function compileRuntimeSteps(steps: RuntimePipelineStep[], pack = loadExe
 	return compiled.length ? compiled : [{ role: Object.keys(pack.roles)[0], prompt: "$INPUT", maxIterations: 1 }];
 }
 
+function compilePlanWorkStep(step: RuntimePipelineStep, pack: ExecutionRuntimePack): any {
+	const role = selectRuntimePlanWorkRoleName(pack);
+	return compileAgentStep({ ...step, role, kind: "planWork" }, pack);
+}
+
 function compileAgentStep(step: RuntimePipelineStep, pack: ExecutionRuntimePack): any {
 	const agent = pack.roles[step.role || ""] || {};
 	return {
@@ -209,6 +223,13 @@ function compileAgentStep(step: RuntimePipelineStep, pack: ExecutionRuntimePack)
 		maxIterations: Number(step.overrides?.maxIterations || agent.maxIterations || 1),
 		copyToWorktree: agent.copyToWorktree,
 	};
+}
+
+function selectRuntimePlanWorkRoleName(pack: ExecutionRuntimePack): string {
+	const matches = Object.entries(pack.roles || {}).filter(([, role]) => role?.kind === "planWork").map(([name]) => name);
+	if (matches.length === 1) return matches[0]!;
+	if (matches.length > 1) throw new Error(`Multiple planWork roles configured: ${matches.join(", ")}. Exactly one role may have kind: planWork.`);
+	throw new Error("No planWork role configured. Runtime planWork nodes require exactly one role with kind: planWork.");
 }
 
 function normalizeProvider(provider: string): string {

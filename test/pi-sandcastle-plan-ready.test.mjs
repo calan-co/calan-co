@@ -3,7 +3,13 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import agentWorkflows, { createPlannerSnapshot, parseSimpleYaml, selectPlanWorkRoleName } from '../extensions/agent-workflows/index.ts';
+import agentWorkflows, {
+  createPlannerSnapshot,
+  normalizeWorkPlanArtifact,
+  parseSimpleYaml,
+  selectPlanWorkRoleName,
+  validateWorkPlanArtifact,
+} from '../extensions/agent-workflows/index.ts';
 
 function fakePi() {
   const commands = new Map();
@@ -159,6 +165,28 @@ test('/work:plan rejects planner-authored pipeline and branch mechanics', async 
   assert.match(notifications[0].message, /must not author execution field 'branch'/);
 });
 
+test('Work Plan artifact schema normalizes canonical ids and rejects nested execution mechanics', () => {
+  const plan = normalizeWorkPlanArtifact({
+    schemaVersion: 1,
+    summary: 'Safe plan',
+    query: 'ready',
+    iterations: [{
+      id: 'iter-1',
+      title: 'First iteration',
+      parallelizable: true,
+      classifications: { risk: 'low' },
+      items: [{ id: ' wi-001 ', title: 'One', sourcePath: 'backlog/001.md', classifications: { area: 'core' } }],
+    }],
+  });
+
+  assert.equal(plan.schemaVersion, 1);
+  assert.equal(plan.iterations[0].items[0].id, 'wi-001');
+  assert.equal(plan.iterations[0].parallelizable, true);
+  assert.deepEqual(validateWorkPlanArtifact({ iterations: [{ items: [{ id: 'wi-002', metadata: { branchName: 'feature/from-plan' } }] }] }), [
+    "Plan iteration 1 item 1 metadata must not author execution field 'branchName'.",
+  ]);
+});
+
 test('/work:process --plan refuses cached invalid planner output', async () => {
   const cwd = makeRepo();
   const pi = fakePi();
@@ -252,6 +280,37 @@ test('/work:process --plan refuses cached Work Plans with planner-authored execu
   assert.match(notifications[0].message, /Cached Work Plan 'plan-with-execution-mechanics' is not executable/);
   assert.match(notifications[0].message, /recommendedPipeline/);
   assert.match(notifications[0].message, /branchName/);
+});
+
+test('/work:process ignores planner-recommended pipeline and derives pipeline from config/default', async () => {
+  const cwd = makeRepo();
+  const pi = fakePi();
+  const calls = [];
+  const notifications = [];
+  agentWorkflows(pi, {
+    work: {
+      now: () => 123456,
+      async plan(repo, query) {
+        return {
+          query,
+          iterations: [{ items: [{ id: 'wi-001' }], recommendedPipeline: 'planner-chosen-review', supportsParallel: false, rationale: 'legacy planner fixture' }],
+        };
+      },
+      async execute(repo, input) {
+        calls.push({ repo, input });
+        return { status: 'done' };
+      },
+    },
+  });
+
+  await pi.commands.get('work:process').handler('ready work', {
+    cwd,
+    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].input.pipeline, 'simple-loop');
+  assert.match(notifications.at(-1).message, /pipeline simple-loop/);
 });
 
 test('/work:process --plan derives pipeline from config and preserves explicit parallelizable classification', async () => {

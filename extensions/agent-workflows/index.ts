@@ -136,7 +136,7 @@ interface BacklogItem {
 
 interface BacklogPlanIteration {
 	items: BacklogItem[];
-	recommendedPipeline: string;
+	recommendedPipeline?: string;
 	supportsParallel: boolean;
 	rationale: string;
 }
@@ -144,6 +144,139 @@ interface BacklogPlanIteration {
 interface BacklogPlanResult {
 	query: string;
 	iterations: BacklogPlanIteration[];
+}
+
+export interface WorkPlanArtifact {
+	schemaVersion?: 1;
+	summary?: string;
+	query?: string;
+	iterations: WorkPlanIteration[];
+}
+
+export interface WorkPlanIteration {
+	id?: string;
+	title?: string;
+	items: WorkPlanItemRef[];
+	dependsOn?: string[];
+	rationale?: string;
+	classifications?: Record<string, unknown>;
+	parallelizable?: boolean;
+	hitl?: string[];
+}
+
+export interface WorkPlanItemRef {
+	id: string;
+	title?: string;
+	summary?: string;
+	sourcePath?: string;
+	rationale?: string;
+	dependsOn?: string[];
+	classifications?: Record<string, unknown>;
+	[key: string]: unknown;
+}
+
+const FORBIDDEN_WORK_PLAN_EXECUTION_FIELDS = new Set(["pipeline", "pipelines", "pipelineName", "recommendedPipeline", "recommendedPipelines", "branch", "branches", "branchName"]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function validateOptionalString(scope: string, value: Record<string, unknown>, field: string, errors: string[]): void {
+	if (value[field] !== undefined && typeof value[field] !== "string") errors.push(`${scope} ${field} must be a string.`);
+}
+
+function validateOptionalStringArray(scope: string, value: Record<string, unknown>, field: string, errors: string[]): void {
+	if (value[field] === undefined) return;
+	if (!Array.isArray(value[field]) || !(value[field] as unknown[]).every((entry) => typeof entry === "string")) errors.push(`${scope} ${field} must be an array of strings.`);
+}
+
+function validateOptionalObject(scope: string, value: Record<string, unknown>, field: string, errors: string[]): void {
+	if (value[field] !== undefined && !isRecord(value[field])) errors.push(`${scope} ${field} must be an object.`);
+}
+
+function validateForbiddenWorkPlanFields(scope: string, value: unknown, errors: string[]): void {
+	if (Array.isArray(value)) {
+		for (const entry of value) validateForbiddenWorkPlanFields(scope, entry, errors);
+		return;
+	}
+	if (!isRecord(value)) return;
+	for (const [field, child] of Object.entries(value)) {
+		if (FORBIDDEN_WORK_PLAN_EXECUTION_FIELDS.has(field)) {
+			errors.push(`${scope} must not author execution field '${field}'.`);
+			continue;
+		}
+		validateForbiddenWorkPlanFields(`${scope} ${field}`, child, errors);
+	}
+}
+
+export function validateWorkPlanArtifact(value: unknown): string[] {
+	const errors: string[] = [];
+	if (!isRecord(value)) return ["Planner output must be a JSON object."];
+	for (const [field, child] of Object.entries(value)) {
+		if (FORBIDDEN_WORK_PLAN_EXECUTION_FIELDS.has(field)) errors.push(`Plan must not author execution field '${field}'.`);
+		else if (field !== "iterations") validateForbiddenWorkPlanFields(`Plan ${field}`, child, errors);
+	}
+	if (value.schemaVersion !== undefined && value.schemaVersion !== 1) errors.push("Plan schemaVersion must be 1 when provided.");
+	validateOptionalString("Plan", value, "summary", errors);
+	validateOptionalString("Plan", value, "query", errors);
+	if (!Array.isArray(value.iterations)) return [...errors, "Planner output must contain an iterations array."];
+	for (const [iterationIndex, iteration] of value.iterations.entries()) {
+		const iterationScope = `Plan iteration ${iterationIndex + 1}`;
+		if (!isRecord(iteration)) {
+			errors.push(`${iterationScope} must be an object.`);
+			continue;
+		}
+		for (const [field, child] of Object.entries(iteration)) {
+			if (FORBIDDEN_WORK_PLAN_EXECUTION_FIELDS.has(field)) errors.push(`${iterationScope} must not author execution field '${field}'.`);
+			else if (field !== "items") validateForbiddenWorkPlanFields(`${iterationScope} ${field}`, child, errors);
+		}
+		validateOptionalString(iterationScope, iteration, "id", errors);
+		validateOptionalString(iterationScope, iteration, "title", errors);
+		validateOptionalString(iterationScope, iteration, "rationale", errors);
+		validateOptionalStringArray(iterationScope, iteration, "dependsOn", errors);
+		validateOptionalStringArray(iterationScope, iteration, "hitl", errors);
+		validateOptionalObject(iterationScope, iteration, "classifications", errors);
+		if (iteration.parallelizable !== undefined && typeof iteration.parallelizable !== "boolean") errors.push(`${iterationScope} parallelizable must be a boolean.`);
+		if (!Array.isArray(iteration.items)) {
+			errors.push(`${iterationScope} must contain an items array.`);
+			continue;
+		}
+		for (const [itemIndex, item] of iteration.items.entries()) {
+			const itemScope = `${iterationScope} item ${itemIndex + 1}`;
+			if (!isRecord(item)) {
+				errors.push(`${itemScope} must be an object.`);
+				continue;
+			}
+			for (const [field, child] of Object.entries(item)) {
+				if (FORBIDDEN_WORK_PLAN_EXECUTION_FIELDS.has(field)) errors.push(`${itemScope} must not author execution field '${field}'.`);
+				else validateForbiddenWorkPlanFields(`${itemScope} ${field}`, child, errors);
+			}
+			if (typeof item.id !== "string" || !item.id.trim()) errors.push(`${itemScope} is missing a canonical item id.`);
+			validateOptionalString(itemScope, item, "title", errors);
+			validateOptionalString(itemScope, item, "summary", errors);
+			validateOptionalString(itemScope, item, "sourcePath", errors);
+			validateOptionalString(itemScope, item, "rationale", errors);
+			validateOptionalStringArray(itemScope, item, "dependsOn", errors);
+			validateOptionalStringArray(itemScope, item, "tags", errors);
+			validateOptionalObject(itemScope, item, "classifications", errors);
+		}
+	}
+	return errors;
+}
+
+export function normalizeWorkPlanArtifact(value: unknown): WorkPlanArtifact {
+	const errors = validateWorkPlanArtifact(value);
+	if (errors.length) throw new Error(`Work Plan artifact is not executable:\n- ${errors.join("\n- ")}`);
+	const plan = JSON.parse(JSON.stringify(value)) as WorkPlanArtifact;
+	plan.iterations = plan.iterations.map((iteration) => ({
+		...iteration,
+		items: iteration.items.map((item) => ({ ...item, id: item.id.trim() })),
+	}));
+	return plan;
+}
+
+export function deriveProcessPipeline(explicitPipeline: string | undefined, cfg: { defaultPipeline?: string }): string {
+	return explicitPipeline || cfg.defaultPipeline || "simple-loop";
 }
 
 interface BacklogProcessRecord {
@@ -3337,39 +3470,7 @@ Work views and processing:
 	}
 
 	function validateExecutablePlanArtifact(plan: any): string[] {
-		const errors: string[] = [];
-		const forbiddenExecutionFields = new Set(["pipeline", "pipelines", "pipelineName", "recommendedPipeline", "recommendedPipelines", "branch", "branches", "branchName"]);
-		if (!plan || typeof plan !== "object" || Array.isArray(plan)) return ["Planner output must be a JSON object."];
-		for (const field of Object.keys(plan)) {
-			if (forbiddenExecutionFields.has(field)) errors.push(`Plan must not author execution field '${field}'.`);
-		}
-		if (!Array.isArray(plan.iterations)) return [...errors, "Planner output must contain an iterations array."];
-		for (const [iterationIndex, iteration] of plan.iterations.entries()) {
-			if (!iteration || typeof iteration !== "object" || Array.isArray(iteration)) {
-				errors.push(`Plan iteration ${iterationIndex + 1} must be an object.`);
-				continue;
-			}
-			for (const field of Object.keys(iteration)) {
-				if (forbiddenExecutionFields.has(field)) errors.push(`Plan iteration ${iterationIndex + 1} must not author execution field '${field}'.`);
-			}
-			if (!Array.isArray(iteration.items)) {
-				errors.push(`Plan iteration ${iterationIndex + 1} must contain an items array.`);
-				continue;
-			}
-			for (const [itemIndex, item] of iteration.items.entries()) {
-				if (!item || typeof item !== "object" || Array.isArray(item)) {
-					errors.push(`Plan iteration ${iterationIndex + 1} item ${itemIndex + 1} must be an object.`);
-					continue;
-				}
-				for (const field of Object.keys(item)) {
-					if (forbiddenExecutionFields.has(field)) errors.push(`Plan iteration ${iterationIndex + 1} item ${itemIndex + 1} must not author execution field '${field}'.`);
-				}
-				if (typeof item.id !== "string" || !item.id.trim()) {
-					errors.push(`Plan iteration ${iterationIndex + 1} item ${itemIndex + 1} is missing a canonical item id.`);
-				}
-			}
-		}
-		return errors;
+		return validateWorkPlanArtifact(plan);
 	}
 
 	async function runPlannerPhase(args: string, ctx: any): Promise<any> {
@@ -3403,9 +3504,10 @@ Work views and processing:
 				ctx.ui.notify(`Planner output is not executable:\n- ${validationErrors.join("\n- ")}\n\nCached invalid output: ${invalidRecord.id}\nRecord: ${invalidRecordPath}`, "error");
 				return;
 			}
-			const record = { id: createBacklogPlanId(createdAt), kind: "work-plan", createdAt, args: effectiveArgs, plan };
+			const normalizedPlan = normalizeWorkPlanArtifact(plan);
+			const record = { id: createBacklogPlanId(createdAt), kind: "work-plan", createdAt, args: effectiveArgs, plan: normalizedPlan };
 			const recordPath = writeBacklogPlanRecord(ctx.cwd, record);
-			ctx.ui.notify(`${formatAuthoritativePlan(plan)}\n\nCached plan: ${record.id}\nRecord: ${recordPath}`, "info");
+			ctx.ui.notify(`${formatAuthoritativePlan(normalizedPlan)}\n\nCached plan: ${record.id}\nRecord: ${recordPath}`, "info");
 		} catch (error) {
 			ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 		}
@@ -3979,10 +4081,11 @@ Work views and processing:
 				const { query, pipeline: explicitPipeline, planId } = parseBacklogProcessArgs(args);
 				const cfg = await loadConfig(ctx.cwd);
 				const cachedPlanRecord = planId ? readBacklogPlanRecord(ctx.cwd, planId) : undefined;
-				const cachedPlan = cachedPlanRecord?.plan;
+				let cachedPlan: WorkPlanArtifact | undefined;
 				if (planId) {
-					const validationErrors = validateExecutablePlanArtifact(cachedPlan);
+					const validationErrors = validateExecutablePlanArtifact(cachedPlanRecord?.plan);
 					if (validationErrors.length) throw new Error(`Cached Work Plan '${planId}' is not executable:\n- ${validationErrors.join("\n- ")}`);
+					cachedPlan = normalizeWorkPlanArtifact(cachedPlanRecord?.plan);
 				}
 				const planning = cachedPlan ? { iterations: cachedPlan.iterations.map((entry: any) => ({ items: entry.items || [], supportsParallel: planIterationSupportsParallel(entry) })) } : await planBacklogProcessing(ctx.cwd, query);
 				const iteration = planning.iterations[0];
@@ -3991,7 +4094,7 @@ Work views and processing:
 					return;
 				}
 
-				const pipeline = explicitPipeline || (cachedPlan ? (cfg.defaultPipeline || "simple-loop") : (iteration.recommendedPipeline || cfg.defaultPipeline || "implement"));
+				const pipeline = deriveProcessPipeline(explicitPipeline, cfg);
 				const startedAt = getBacklogTimestamp(backlogDeps.now);
 				const runId = createBacklogRunId(startedAt);
 				baseRecord = {

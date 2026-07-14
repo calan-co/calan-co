@@ -9,7 +9,9 @@ test('pipeline packs are discovered from the Agent Workflows execution runtime p
   assert.deepEqual(names, ['archive', 'blank', 'parallel-planner', 'parallel-planner-with-review', 'sequential-reviewer', 'simple-loop']);
   const runtime = loadExecutionRuntimePack();
   assert.ok(runtime.prompts['implement-work'].template.length > 20);
-  assert.equal(runtime.pipelines['parallel-planner'].steps[0].role, 'planner');
+  assert.equal(runtime.roles.planner.kind, 'planWork');
+  assert.equal(runtime.pipelines['parallel-planner'].steps[0].kind, 'planWork');
+  assert.equal(runtime.pipelines['parallel-planner'].steps[0].role, undefined);
 });
 
 test('pipeline packs map into agent-workflows agent and pipeline inventory', () => {
