@@ -114,6 +114,31 @@ test('reads backlog process records from unified run records and ignores other r
   });
 });
 
+test('flattens orchestrator execution context branches for work run listing', async () => {
+  await withTempDir(async (cwd) => {
+    await writeJson(path.join(cwd, '.pi/sandcastle/runs/work-contexts.json'), {
+      id: 'work-contexts',
+      kind: 'work-process',
+      query: 'auth',
+      pipeline: 'simple-loop',
+      status: 'done',
+      startedAt: 100,
+      updatedAt: 200,
+      resolvedItems: [{ id: 'wi-1', title: 'One' }, { id: 'wi-2', title: 'Two' }],
+      executionContexts: [
+        { itemId: 'wi-1', contextId: 'run/wi-1/0-0', branch: 'agent-workflows/simple-loop/run/wi-1' },
+        { itemId: 'wi-2', contextId: 'run/wi-2/0-1', branch: 'agent-workflows/simple-loop/run/wi-2' },
+      ],
+      logs: ['runtime.log'],
+    });
+
+    const [record] = readBacklogRunRecords(cwd);
+    assert.deepEqual(record.branches, ['agent-workflows/simple-loop/run/wi-1', 'agent-workflows/simple-loop/run/wi-2']);
+    assert.equal(listBacklogRuns(cwd, 'wi-2').length, 1);
+    assert.match(formatBacklogRunList([record]), /agent-workflows\/simple-loop\/run\/wi-1/);
+  });
+});
+
 test('infers backlog status safely and reports ambiguity', async () => {
   const running = backlogRun({ id: 'run-a', updatedAt: 10 });
   const queued = backlogRun({ id: 'run-b', status: 'queued', updatedAt: 20 });

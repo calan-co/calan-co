@@ -36,6 +36,14 @@ import { buildDefaultConfigText, configToYaml, packsToConfig } from "./pipeline-
 import { renderWorkBrief } from "./work-brief.mjs";
 import { loadExecutionRuntimePack, listRuntimeAgents, listRuntimePipelines } from "./execution-runtime.ts";
 import {
+	runWorkProcess,
+	validateExecutablePlanArtifact,
+	writeWorkProcessRunRecord,
+	type WorkExecutionContext,
+	type WorkExecutionGroup,
+	type WorkItem,
+} from "./orchestrator.ts";
+import {
 	formatStatusSelection,
 	formatWorkRunList,
 	listWorkRuns,
@@ -306,9 +314,12 @@ interface BacklogProcessRecord {
 	query: string;
 	resolvedItems: BacklogItem[];
 	pipeline: string;
+	planId?: string;
 	status: "queued" | "running" | "done" | "error";
 	branches: string[];
 	logs: string[];
+	executionContexts?: WorkExecutionContext[];
+	executionGroups?: WorkExecutionGroup[];
 	startedAt: number;
 	updatedAt: number;
 	endedAt?: number;
@@ -347,8 +358,10 @@ interface BacklogProcessPlanDeps {
 			runId: string;
 			query: string;
 			pipeline: string;
-			items: BacklogItem[];
+			items: WorkItem[];
 			parallel: boolean;
+			executionContexts: WorkExecutionContext[];
+			executionGroups: WorkExecutionGroup[];
 			recordPath: string;
 		},
 	) => Promise<{ branches?: string[]; logs?: string[]; status?: BacklogProcessRecord["status"] }>;
@@ -403,10 +416,8 @@ const PLANS_DIR = `${CONFIG_DIR}/plans`;
 const LOGS_DIR = `${CONFIG_DIR}/logs`;
 const DEFAULT_STEP_PROMPT = "$INPUT";
 const PIPELINE_RUNS_DIR = RUNS_DIR;
-const BACKLOG_RUNS_DIR = RUNS_DIR;
 const DIRECT_ROLE_RUN_KIND = "direct-role";
 const PIPELINE_RUN_KIND = "pipeline";
-const BACKLOG_PROCESS_RUN_KIND = "work-process";
 const EDITOR_PREF_PATH = `${CONFIG_DIR}/editor`;
 const SCAFFOLD_STATE_PATH = `${CONFIG_DIR}/scaffold-state.json`;
 const CONFIG_SCHEMA_PATH = new URL("./schema/config.schema.json", import.meta.url);
@@ -1185,21 +1196,6 @@ export function parseBacklogProcessArgs(raw: string): { query: string; pipeline?
 	}
 
 	return { query: queryTokens.join(" ").trim(), pipeline, planId };
-}
-
-function ensureBacklogRunScaffold(cwd: string): void {
-	mkdirSync(join(cwd, BACKLOG_RUNS_DIR), { recursive: true });
-}
-
-function getBacklogRunRecordPath(cwd: string, runId: string): string {
-	return join(cwd, BACKLOG_RUNS_DIR, `${runId}.json`);
-}
-
-function writeBacklogRunRecord(cwd: string, record: BacklogProcessRecord): string {
-	ensureBacklogRunScaffold(cwd);
-	const recordPath = getBacklogRunRecordPath(cwd, record.id);
-	writeFileSync(recordPath, JSON.stringify({ ...record, kind: BACKLOG_PROCESS_RUN_KIND }, null, 2));
-	return recordPath;
 }
 
 function getBacklogTimestamp(now?: () => number): number {
@@ -3558,9 +3554,6 @@ Work views and processing:
 		return JSON.stringify(plan, null, 2);
 	}
 
-	function validateExecutablePlanArtifact(plan: any): string[] {
-		return validateWorkPlanArtifact(plan);
-	}
 
 	async function runPlannerPhase(args: string, ctx: any): Promise<any> {
 		const cfg = await loadConfig(ctx.cwd);
@@ -3816,32 +3809,37 @@ Work views and processing:
 
 	async function executeBacklogProcessing(
 		cwd: string,
-		record: BacklogProcessRecord,
-		parallel: boolean,
+		input: {
+			runId: string;
+			query: string;
+			pipeline: string;
+			items: WorkItem[];
+			parallel: boolean;
+			executionContexts: WorkExecutionContext[];
+			executionGroups: WorkExecutionGroup[];
+			recordPath: string;
+		},
 		ctx?: any,
 	): Promise<BacklogExecutionResult> {
-		const recordPath = getBacklogRunRecordPath(cwd, record.id);
-		if (backlogDeps.execute) {
-			return backlogDeps.execute(cwd, {
-				runId: record.id,
-				query: record.query,
-				pipeline: record.pipeline,
-				items: record.resolvedItems,
-				parallel,
-				recordPath,
-			});
-		}
+		if (backlogDeps.execute) return backlogDeps.execute(cwd, input);
 
+		const contextByItemId = new Map(input.executionContexts.map((context) => [context.itemId, context]));
 		const runtimePrompt = [
-			`Work process ${record.id}`,
-			`Pipeline: ${record.pipeline}`,
-			`Query: ${record.query || "(none)"}`,
-			`Parallel requested: ${parallel ? "yes" : "no"}`,
+			`Work process ${input.runId}`,
+			`Pipeline: ${input.pipeline}`,
+			`Query: ${input.query || "(none)"}`,
+			`Parallel requested: ${input.parallel ? "yes" : "no"}`,
+			"",
+			"Execution contexts (orchestrator-owned; do not rename branches):",
+			...input.executionContexts.map((context) => `- ${context.itemId}: context ${context.contextId}, branch ${context.branch}`),
 			"",
 			"Items:",
-			...record.resolvedItems.map((item) => `- ${item.id} ${item.title} (${item.sourcePath})${item.summary ? ` — ${item.summary}` : ""}`),
+			...input.items.map((item) => {
+				const context = contextByItemId.get(item.id);
+				return `- ${item.id} ${item.title} (${item.sourcePath})${item.summary ? ` — ${item.summary}` : ""}${context ? ` [context ${context.contextId}]` : ""}`;
+			}),
 		].join("\n");
-		const pipelineRun = await executePipeline(cwd, record.pipeline, runtimePrompt, { ...deps.pipeline, image: deps.pipeline?.image || deps.image });
+		const pipelineRun = await executePipeline(cwd, input.pipeline, runtimePrompt, { ...deps.pipeline, image: deps.pipeline?.image || deps.image });
 		return {
 			branches: [pipelineRun.branch].filter((branch): branch is string => !!branch),
 			logs: [pipelineRun.logDir].filter((logPath): logPath is string => !!logPath),
@@ -4147,12 +4145,6 @@ Work views and processing:
 		},
 	});
 
-	function planIterationSupportsParallel(iteration: any): boolean {
-		if (typeof iteration?.parallelizable === "boolean") return iteration.parallelizable;
-		if (typeof iteration?.classifications?.parallelizable === "boolean") return iteration.classifications.parallelizable;
-		return (iteration?.items || []).length > 1;
-	}
-
 	pi.registerCommand("work:process", {
 		description: "Start durable Work processing: /work:process [query] --pipeline <pipeline>",
 		getArgumentCompletions: (prefix: string) => {
@@ -4165,66 +4157,31 @@ Work views and processing:
 				ctx.ui.notify("The sandbox image is being rebuilt after config changes. Retry /work:process when the new image is built.", "warning");
 				return;
 			}
-			let baseRecord: BacklogProcessRecord | undefined;
 			try {
 				const { query, pipeline: explicitPipeline, planId } = parseBacklogProcessArgs(args);
 				const cfg = await loadConfig(ctx.cwd);
-				const cachedPlanRecord = planId ? readBacklogPlanRecord(ctx.cwd, planId) : undefined;
-				let cachedPlan: WorkPlanArtifact | undefined;
-				if (planId) {
-					const validationErrors = validateExecutablePlanArtifact(cachedPlanRecord?.plan);
-					if (validationErrors.length) throw new Error(`Cached Work Plan '${planId}' is not executable:\n- ${validationErrors.join("\n- ")}`);
-					cachedPlan = normalizeWorkPlanArtifact(cachedPlanRecord?.plan);
-				}
-				const planning = cachedPlan ? { iterations: cachedPlan.iterations.map((entry: any) => ({ items: entry.items || [], supportsParallel: planIterationSupportsParallel(entry) })) } : await planBacklogProcessing(ctx.cwd, query);
-				const iteration = planning.iterations[0];
-				if (!iteration) {
-					ctx.ui.notify("No Work Items were selected for processing.", "error");
-					return;
-				}
-
-				const pipeline = deriveProcessPipeline(explicitPipeline, cfg);
-				const startedAt = getBacklogTimestamp(backlogDeps.now);
-				const runId = createBacklogRunId(startedAt);
-				baseRecord = {
-					id: runId,
-					kind: BACKLOG_PROCESS_RUN_KIND,
-					query: cachedPlan?.query || query,
-					resolvedItems: iteration.items,
-					pipeline,
-					planId,
-					status: "running",
-					branches: [],
-					logs: [],
-					startedAt,
-					updatedAt: startedAt,
-				};
-				const recordPath = writeBacklogRunRecord(ctx.cwd, baseRecord);
-				const execution = await executeBacklogProcessing(ctx.cwd, baseRecord, iteration.supportsParallel, ctx);
-				const endedAt = getBacklogTimestamp(backlogDeps.now);
-				const finalRecord: BacklogProcessRecord = {
-					...baseRecord,
-					status: execution.status || "done",
-					branches: execution.branches || [],
-					logs: execution.logs || [],
-					updatedAt: endedAt,
-					endedAt,
-				};
-				writeBacklogRunRecord(ctx.cwd, finalRecord);
+				const { record: finalRecord, recordPath } = await runWorkProcess(
+					{
+						cwd: ctx.cwd,
+						query,
+						explicitPipeline,
+						planId,
+						defaultPipeline: cfg.defaultPipeline,
+						now: () => getBacklogTimestamp(backlogDeps.now),
+						createRunId: createBacklogRunId,
+					},
+					{
+						readPlanRecord: readBacklogPlanRecord,
+						plan: planBacklogProcessing,
+						execute: (cwd, input) => executeBacklogProcessing(cwd, input, ctx),
+						writeRecord: writeWorkProcessRunRecord,
+					},
+				);
 				ctx.ui.notify(
-					`Work process ${finalRecord.status}: ${runId} · pipeline ${pipeline} · items ${finalRecord.resolvedItems.length} · record ${recordPath}${finalRecord.branches.length ? ` · branches ${finalRecord.branches.join(", ")}` : ""}${finalRecord.logs.length ? ` · logs ${finalRecord.logs.join(", ")}` : ""}`,
+					`Work process ${finalRecord.status}: ${finalRecord.id} · pipeline ${finalRecord.pipeline} · items ${finalRecord.resolvedItems.length} · record ${recordPath}${finalRecord.branches.length ? ` · branches ${finalRecord.branches.join(", ")}` : ""}${finalRecord.logs.length ? ` · logs ${finalRecord.logs.join(", ")}` : ""}`,
 					finalRecord.status === "done" ? "success" : "error",
 				);
 			} catch (error) {
-				if (baseRecord) {
-					const endedAt = getBacklogTimestamp(backlogDeps.now);
-					writeBacklogRunRecord(ctx.cwd, {
-						...baseRecord,
-						status: "error",
-						updatedAt: endedAt,
-						endedAt,
-					});
-				}
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 			}
 		},

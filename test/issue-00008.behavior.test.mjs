@@ -59,8 +59,13 @@ function assertBacklogRunRecord(record, expected) {
   assert.equal(record.pipeline, expected.pipeline);
   assert.equal(record.status, 'done');
   assert.equal(record.resolvedItems.length, expected.resolvedItems);
-  assert.deepEqual(record.branches, expected.branches);
+  assert.equal(record.branches.length, expected.branchItemIds.length);
+  for (const itemId of expected.branchItemIds) {
+    assert.ok(record.branches.some((branch) => branch.startsWith(`agent-workflows/${expected.pipeline}/`) && branch.endsWith(`/${itemId}`)), `missing orchestrator branch for ${itemId}`);
+  }
   assert.deepEqual(record.logs, expected.logs);
+  assert.ok(Array.isArray(record.executionContexts));
+  assert.equal(record.executionContexts.length, expected.branchItemIds.length);
   assert.ok(Number.isFinite(record.startedAt));
   assert.ok(Number.isFinite(record.endedAt));
   assert.ok(record.endedAt >= record.startedAt);
@@ -218,7 +223,7 @@ Preserve this exact markdown body.
   }
 });
 
-test('work:process uses explicit pipeline or deterministic default and writes durable run records', () => {
+test('work:process selects pipeline deterministically and writes durable run records', () => {
   const { calls, records, notifications } = runBacklogProcessFixture();
   const byQuery = new Map(records.map((record) => [record.query, record]));
 
@@ -240,19 +245,19 @@ test('work:process uses explicit pipeline or deterministic default and writes du
   assertBacklogRunRecord(byQuery.get('auth bugs'), {
     pipeline: 'implement',
     resolvedItems: 1,
-    branches: ['branch-00008'],
+    branchItemIds: ['00008'],
     logs: ['log-00008.txt'],
   });
   assertBacklogRunRecord(byQuery.get('label:small'), {
     pipeline: 'review',
     resolvedItems: 1,
-    branches: ['branch-00008'],
+    branchItemIds: ['00008'],
     logs: ['log-00008.txt'],
   });
   assertBacklogRunRecord(byQuery.get('review'), {
     pipeline: 'simple-loop',
     resolvedItems: 2,
-    branches: ['branch-00008', 'branch-00009'],
+    branchItemIds: ['00008', '00009'],
     logs: ['log-00008.txt', 'log-00009.txt'],
   });
 

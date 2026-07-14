@@ -78,6 +78,14 @@ function normalizeArray(values) {
   return [];
 }
 
+function normalizeContextBranches(raw) {
+  const contexts = Array.isArray(raw?.executionContexts) ? raw.executionContexts : [];
+  return contexts
+    .map((context) => context && typeof context === "object" ? context.branch : undefined)
+    .filter((branch) => typeof branch === "string" && branch.trim())
+    .map((branch) => String(branch));
+}
+
 function isBacklogLikeRecord(raw) {
   return Boolean(
     raw &&
@@ -139,6 +147,9 @@ function normalizeBacklogRunRecord(raw, filePath) {
     record.itemIds = record.resolvedItems.map((item) => item.id);
   }
 
+  if (!record.branches.length) {
+    record.branches = normalizeContextBranches(raw);
+  }
   if (!record.branches.length && raw.branch) {
     record.branches = [String(raw.branch)];
   }
