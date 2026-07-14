@@ -92,6 +92,7 @@
   "roles": {
     "planner": {
       "role": "planner",
+      "kind": "planWork",
       "provider": "default",
       "model": "default",
       "sandbox": "default",

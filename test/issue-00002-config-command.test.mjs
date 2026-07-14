@@ -79,7 +79,7 @@ test('issue 00002 registers /work:config-raw and manages repo-local config', () 
     );
     assert.deepEqual(
       configCompletions('get roles.implementer.').map((item) => item.label).sort(),
-      ['branch', 'description', 'maxIterations', 'model', 'provider', 'sandbox', 'systemPrompt'],
+      ['branch', 'description', 'kind', 'maxIterations', 'model', 'provider', 'sandbox', 'systemPrompt'],
     );
     assert.deepEqual(
       configCompletions('set defaultSandbox ').map((item) => item.label),

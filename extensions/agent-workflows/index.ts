@@ -62,6 +62,7 @@ interface AgentDef {
 	sandbox?: "docker" | "podman" | "vercel" | "no-sandbox";
 	provider?: "claude" | "claude-code" | "pi" | "codex" | "cursor" | "opencode" | "copilot";
 	systemPrompt?: string;
+	kind?: "planWork" | "runRole" | "review" | "merge" | string;
 	maxIterations?: number;
 	branch?: string;
 	copyToWorktree?: string[];
@@ -221,7 +222,7 @@ interface RunState {
 }
 
 type RootConfigKey = "defaultSandbox" | "defaultModel" | "defaultPipeline" | "defaultAgent" | "workSource" | "workSourceSetupCommand" | "issueTracker" | "issueTrackerSetupCommand" | "imageNamePattern";
-type EditableAgentField = "description" | "model" | "sandbox" | "maxIterations" | "branch";
+type EditableAgentField = "description" | "kind" | "model" | "sandbox" | "maxIterations" | "branch";
 
 const CONFIG_DIR = ".pi/sandcastle";
 const CONFIG_PATH = `${CONFIG_DIR}/config.yaml`;
@@ -233,7 +234,7 @@ const SUPPORTED_SANDBOXES = new Set(["docker", "podman", "vercel", "no-sandbox"]
 const DEFAULT_SANDBOX: NonNullable<AgentDef["sandbox"]> = "docker";
 const DEFAULT_MODEL = "Agent Default";
 const ROOT_CONFIG_KEYS: RootConfigKey[] = ["defaultSandbox", "defaultModel", "defaultPipeline", "defaultAgent", "workSource", "workSourceSetupCommand", "imageNamePattern"];
-const EDITABLE_AGENT_FIELDS: EditableAgentField[] = ["description", "model", "sandbox", "maxIterations", "branch"];
+const EDITABLE_AGENT_FIELDS: EditableAgentField[] = ["description", "kind", "model", "sandbox", "maxIterations", "branch"];
 const RUNS_DIR = `${CONFIG_DIR}/runs`;
 const PLANS_DIR = `${CONFIG_DIR}/plans`;
 const LOGS_DIR = `${CONFIG_DIR}/logs`;
@@ -1583,7 +1584,7 @@ function schemaEnumForPath(path: string): string[] | undefined {
 
 function configuredConfigPaths(cfg: SandcastleConfig): string[] {
 	const rootPaths = ROOT_CONFIG_KEYS;
-	const agentFields = ["description", "model", "sandbox", "provider", "maxIterations", "branch", "systemPrompt"];
+	const agentFields = ["description", "kind", "model", "sandbox", "provider", "maxIterations", "branch", "systemPrompt"];
 	const pipelineFields = ["description", "model", "sandbox"];
 	return [
 		...rootPaths,
@@ -1674,8 +1675,11 @@ function validateConfig(cwd: string, cfg: SandcastleConfig): string[] {
 		if (agent.maxIterations !== undefined && (!Number.isInteger(agent.maxIterations) || agent.maxIterations < 1)) {
 			issues.push(`Role '${name}' has an invalid maxIterations value.`);
 		}
+		if (agent.kind && !["planWork", "runRole", "review", "merge"].includes(agent.kind)) issues.push(`Role '${name}' has unsupported kind '${agent.kind}'.`);
 		if (agent.systemPrompt && !agent.systemPrompt.trim()) issues.push(`Role '${name}' has an empty system prompt.`);
 	}
+	const planWorkRoles = Object.entries(cfg.agents).filter(([, agent]) => agent.kind === "planWork").map(([name]) => name);
+	if (planWorkRoles.length > 1) issues.push(`Exactly one role may have kind 'planWork'; found ${planWorkRoles.join(", ")}.`);
 	for (const [chainName, steps] of Object.entries(cfg.chains)) {
 		if (!Array.isArray(steps) || !steps.length) {
 			issues.push(`Chain '${chainName}' has no steps.`);
@@ -1711,6 +1715,13 @@ function normalizeConfig(cfg: Partial<SandcastleConfig>): SandcastleConfig {
 }
 
 const DEFAULT_CONFIG = normalizeConfig(packsToConfig());
+
+export function selectPlanWorkRoleName(cfg: Pick<SandcastleConfig, "agents">): string {
+	const matches = Object.entries(cfg.agents).filter(([, agent]) => agent.kind === "planWork").map(([name]) => name);
+	if (matches.length === 1) return matches[0]!;
+	if (matches.length > 1) throw new Error(`Multiple planWork roles configured: ${matches.join(", ")}. Exactly one role may have kind: planWork.`);
+	throw new Error("No planWork role configured. /work:plan requires exactly one role with kind: planWork and will not infer planning from role names.");
+}
 
 function resolvePromptText(cfg: SandcastleConfig, promptRef: string): string {
 	return cfg.prompts[promptRef]?.template || promptRef;
@@ -3338,8 +3349,7 @@ Work views and processing:
 	async function runPlannerPhase(args: string, ctx: any): Promise<any> {
 		if (backlogDeps.planPhase) return backlogDeps.planPhase(ctx.cwd, args);
 		const cfg = await loadConfig(ctx.cwd);
-		const agent = cfg.agents.planner ? "planner" : undefined;
-		if (!agent) throw new Error("No planner role configured. /work:plan requires an explicit planner role and will not fall back to another role.");
+		const agent = selectPlanWorkRoleName(cfg);
 		const readyOutput = backlogDeps.ready
 			? await backlogDeps.ready(ctx.cwd, args)
 			: (await runProcess(ctx.cwd, "dv", ["work", "ready"])).stdout.trim();

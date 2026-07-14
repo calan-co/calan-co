@@ -43,7 +43,7 @@ export function configToYaml(config) {
   ];
   for (const [name, agent] of Object.entries(config.agents)) {
     lines.push(`  ${name}:`);
-    for (const key of ['description', 'provider', 'model', 'maxIterations', 'branch']) {
+    for (const key of ['description', 'kind', 'provider', 'model', 'maxIterations', 'branch']) {
       if (agent[key] !== undefined) lines.push(`    ${key}: ${yamlScalar(agent[key])}`);
     }
     if (agent.systemPrompt) lines.push(`    systemPrompt: ${yamlBlock(agent.systemPrompt, 6)}`);

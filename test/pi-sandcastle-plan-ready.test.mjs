@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import agentWorkflows, { createPlannerSnapshot } from '../extensions/agent-workflows/index.ts';
+import agentWorkflows, { createPlannerSnapshot, parseSimpleYaml, selectPlanWorkRoleName } from '../extensions/agent-workflows/index.ts';
 
 function fakePi() {
   const commands = new Map();
@@ -62,6 +62,20 @@ test('/work:plan runs planning phase and caches authoritative plan output', asyn
   const record = JSON.parse(readFileSync(recordPath, 'utf8'));
   assert.equal(record.kind, 'work-plan');
   assert.equal(record.plan.summary, 'Planner chose implementation first.');
+});
+
+test('selectPlanWorkRoleName uses explicit role kind rather than role name', () => {
+  const cfg = parseSimpleYaml(`
+roles:
+  researcher:
+    kind: planWork
+    provider: pi
+  planner:
+    kind: runRole
+    provider: pi
+`);
+  assert.equal(selectPlanWorkRoleName(cfg), 'researcher');
+  assert.throws(() => selectPlanWorkRoleName(parseSimpleYaml('roles:\n  planner:\n    provider: pi\n')), /kind: planWork/);
 });
 
 test('createPlannerSnapshot creates a disposable git repo without host-private state', async () => {

@@ -21,6 +21,7 @@ export interface ExecutionRuntimePack {
 
 export interface RuntimeAgent {
 	role?: string;
+	kind?: string;
 	provider?: string;
 	model?: string;
 	sandbox?: string;
@@ -149,6 +150,7 @@ export function runtimeToSandcastleConfig(pack = loadExecutionRuntimePack(), def
 		agents[name] = {
 			name,
 			description: agent.role ? `${agent.role} role` : `${name} role`,
+			kind: agent.kind,
 			provider: normalizeProvider(normalizeDefault(agent.provider, defaultAgent)),
 			model: agent.model && agent.model !== "default" ? String(agent.model) : undefined,
 			sandbox: agent.sandbox && agent.sandbox !== "default" ? normalizeSandbox(String(agent.sandbox)) : undefined,

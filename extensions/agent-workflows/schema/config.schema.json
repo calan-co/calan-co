@@ -94,6 +94,7 @@
       "additionalProperties": false,
       "properties": {
         "description": { "type": "string" },
+        "kind": { "type": "string", "enum": ["planWork", "runRole", "review", "merge"] },
         "model": { "type": "string", "minLength": 1 },
         "sandbox": { "$ref": "#/$defs/sandbox" },
         "provider": { "$ref": "#/$defs/provider" },
