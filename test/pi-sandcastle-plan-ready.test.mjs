@@ -64,6 +64,22 @@ test('/work:plan runs planning phase and caches authoritative plan output', asyn
   assert.equal(record.plan.summary, 'Planner chose implementation first.');
 });
 
+test('/work:plan fails closed when no deterministic planning capability is configured', async () => {
+  const cwd = makeRepo();
+  const pi = fakePi();
+  const notifications = [];
+  agentWorkflows(pi, {});
+
+  await pi.commands.get('work:plan').handler('', {
+    cwd,
+    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  });
+
+  assert.equal(notifications[0].type, 'error');
+  assert.match(notifications[0].message, /No deterministic Work planning capability configured/);
+  assert.match(notifications[0].message, /will not run a reasoning planner on the host/);
+});
+
 test('/work:plan fails closed and caches invalid planner output for inspection', async () => {
   const cwd = makeRepo();
   const pi = fakePi();

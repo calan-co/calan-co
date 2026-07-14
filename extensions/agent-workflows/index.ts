@@ -3310,17 +3310,7 @@ Work views and processing:
 
 	async function runPlannerPhase(args: string, ctx: any): Promise<any> {
 		if (backlogDeps.planPhase) return backlogDeps.planPhase(ctx.cwd, args);
-		const cfg = await loadConfig(ctx.cwd);
-		const agent = cfg.agents.planner ? "planner" : Object.keys(cfg.agents)[0];
-		if (!agent) throw new Error("No planner role configured. Run /work:config and configure a planner role.");
-		const readyOutput = backlogDeps.ready
-			? await backlogDeps.ready(ctx.cwd, args)
-			: (await runProcess(ctx.cwd, "dv", ["work", "ready"])).stdout.trim();
-		const task = `Run the Work planning phase for this repository.\n\nRequested plan arguments: ${args || "(none)"}\n\nReady Work input from the configured Work Source:\n${readyOutput}\n\nReturn an authoritative plan with iterations, item ids, risk rationale, recommended pipeline per iteration, and any HITL or dependency constraints. End with <promise>COMPLETE</promise>.`;
-		const run = await dispatch(ctx.cwd, agent, task, ctx, { readOnly: true });
-		await new Promise<void>((resolve) => run.proc?.on("close", () => resolve()));
-		if (run.status !== "done") throw new Error(`Planner role failed: ${run.lastLine}`);
-		return JSON.parse(readFileSync(run.resultPath!, "utf8"));
+		throw new Error("No deterministic Work planning capability configured. Agent Workflows will not run a reasoning planner on the host; configure an injected planPhase capability or a future isolated read-only planning adapter.");
 	}
 
 	async function notifyBacklogPlan(args: string, ctx: any, overrides?: { iterations?: number }): Promise<void> {
