@@ -251,8 +251,7 @@ const inFlightImageBuilds = new Map<string, Promise<void>>();
 
 const RUNNER = String.raw`#!/usr/bin/env node
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { dirname } from "node:path";
 
 const jobPath = process.argv[2];
 if (!jobPath) throw new Error("Usage: node run-job.mjs <job.json>");
@@ -262,22 +261,22 @@ function emit(event) {
   console.log(JSON.stringify({ source: "agent-workflows", ...event }));
 }
 
-const userNodeModules = process.env.PI_AGENT_NODE_MODULES || join(process.env.HOME || "", ".pi", "agent", "npm", "node_modules");
-const importUserPackage = (subpath) => import(pathToFileURL(join(userNodeModules, "@ai-hero", "sandcastle", subpath)).href);
-
 async function loadSandbox(kind) {
-  if (kind === "podman") return (await importUserPackage("dist/sandboxes/podman.js")).podman();
-  if (kind === "vercel") return (await importUserPackage("dist/sandboxes/vercel.js")).vercel();
-  if (kind === "no-sandbox") return (await importUserPackage("dist/sandboxes/no-sandbox.js")).noSandbox();
-  return (await importUserPackage("dist/sandboxes/docker.js")).docker();
+  if (kind === "podman") return (await import("@ai-hero/sandcastle/sandboxes/podman")).podman();
+  if (kind === "vercel") return (await import("@ai-hero/sandcastle/sandboxes/vercel")).vercel();
+  if (kind === "no-sandbox") return (await import("@ai-hero/sandcastle/sandboxes/no-sandbox")).noSandbox();
+  return (await import("@ai-hero/sandcastle/sandboxes/docker")).docker();
 }
 
 try {
-  const { run, claudeCode, codex, pi } = await importUserPackage("dist/index.js");
+  const { run, claudeCode, codex, cursor, opencode, copilot, pi } = await import("@ai-hero/sandcastle");
   const sandbox = await loadSandbox(job.sandbox || "docker");
   const makeAgent = (provider, model) => {
     if (provider === "claude") return claudeCode(model);
     if (provider === "codex") return codex(model);
+    if (provider === "cursor") return cursor(model);
+    if (provider === "opencode") return opencode(model);
+    if (provider === "copilot") return copilot(model);
     return pi(model);
   };
   const prompt = (job.systemPrompt ? job.systemPrompt + "\n\n" : "") + "## Delegated task\n\n" + job.prompt;
@@ -1179,6 +1178,12 @@ function hydrateConfigDefaults(raw: string): { text: string; changed: boolean; c
 	return { text, changed: text !== raw, changes };
 }
 
+function runnerNeedsRefresh(path: string): boolean {
+	if (!existsSync(path)) return false;
+	const text = readFileSync(path, "utf8");
+	return text.includes("importUserPackage") || text.includes("PI_AGENT_NODE_MODULES");
+}
+
 function ensureScaffold(cwd: string, options: { overwrite?: boolean; hydrate?: boolean } = {}): { changes: string[]; overwritten: string[] } {
 	mkdirSync(join(cwd, CONFIG_DIR), { recursive: true });
 	mkdirSync(join(cwd, JOBS_DIR), { recursive: true });
@@ -1200,10 +1205,11 @@ function ensureScaffold(cwd: string, options: { overwrite?: boolean; hydrate?: b
 	}
 	const runnerPath = join(cwd, RUNNER_PATH);
 	const hadRunner = existsSync(runnerPath);
-	if (!hadRunner || options.overwrite) {
+	const staleRunner = hadRunner && runnerNeedsRefresh(runnerPath);
+	if (!hadRunner || options.overwrite || staleRunner) {
 		if (hadRunner && options.overwrite) overwritten.push(RUNNER_PATH);
 		writeFileSync(runnerPath, RUNNER);
-		changes.push(`${hadRunner && options.overwrite ? "overwrote" : "wrote"} ${RUNNER_PATH}`);
+		changes.push(`${hadRunner && options.overwrite ? "overwrote" : staleRunner ? "refreshed" : "wrote"} ${RUNNER_PATH}`);
 	}
 	return { changes, overwritten };
 }

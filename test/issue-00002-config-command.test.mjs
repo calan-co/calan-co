@@ -93,6 +93,8 @@ test('issue 00002 registers /work:config-raw and manages repo-local config', () 
     assert.doesNotMatch(readFileSync(configPath, 'utf8'), /^defaultPipeline:/m);
     assert.equal(existsSync(runnerPath), true);
     execFileSyncInner(process.execPath, ['--check', runnerPath], { encoding: 'utf8' });
+    assert.doesNotMatch(readFileSync(runnerPath, 'utf8'), /importUserPackage|PI_AGENT_NODE_MODULES/);
+    assert.match(readFileSync(runnerPath, 'utf8'), /import\("@ai-hero\/sandcastle"\)/);
 
     const forceNotifications = await invoke('init --force');
     assert.equal(forceNotifications[0].type, 'success');
@@ -103,6 +105,7 @@ test('issue 00002 registers /work:config-raw and manages repo-local config', () 
     assert.doesNotMatch(readFileSync(configPath, 'utf8'), /^    sandbox: docker/m);
     assert.match(readFileSync(configPath, 'utf8'), /^pipelines:/m);
 
+    writeFileSync(runnerPath, 'const importUserPackage = () => {};\n');
     const showNotifications = await invoke('');
     assert.equal(showNotifications[0].type, 'info');
     assert.doesNotMatch(showNotifications[0].message, /"defaultTeam"/);
@@ -110,6 +113,7 @@ test('issue 00002 registers /work:config-raw and manages repo-local config', () 
     assert.match(showNotifications[0].message, /"workSource": "github-issues"/);
     assert.doesNotMatch(readFileSync(configPath, 'utf8'), /^issueTracker:/m);
     assert.match(readFileSync(configPath, 'utf8'), /^workSource: github-issues/m);
+    assert.doesNotMatch(readFileSync(runnerPath, 'utf8'), /importUserPackage|PI_AGENT_NODE_MODULES/);
 
     const setNotifications = await invoke('set defaultModel claude-opus-4-8');
     assert.deepEqual(setNotifications, [{ message: 'Updated defaultModel. Rebuild the sandbox image separately when needed.', type: 'success' }]);
