@@ -348,7 +348,8 @@ test('/work:process --plan derives pipeline from config and preserves explicit p
   assert.deepEqual(calls[0].input.executionGroups.map((group) => group.contexts.map((context) => context.itemId)), [['wi-001'], ['wi-002']]);
   assert.ok(calls[0].input.executionContexts.every((context) => context.branch.startsWith('agent-workflows/sequential-reviewer/')));
   const savedRecord = JSON.parse(readFileSync(calls[0].input.recordPath, 'utf8'));
-  assert.deepEqual(savedRecord.branches, calls[0].input.executionContexts.map((context) => context.branch));
+  assert.deepEqual(savedRecord.branches, ['branch']);
+  assert.deepEqual(savedRecord.executionContexts.map((context) => context.branch), calls[0].input.executionContexts.map((context) => context.branch));
   assert.match(notifications.at(-1).message, /Work process done/);
 });
 

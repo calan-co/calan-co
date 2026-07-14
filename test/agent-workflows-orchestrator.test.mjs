@@ -92,16 +92,17 @@ test('runWorkProcess owns record writes, branch policy, and ignores planner reco
     );
 
     assert.equal(result.record.pipeline, 'simple-loop');
-    assert.deepEqual(result.record.branches, [
+    assert.deepEqual(result.record.branches, ['worker-chosen-branch']);
+    assert.deepEqual(result.record.logs, ['runtime.log']);
+    assert.equal(result.record.executionContexts.length, 2);
+    assert.deepEqual(result.record.executionContexts.map((context) => context.branch), [
       'agent-workflows/simple-loop/run-fixed/wi-1',
       'agent-workflows/simple-loop/run-fixed/wi-2',
     ]);
-    assert.deepEqual(result.record.logs, ['runtime.log']);
-    assert.equal(result.record.executionContexts.length, 2);
     assert.equal(writes.length, 2);
     assert.equal(writes[0].status, 'running');
     assert.equal(writes[1].status, 'done');
-    assert.deepEqual(executeInputs[0].executionContexts.map((context) => context.branch), result.record.branches);
+    assert.deepEqual(executeInputs[0].executionContexts.map((context) => context.branch), result.record.executionContexts.map((context) => context.branch));
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -132,6 +133,36 @@ test('runWorkProcess validates cached plans before execution', async () => {
         },
       ),
       /recommendedPipeline/,
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('runWorkProcess applies strict cached Work Plan schema checks', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'agent-workflows-orchestrator-'));
+  try {
+    await assert.rejects(
+      runWorkProcess(
+        {
+          cwd,
+          query: '',
+          planId: 'plan-bad-schema',
+          defaultPipeline: 'simple-loop',
+        },
+        {
+          readPlanRecord() {
+            return { kind: 'work-plan', plan: { schemaVersion: 2, iterations: [{ parallelizable: 'yes', items: [{ id: 'wi-1', tags: 'not-array' }] }] } };
+          },
+          async plan() {
+            throw new Error('plan should not be called');
+          },
+          async execute() {
+            throw new Error('execute should not be called');
+          },
+        },
+      ),
+      /schemaVersion|parallelizable|tags/,
     );
   } finally {
     rmSync(cwd, { recursive: true, force: true });

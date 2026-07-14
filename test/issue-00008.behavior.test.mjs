@@ -59,13 +59,13 @@ function assertBacklogRunRecord(record, expected) {
   assert.equal(record.pipeline, expected.pipeline);
   assert.equal(record.status, 'done');
   assert.equal(record.resolvedItems.length, expected.resolvedItems);
-  assert.equal(record.branches.length, expected.branchItemIds.length);
-  for (const itemId of expected.branchItemIds) {
-    assert.ok(record.branches.some((branch) => branch.startsWith(`agent-workflows/${expected.pipeline}/`) && branch.endsWith(`/${itemId}`)), `missing orchestrator branch for ${itemId}`);
-  }
+  assert.deepEqual(record.branches, expected.branches);
   assert.deepEqual(record.logs, expected.logs);
   assert.ok(Array.isArray(record.executionContexts));
   assert.equal(record.executionContexts.length, expected.branchItemIds.length);
+  for (const itemId of expected.branchItemIds) {
+    assert.ok(record.executionContexts.some((context) => context.branch.startsWith(`agent-workflows/${expected.pipeline}/`) && context.branch.endsWith(`/${itemId}`)), `missing orchestrator context branch for ${itemId}`);
+  }
   assert.ok(Number.isFinite(record.startedAt));
   assert.ok(Number.isFinite(record.endedAt));
   assert.ok(record.endedAt >= record.startedAt);
@@ -246,18 +246,21 @@ test('work:process selects pipeline deterministically and writes durable run rec
     pipeline: 'implement',
     resolvedItems: 1,
     branchItemIds: ['00008'],
+    branches: ['branch-00008'],
     logs: ['log-00008.txt'],
   });
   assertBacklogRunRecord(byQuery.get('label:small'), {
     pipeline: 'review',
     resolvedItems: 1,
     branchItemIds: ['00008'],
+    branches: ['branch-00008'],
     logs: ['log-00008.txt'],
   });
   assertBacklogRunRecord(byQuery.get('review'), {
     pipeline: 'simple-loop',
     resolvedItems: 2,
     branchItemIds: ['00008', '00009'],
+    branches: ['branch-00008', 'branch-00009'],
     logs: ['log-00008.txt', 'log-00009.txt'],
   });
 
