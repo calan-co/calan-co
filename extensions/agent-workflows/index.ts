@@ -249,7 +249,9 @@ const CONFIG_SCHEMA_PATH = new URL("./schema/config.schema.json", import.meta.ur
 const inFlightImageBuilds = new Map<string, Promise<void>>();
 
 
+const RUNNER_VERSION = "agent-workflows-runner-v2";
 const RUNNER = String.raw`#!/usr/bin/env node
+// agent-workflows-runner-v2
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
@@ -1181,7 +1183,7 @@ function hydrateConfigDefaults(raw: string): { text: string; changed: boolean; c
 function runnerNeedsRefresh(path: string): boolean {
 	if (!existsSync(path)) return false;
 	const text = readFileSync(path, "utf8");
-	return text.includes("importUserPackage") || text.includes("PI_AGENT_NODE_MODULES");
+	return !text.includes(RUNNER_VERSION) || text.includes("importUserPackage") || text.includes("PI_AGENT_NODE_MODULES");
 }
 
 function ensureScaffold(cwd: string, options: { overwrite?: boolean; hydrate?: boolean } = {}): { changes: string[]; overwritten: string[] } {
@@ -3315,7 +3317,7 @@ Work views and processing:
 			? await backlogDeps.ready(ctx.cwd, args)
 			: (await runProcess(ctx.cwd, "dv", ["work", "ready"])).stdout.trim();
 		const task = `Run the Work planning phase for this repository.\n\nRequested plan arguments: ${args || "(none)"}\n\nReady Work input from the configured Work Source:\n${readyOutput}\n\nReturn an authoritative plan with iterations, item ids, risk rationale, recommended pipeline per iteration, and any HITL or dependency constraints. End with <promise>COMPLETE</promise>.`;
-		const run = await dispatch(ctx.cwd, agent, task, ctx);
+		const run = await dispatch(ctx.cwd, agent, task, ctx, { readOnly: true });
 		await new Promise<void>((resolve) => run.proc?.on("close", () => resolve()));
 		if (run.status !== "done") throw new Error(`Planner role failed: ${run.lastLine}`);
 		return JSON.parse(readFileSync(run.resultPath!, "utf8"));
@@ -3352,14 +3354,14 @@ Work views and processing:
 		}
 	}
 
-	async function dispatch(cwd: string, agentName: string, task: string, ctx?: any): Promise<RunState> {
+	async function dispatch(cwd: string, agentName: string, task: string, ctx?: any, options: { readOnly?: boolean } = {}): Promise<RunState> {
 		const cfg = await loadConfig(cwd);
 		const agent = cfg.agents[agentName];
 		if (!agent) throw new Error(`Unknown execution agent '${agentName}'. Run /work:config show to inspect configured agents.`);
 		const id = `${Date.now().toString(36)}-${randomUUID().slice(0, 8)}-${agentName}`;
 		const resultPath = join(cwd, RESULTS_DIR, `${id}.json`);
 		const logPath = join(cwd, RESULTS_DIR, `${id}.log`);
-		const branch = agent.branch || `sandcastle/${agentName}/${id}`;
+		const branch = options.readOnly ? undefined : (agent.branch || `sandcastle/${agentName}/${id}`);
 		const jobPath = join(cwd, JOBS_DIR, `${id}.json`);
 		const runtime = resolveAgentRuntimeSettings(agent, cfg);
 		const job = {
