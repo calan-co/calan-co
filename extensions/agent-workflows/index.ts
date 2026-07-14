@@ -25,7 +25,7 @@ import { noSandbox } from "@ai-hero/sandcastle/sandboxes/no-sandbox";
 import { podman } from "@ai-hero/sandcastle/sandboxes/podman";
 import { vercel } from "@ai-hero/sandcastle/sandboxes/vercel";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
@@ -1048,6 +1048,33 @@ function createBacklogRunId(startedAt: number): string {
 
 function createBacklogPlanId(createdAt: number): string {
 	return `plan-${createdAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function gitQuiet(cwd: string, args: string[]): void {
+	const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+	if (result.status !== 0) throw new Error((result.stderr || result.stdout || `git ${args.join(" ")} failed`).trim());
+}
+
+export function createPlannerSnapshot(cwd: string): string {
+	const snapshot = mkdtempSync(join(tmpdir(), "agent-workflows-planner-"));
+	const root = resolve(cwd);
+	cpSync(root, snapshot, {
+		recursive: true,
+		filter(source) {
+			const rel = resolve(source).slice(root.length).replace(/^\/+/, "");
+			if (!rel) return true;
+			const [top, second] = rel.split(/[\\/]/);
+			if ([".git", "node_modules", ".pi", ".sandcastle", "patches", "coverage", "dist"].includes(top)) return false;
+			return second !== ".git";
+		},
+	});
+	gitQuiet(snapshot, ["init", "--quiet"]);
+	gitQuiet(snapshot, ["config", "user.email", "agent-workflows@example.invalid"]);
+	gitQuiet(snapshot, ["config", "user.name", "Agent Workflows Planner Snapshot"]);
+	writeFileSync(join(snapshot, ".agent-workflows-planner-snapshot"), "This disposable git repository is used only for sandboxed planning.\n");
+	gitQuiet(snapshot, ["add", "-A"]);
+	gitQuiet(snapshot, ["commit", "--quiet", "--message", "planner snapshot"]);
+	return snapshot;
 }
 
 function createInvalidBacklogPlanId(createdAt: number): string {
@@ -3310,7 +3337,22 @@ Work views and processing:
 
 	async function runPlannerPhase(args: string, ctx: any): Promise<any> {
 		if (backlogDeps.planPhase) return backlogDeps.planPhase(ctx.cwd, args);
-		throw new Error("No deterministic Work planning capability configured. Agent Workflows will not run a reasoning planner on the host; configure an injected planPhase capability or a future isolated read-only planning adapter.");
+		const cfg = await loadConfig(ctx.cwd);
+		const agent = cfg.agents.planner ? "planner" : undefined;
+		if (!agent) throw new Error("No planner role configured. /work:plan requires an explicit planner role and will not fall back to another role.");
+		const readyOutput = backlogDeps.ready
+			? await backlogDeps.ready(ctx.cwd, args)
+			: (await runProcess(ctx.cwd, "dv", ["work", "ready"])).stdout.trim();
+		const snapshotCwd = createPlannerSnapshot(ctx.cwd);
+		try {
+			const task = `Run the Work planning phase for this repository.\n\nGuardrails: you are running inside a disposable planner snapshot. Do not attempt to update the source repository, create branches for execution, or perform Work Source mutations. Any filesystem changes you make are discarded after planning.\n\nRequested plan arguments: ${args || "(none)"}\n\nReady Work input from the configured Work Source:\n${readyOutput}\n\nReturn an authoritative plan with iterations, item ids, risk rationale, recommended pipeline per iteration, and any HITL or dependency constraints. End with <promise>COMPLETE</promise>.`;
+			const run = await dispatch(ctx.cwd, agent, task, ctx, { executionCwd: snapshotCwd, branchPrefix: "agent-workflows/planner" });
+			await new Promise<void>((resolve) => run.proc?.on("close", () => resolve()));
+			if (run.status !== "done") throw new Error(`Planner role failed: ${run.lastLine}`);
+			return JSON.parse(readFileSync(run.resultPath!, "utf8"));
+		} finally {
+			rmSync(snapshotCwd, { recursive: true, force: true });
+		}
 	}
 
 	async function notifyBacklogPlan(args: string, ctx: any, overrides?: { iterations?: number }): Promise<void> {
@@ -3344,7 +3386,7 @@ Work views and processing:
 		}
 	}
 
-	async function dispatch(cwd: string, agentName: string, task: string, ctx?: any, options: { readOnly?: boolean } = {}): Promise<RunState> {
+	async function dispatch(cwd: string, agentName: string, task: string, ctx?: any, options: { readOnly?: boolean; executionCwd?: string; branchPrefix?: string } = {}): Promise<RunState> {
 		ensureScaffold(cwd, { hydrate: false });
 		const cfg = await loadConfig(cwd);
 		const agent = cfg.agents[agentName];
@@ -3352,14 +3394,14 @@ Work views and processing:
 		const id = `${Date.now().toString(36)}-${randomUUID().slice(0, 8)}-${agentName}`;
 		const resultPath = join(cwd, RESULTS_DIR, `${id}.json`);
 		const logPath = join(cwd, RESULTS_DIR, `${id}.log`);
-		const branch = options.readOnly ? undefined : (agent.branch || `sandcastle/${agentName}/${id}`);
+		const branch = options.readOnly ? undefined : (agent.branch || `${options.branchPrefix || "sandcastle"}/${agentName}/${id}`);
 		const jobPath = join(cwd, JOBS_DIR, `${id}.json`);
 		const runtime = resolveAgentRuntimeSettings(agent, cfg);
 		const job = {
 			id,
 			name: `${agentName}:${id}`,
 			agent: agentName,
-			cwd,
+			cwd: options.executionCwd || cwd,
 			model: runtime.model,
 			provider: runtime.provider,
 			sandbox: options.readOnly ? "no-sandbox" : runtime.sandbox,

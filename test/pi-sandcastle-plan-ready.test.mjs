@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import agentWorkflows from '../extensions/agent-workflows/index.ts';
+import agentWorkflows, { createPlannerSnapshot } from '../extensions/agent-workflows/index.ts';
 
 function fakePi() {
   const commands = new Map();
@@ -64,20 +64,27 @@ test('/work:plan runs planning phase and caches authoritative plan output', asyn
   assert.equal(record.plan.summary, 'Planner chose implementation first.');
 });
 
-test('/work:plan fails closed when no deterministic planning capability is configured', async () => {
+test('createPlannerSnapshot creates a disposable git repo without host-private state', async () => {
   const cwd = makeRepo();
-  const pi = fakePi();
-  const notifications = [];
-  agentWorkflows(pi, {});
-
-  await pi.commands.get('work:plan').handler('', {
-    cwd,
-    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  mkdirSync(join(cwd, '.git'), { recursive: true });
+  mkdirSync(join(cwd, '.pi', 'sandcastle'), { recursive: true });
+  await import('node:fs').then(({ writeFileSync }) => {
+    writeFileSync(join(cwd, 'README.md'), '# Test repo\n');
+    writeFileSync(join(cwd, '.pi', 'secret.txt'), 'do not copy\n');
   });
 
-  assert.equal(notifications[0].type, 'error');
-  assert.match(notifications[0].message, /No deterministic Work planning capability configured/);
-  assert.match(notifications[0].message, /will not run a reasoning planner on the host/);
+  const snapshot = createPlannerSnapshot(cwd);
+  try {
+    assert.equal(existsSync(join(snapshot, 'README.md')), true);
+    assert.equal(existsSync(join(snapshot, '.agent-workflows-planner-snapshot')), true);
+    assert.equal(existsSync(join(snapshot, '.git')), true);
+    assert.equal(existsSync(join(snapshot, '.pi')), false);
+    assert.equal(existsSync(join(snapshot, '.sandcastle')), false);
+    const head = await import('node:child_process').then(({ execFileSync }) => execFileSync('git', ['rev-parse', '--verify', 'HEAD'], { cwd: snapshot, encoding: 'utf8' }).trim());
+    assert.match(head, /^[0-9a-f]{40}$/);
+  } finally {
+    await import('node:fs').then(({ rmSync }) => rmSync(snapshot, { recursive: true, force: true }));
+  }
 });
 
 test('/work:plan fails closed and caches invalid planner output for inspection', async () => {
