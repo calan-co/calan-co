@@ -97,7 +97,7 @@ This keeps the TUI simple while preserving enough flexibility for specialized re
 Pipelines should support a small closed set of node kinds before adding generic workflow features:
 
 - `runRole`: invoke a role through the selected execution adapter.
-- `selectWork`: resolve backlog/issue input into work items.
+- `selectWork`: resolve Work input into Work Items.
 - `fanOut`: dispatch independent work items with a concurrency limit.
 - `fanIn`: collect child results and normalize statuses.
 - `review`: run reviewer semantics over branch diffs or artifacts.
@@ -169,10 +169,10 @@ roles:
     maxIterations: 1
 
 prompts:
-  implement-backlog-item:
+  implement-work-item:
     format: markdown
     template: |
-      Implement the selected backlog item.
+      Implement the selected Work Item.
 
       Item:
       {{ inputs.item.markdown }}
@@ -208,13 +208,13 @@ pipelines:
     steps:
       - id: select
         kind: selectWork
-        issueTracker: default
+        workSource: default
         limit: 1
       - id: implement
         kind: runRole
         needs: [select]
         role: implementer
-        prompt: implement-backlog-item
+        prompt: implement-work-item
       - id: post-process
         kind: postProcess
         needs: [implement]
@@ -227,7 +227,7 @@ pipelines:
       - id: plan
         kind: runRole
         role: planner
-        prompt: plan-backlog-iterations
+        prompt: plan-work-iterations
       - id: implement
         kind: fanOut
         needs: [plan]
@@ -236,7 +236,7 @@ pipelines:
         step:
           kind: runRole
           role: implementer
-          prompt: implement-backlog-item
+          prompt: implement-work-item
       - id: review
         kind: fanOut
         needs: [implement]

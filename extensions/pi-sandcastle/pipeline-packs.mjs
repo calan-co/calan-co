@@ -27,16 +27,16 @@ export function packsToConfig(_packs = undefined, defaults = {}) {
 
 export function configToYaml(config) {
   const lines = [
-    '# Pi Sandcastle delegation config.',
-    '# Runtime config for backlog execution.',
+    '# Agent Workflows config.',
+    '# Runtime config for Work execution.',
     '',
     'runtimeVersion: 1',
     `defaultSandbox: ${yamlScalar(config.defaultSandbox)}`,
     `defaultModel: ${yamlScalar(config.defaultModel)}`,
     `defaultPipeline: ${yamlScalar(config.defaultPipeline)}`,
     `defaultAgent: ${yamlScalar(config.defaultAgent)}`,
-    `issueTracker: ${yamlScalar(config.issueTracker)}`,
-    ...(config.issueTrackerSetupCommand ? [`issueTrackerSetupCommand: ${yamlScalar(config.issueTrackerSetupCommand)}`] : []),
+    `workSource: ${yamlScalar(config.workSource || config.issueTracker)}`,
+    ...(config.workSourceSetupCommand || config.issueTrackerSetupCommand ? [`workSourceSetupCommand: ${yamlScalar(config.workSourceSetupCommand || config.issueTrackerSetupCommand)}`] : []),
     `imageNamePattern: ${yamlScalar(config.imageNamePattern || 'sandcastle:<repo-dir-name>')}`,
     '',
     'roles:',
@@ -84,7 +84,7 @@ export function configToYaml(config) {
 export function buildDefaultConfigText(defaults = {}) {
   const cfg = packsToConfig(undefined, defaults);
   return [
-    '# Pi Sandcastle delegation config.',
+    '# Agent Workflows config.',
     '# Runtime inventory is compiled from extensions/pi-sandcastle/runtime-packs/sandcastle-templates.json.',
     '',
     'runtimeVersion: 1',
@@ -92,8 +92,8 @@ export function buildDefaultConfigText(defaults = {}) {
     `defaultModel: ${yamlScalar(cfg.defaultModel)}`,
     `defaultPipeline: ${yamlScalar(cfg.defaultPipeline)}`,
     `defaultAgent: ${yamlScalar(cfg.defaultAgent)}`,
-    `issueTracker: ${yamlScalar(cfg.issueTracker)}`,
-    ...(cfg.issueTrackerSetupCommand ? [`issueTrackerSetupCommand: ${yamlScalar(cfg.issueTrackerSetupCommand)}`] : []),
+    `workSource: ${yamlScalar(cfg.workSource || cfg.issueTracker)}`,
+    ...(cfg.workSourceSetupCommand || cfg.issueTrackerSetupCommand ? [`workSourceSetupCommand: ${yamlScalar(cfg.workSourceSetupCommand || cfg.issueTrackerSetupCommand)}`] : []),
     `imageNamePattern: ${yamlScalar(cfg.imageNamePattern || 'sandcastle:<repo-dir-name>')}`,
     '',
   ].join('\n');

@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://calan.co/pi-extensions/schemas/pi-sandcastle/sandcastle-config.schema.json",
-  "title": "Pi Sandcastle Config",
-  "description": "Repo-local Pi Sandcastle, backlog, and agent configuration.",
+  "$id": "https://calan.co/pi-extensions/schemas/agent-workflows/config.schema.json",
+  "title": "Agent Workflows Config",
+  "description": "Repo-local Agent Workflows configuration.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -28,11 +28,11 @@
       "type": "string",
       "enum": ["claude-code", "pi", "codex", "cursor", "opencode", "copilot"]
     },
-    "issueTracker": {
+    "workSource": {
       "type": "string",
       "enum": ["github-issues", "custom", "beads"]
     },
-    "issueTrackerSetupCommand": {
+    "workSourceSetupCommand": {
       "type": "string",
       "minLength": 1
     },
@@ -42,7 +42,7 @@
     },
     "roles": {
       "type": "object",
-      "description": "Reusable execution roles consumed by runtime pipelines and backlog commands.",
+      "description": "Reusable execution roles consumed by runtime pipelines and Work commands.",
       "additionalProperties": { "$ref": "#/$defs/role" }
     },
     "prompts": {

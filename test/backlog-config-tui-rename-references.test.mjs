@@ -20,7 +20,7 @@ test('backlog config TUI no longer exposes team editing; pack-derived roles rema
       'defaultModel: claude-sonnet-4-6',
       'defaultPipeline: simple-loop',
       'defaultAgent: claude-code',
-      'issueTracker: github-issues',
+      'workSource: github-issues',
     ].join('\n'));
     writeFileSync(join(configDir, 'run-job.mjs'), '');
 

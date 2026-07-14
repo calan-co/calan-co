@@ -10,6 +10,7 @@ export interface ExecutionRuntimePack {
 	metadata?: { id?: string; label?: string; description?: string; inspiredBy?: string[] };
 	defaults?: Record<string, unknown>;
 	providers?: Record<string, unknown>;
+	workSources?: Record<string, unknown>;
 	issueTrackers?: Record<string, unknown>;
 	roles: Record<string, RuntimeAgent>;
 	prompts: Record<string, RuntimePrompt>;
@@ -51,6 +52,7 @@ export interface RuntimePipelineStep {
 	role?: string;
 	prompt?: string;
 	promptOverride?: string;
+	workSource?: string;
 	issueTracker?: string;
 	limit?: number;
 	over?: string;
@@ -67,6 +69,7 @@ export interface LegacyConfigLike {
 	defaultModel?: string;
 	defaultPipeline?: string;
 	defaultAgent?: string;
+	workSource?: string;
 	issueTracker?: string;
 	imageNamePattern?: string;
 	prompts?: Record<string, RuntimePrompt>;
@@ -169,7 +172,7 @@ export function runtimeToSandcastleConfig(pack = loadExecutionRuntimePack(), def
 		defaultModel,
 		defaultPipeline: defaults.defaultPipeline || "simple-loop",
 		defaultAgent,
-		issueTracker: defaults.issueTracker || String(pack.defaults?.issueTracker || "github-issues"),
+		workSource: defaults.workSource || defaults.issueTracker || String(pack.defaults?.workSource || pack.defaults?.issueTracker || "github-issues"),
 		imageNamePattern: defaults.imageNamePattern || "sandcastle:<repo-dir-name>",
 		prompts: pack.prompts,
 		agents,

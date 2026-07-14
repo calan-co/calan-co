@@ -74,8 +74,8 @@ test('issue 00002 registers /work:config-raw and manages repo-local config', () 
     const configCompletions = commands.get('work:config-raw').getArgumentCompletions;
     assert.ok(configCompletions);
     assert.deepEqual(
-      configCompletions('get ').map((item) => item.value).filter((value) => ['get defaultModel', 'get defaultSandbox', 'get defaultAgent'].includes(value)).sort(),
-      ['get defaultAgent', 'get defaultModel', 'get defaultSandbox'],
+      configCompletions('get ').map((item) => item.value).filter((value) => ['get defaultModel', 'get defaultSandbox', 'get defaultAgent', 'get workSource'].includes(value)).sort(),
+      ['get defaultAgent', 'get defaultModel', 'get defaultSandbox', 'get workSource'],
     );
     assert.deepEqual(
       configCompletions('get roles.implementer.').map((item) => item.label).sort(),
@@ -107,6 +107,9 @@ test('issue 00002 registers /work:config-raw and manages repo-local config', () 
     assert.equal(showNotifications[0].type, 'info');
     assert.doesNotMatch(showNotifications[0].message, /"defaultTeam"/);
     assert.match(showNotifications[0].message, /"defaultModel": "Agent Default"/);
+    assert.match(showNotifications[0].message, /"workSource": "github-issues"/);
+    assert.doesNotMatch(readFileSync(configPath, 'utf8'), /^issueTracker:/m);
+    assert.match(readFileSync(configPath, 'utf8'), /^workSource: github-issues/m);
 
     const setNotifications = await invoke('set defaultModel claude-opus-4-8');
     assert.deepEqual(setNotifications, [{ message: 'Updated defaultModel. Rebuild the sandbox image separately when needed.', type: 'success' }]);

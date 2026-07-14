@@ -33,6 +33,7 @@ import { ConfigShadowModel } from "./config-shadow-model.ts";
 import { buildSandcastleImage } from "./build-image.ts";
 import { registerWorkCommands } from "./backlog.mjs";
 import { buildDefaultConfigText, configToYaml, packsToConfig } from "./pipeline-packs.mjs";
+import { renderWorkBrief } from "./work-brief.mjs";
 import { loadExecutionRuntimePack, listRuntimeAgents, listRuntimePipelines } from "./execution-runtime.ts";
 import {
 	formatBacklogRunList,
@@ -112,6 +113,8 @@ interface SandcastleConfig {
 	defaultModel?: string;
 	defaultPipeline?: string;
 	defaultAgent?: string;
+	workSource?: string;
+	workSourceSetupCommand?: string;
 	issueTracker?: string;
 	issueTrackerSetupCommand?: string;
 	imageNamePattern?: string;
@@ -217,7 +220,7 @@ interface RunState {
 	proc?: SandcastleProcess;
 }
 
-type RootConfigKey = "defaultSandbox" | "defaultModel" | "defaultPipeline" | "defaultAgent" | "issueTracker" | "issueTrackerSetupCommand" | "imageNamePattern";
+type RootConfigKey = "defaultSandbox" | "defaultModel" | "defaultPipeline" | "defaultAgent" | "workSource" | "workSourceSetupCommand" | "issueTracker" | "issueTrackerSetupCommand" | "imageNamePattern";
 type EditableAgentField = "description" | "model" | "sandbox" | "maxIterations" | "branch";
 
 const CONFIG_DIR = ".pi/sandcastle";
@@ -229,7 +232,7 @@ const RESULTS_DIR = `${CONFIG_DIR}/results`;
 const SUPPORTED_SANDBOXES = new Set(["docker", "podman", "vercel", "no-sandbox"]);
 const DEFAULT_SANDBOX: NonNullable<AgentDef["sandbox"]> = "docker";
 const DEFAULT_MODEL = "Agent Default";
-const ROOT_CONFIG_KEYS: RootConfigKey[] = ["defaultSandbox", "defaultModel", "defaultPipeline", "defaultAgent", "issueTracker", "issueTrackerSetupCommand", "imageNamePattern"];
+const ROOT_CONFIG_KEYS: RootConfigKey[] = ["defaultSandbox", "defaultModel", "defaultPipeline", "defaultAgent", "workSource", "workSourceSetupCommand", "imageNamePattern"];
 const EDITABLE_AGENT_FIELDS: EditableAgentField[] = ["description", "model", "sandbox", "maxIterations", "branch"];
 const RUNS_DIR = `${CONFIG_DIR}/runs`;
 const PLANS_DIR = `${CONFIG_DIR}/plans`;
@@ -332,9 +335,9 @@ defaultSandbox: docker
 defaultModel: Agent Default
 defaultPipeline: simple-loop
 defaultAgent: claude-code
-issueTracker: github-issues
-# Optional command to configure a custom issue tracker after Sandcastle init.
-# issueTrackerSetupCommand: pi "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"
+workSource: github-issues
+# Optional command to configure a custom Work Source after Sandcastle init.
+# workSourceSetupCommand: pi "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"
 imageNamePattern: sandcastle:<repo-dir-name>
 
 agents:
@@ -1167,7 +1170,7 @@ async function defaultPlanBacklogProcessing(cwd: string, query: string): Promise
 function hydrateConfigDefaults(raw: string): { text: string; changed: boolean; changes: string[] } {
 	let text = raw;
 	const changes: string[] = [];
-	for (const [key, value] of Object.entries({ defaultPipeline: "simple-loop", defaultAgent: "claude-code", issueTracker: "github-issues" })) {
+	for (const [key, value] of Object.entries({ defaultPipeline: "simple-loop", defaultAgent: "claude-code", workSource: "github-issues" })) {
 		if (!new RegExp(`^${key}:`, "m").test(text)) {
 			text = setConfigValueInText(text, key, value);
 			changes.push(`added ${key}`);
@@ -1590,7 +1593,7 @@ function validateAgainstSchema(value: any, schema: any, root: any = schema, path
 }
 
 function validateRawConfigText(raw: string): string[] {
-	const allowedTopLevel = new Set(["runtimeVersion", ...ROOT_CONFIG_KEYS, "roles", "prompts", "policies", "pipelines", "chains"]);
+	const allowedTopLevel = new Set(["runtimeVersion", ...ROOT_CONFIG_KEYS, "issueTracker", "issueTrackerSetupCommand", "roles", "prompts", "policies", "pipelines", "chains"]);
 	const issues: string[] = [];
 	for (const line of raw.replace(/\r/g, "").split("\n")) {
 		const match = line.match(/^([A-Za-z0-9_-]+):\s*/);
@@ -1613,6 +1616,8 @@ function stripUndefinedAndInternalKeys(value: unknown): unknown {
 function configForSchemaValidation(cfg: SandcastleConfig): Record<string, unknown> {
 	const value: Record<string, unknown> = { ...cfg, roles: cfg.agents };
 	delete value.agents;
+	delete value.issueTracker;
+	delete value.issueTrackerSetupCommand;
 	return stripUndefinedAndInternalKeys(value) as Record<string, unknown>;
 }
 
@@ -1658,7 +1663,9 @@ function normalizeConfig(cfg: Partial<SandcastleConfig>): SandcastleConfig {
 		defaultModel: cfg.defaultModel ?? DEFAULT_MODEL,
 		defaultPipeline: cfg.defaultPipeline ?? "simple-loop",
 		defaultAgent: cfg.defaultAgent ?? "claude-code",
-		issueTracker: cfg.issueTracker ?? "github-issues",
+		workSource: cfg.workSource ?? cfg.issueTracker ?? "github-issues",
+		workSourceSetupCommand: cfg.workSourceSetupCommand ?? cfg.issueTrackerSetupCommand,
+		issueTracker: cfg.issueTracker,
 		issueTrackerSetupCommand: cfg.issueTrackerSetupCommand,
 		imageNamePattern: cfg.imageNamePattern ?? "sandcastle:<repo-dir-name>",
 		prompts: cfg.prompts || {},
@@ -1751,7 +1758,7 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 		}
 		const trimmed = line.trim();
 		if (!trimmed || trimmed.startsWith("#")) continue;
-		const top = trimmed.match(/^(defaultSandbox|defaultModel|defaultPipeline|defaultAgent|issueTracker|issueTrackerSetupCommand|imageNamePattern):\s*(.*)$/);
+		const top = trimmed.match(/^(defaultSandbox|defaultModel|defaultPipeline|defaultAgent|workSource|workSourceSetupCommand|issueTracker|issueTrackerSetupCommand|imageNamePattern):\s*(.*)$/);
 		if (top) {
 			const key = top[1] as RootConfigKey;
 			setField(cfg, key, parseScalar(top[2]) as SandcastleConfig[typeof key]);
@@ -2077,8 +2084,8 @@ function scaffoldSetupSignature(cfg: SandcastleConfig): Record<string, unknown> 
 		defaultAgent: cfg.defaultAgent || "claude-code",
 		defaultSandbox: imageProviderForSandbox(cfg.defaultSandbox) || "docker",
 		defaultModel: cfg.defaultModel && cfg.defaultModel !== DEFAULT_MODEL ? cfg.defaultModel : DEFAULT_MODEL,
-		issueTracker: cfg.issueTracker || "github-issues",
-		issueTrackerSetupCommand: cfg.issueTracker === "custom" ? cfg.issueTrackerSetupCommand || "" : "",
+		issueTracker: cfg.workSource || cfg.issueTracker || "github-issues",
+		issueTrackerSetupCommand: (cfg.workSource || cfg.issueTracker) === "custom" ? (cfg.workSourceSetupCommand || cfg.issueTrackerSetupCommand || "") : "",
 	};
 }
 
@@ -2111,14 +2118,14 @@ async function ensureSandcastleCliScaffold(cwd: string, cfg: SandcastleConfig, o
 		"--template", cfg.defaultPipeline || "simple-loop",
 		"--agent", cfg.defaultAgent || "claude-code",
 		"--sandbox", sandbox,
-		"--issue-tracker", cfg.issueTracker || "github-issues",
+		"--issue-tracker", cfg.workSource || cfg.issueTracker || "github-issues",
 		"--create-label", "false",
 		"--build-image", "false",
 		"--install-template-deps", "true",
 	];
 	if (cfg.defaultModel && cfg.defaultModel !== DEFAULT_MODEL) args.splice(5, 0, "--model", cfg.defaultModel);
 	await runProcess(cwd, "npx", ["@ai-hero/sandcastle", ...args]);
-	if (options.runIssueTrackerSetup && (cfg.issueTracker || "github-issues") === "custom" && cfg.issueTrackerSetupCommand) await runProcess(cwd, process.env.SHELL || "sh", ["-lc", cfg.issueTrackerSetupCommand]);
+	if (options.runIssueTrackerSetup && (cfg.workSource || cfg.issueTracker || "github-issues") === "custom" && (cfg.workSourceSetupCommand || cfg.issueTrackerSetupCommand)) await runProcess(cwd, process.env.SHELL || "sh", ["-lc", cfg.workSourceSetupCommand || cfg.issueTrackerSetupCommand!]);
 	writeScaffoldSetupSignature(cwd, cfg);
 	return { changes: [options.reinitialize ? "reinitialized .sandcastle/" : "wrote .sandcastle/"] };
 }
@@ -2644,14 +2651,14 @@ function selectableValuesForPath(cfg: SandcastleConfig, path: string): string[] 
 	const values = schemaEnumForPath(path)
 		|| (path === "defaultPipeline" ? ["simple-loop", "sequential-reviewer", "parallel-planner", "parallel-planner-with-review", "archive"] : undefined)
 		|| (path === "defaultAgent" ? ["claude-code", "pi", "codex", "cursor", "opencode", "copilot"] : undefined)
-		|| (path === "issueTracker" ? ["github-issues", "custom", "beads"] : undefined)
+		|| (path === "workSource" ? ["github-issues", "custom", "beads"] : undefined)
 		|| (parts[0] === "pipelines" && parts[2] === "steps" && parts[4] === "role" ? Object.keys(cfg.agents) : undefined);
 	const withDefault = isDefaultableConfigPath(path) ? ["default", ...(values || [])] : (values || []);
 	return [...new Set(withDefault)];
 }
 
 function allowsCustomValueForPath(path: string): boolean {
-	return !["defaultPipeline", "defaultAgent", "issueTracker"].includes(path);
+	return !["defaultPipeline", "defaultAgent", "workSource", "issueTracker"].includes(path);
 }
 
 function coerceConfigValue(path: string, rawValue: string): unknown {
@@ -2694,8 +2701,10 @@ function friendlyConfigLabel(pathOrField: string): string {
 		defaultModel: "Model",
 		defaultPipeline: "Default Pipeline",
 		defaultAgent: "Default Agent",
-		issueTracker: "Issue Tracker",
-		issueTrackerSetupCommand: "Issue Tracker Setup Command",
+		workSource: "Work Source",
+		workSourceSetupCommand: "Work Source Setup Command",
+		issueTracker: "Issue Tracker (legacy)",
+		issueTrackerSetupCommand: "Issue Tracker Setup Command (legacy)",
 		imageNamePattern: "Image Name Pattern",
 		description: "Description",
 		model: "Model",
@@ -2727,7 +2736,7 @@ function describeConfigAction(action: BacklogConfigAction, before: SandcastleCon
 
 function configActionRequiresImageRebuild(action: BacklogConfigAction): boolean {
 	if (["init", "apply-pack", "replace-config", "add-agent", "rename-agent", "delete-agent", "add-pipeline", "rename-pipeline", "delete-pipeline", "add-pipeline-step", "delete-pipeline-step"].includes(action.type)) return true;
-	if (action.type === "set-config") return action.path !== "issueTrackerSetupCommand";
+	if (action.type === "set-config") return action.path !== "workSourceSetupCommand" && action.path !== "issueTrackerSetupCommand";
 	if (action.type === "batch") return action.actions.some(configActionRequiresImageRebuild);
 	return false;
 }
@@ -2797,7 +2806,7 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 		const defaultsScreen = (): Screen => ({
 			title: "RUNTIME DEFAULTS",
 			subtitle: "User-configurable fallback settings; local environment details live under Actions",
-			items: [field("defaultSandbox"), field("defaultModel"), field("defaultPipeline"), field("defaultAgent"), field("issueTracker"), field("issueTrackerSetupCommand"), field("imageNamePattern")],
+			items: [field("defaultSandbox"), field("defaultModel"), field("defaultPipeline"), field("defaultAgent"), field("workSource"), field("workSourceSetupCommand"), field("imageNamePattern")],
 		});
 
 		const agentsScreen = (): Screen => ({
@@ -3499,7 +3508,8 @@ Work views and processing:
 		item: BacklogItem,
 		ctx?: any,
 	): Promise<BacklogItemDispatchResult> {
-		const prompt = `Process Work Item ${item.id}: ${item.title}\n\nPipeline: ${record.pipeline}\nQuery: ${record.query}\n\nSource: ${item.sourcePath}\n${item.summary ? `\nSummary: ${item.summary}\n` : "\n"}\nDo not modify unrelated work. End with <promise>COMPLETE</promise>.`;
+		const workBrief = renderWorkBrief(item);
+		const prompt = `${workBrief}\n\n## Execution\n\nPipeline: ${record.pipeline}\nQuery: ${record.query}\n\nDo not modify unrelated work. End with <promise>COMPLETE</promise>.`;
 		const run = await dispatch(cwd, agentName, prompt, ctx);
 		await new Promise<void>((resolve) => run.proc?.once("close", () => resolve()));
 		return { branch: run.branch, logPath: run.logPath, status: run.status === "done" ? "done" : "error" };

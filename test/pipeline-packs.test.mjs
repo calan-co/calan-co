@@ -28,7 +28,8 @@ test('default config yaml stores only user-selected/default override settings', 
   const text = buildDefaultConfigText();
   assert.match(text, /^defaultPipeline: simple-loop/m);
   assert.match(text, /^defaultAgent: claude-code/m);
-  assert.match(text, /^issueTracker: github-issues/m);
+  assert.match(text, /^workSource: github-issues/m);
+assert.doesNotMatch(text, /^issueTracker:/m);
   assert.doesNotMatch(text, /^agents:/m);
   assert.doesNotMatch(text, /^pipelines:/m);
   assert.doesNotMatch(text, /^teams:/m);

@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://calan.co/pi-extensions/schemas/pi-sandcastle/execution-runtime.schema.json",
-  "title": "Pi-Sandcastle Execution Runtime",
-  "description": "Deterministic Pi-native runtime contract for Sandcastle-backed agent execution packs.",
+  "$id": "https://calan.co/pi-extensions/schemas/agent-workflows/execution-runtime.schema.json",
+  "title": "Agent Workflows Execution Runtime",
+  "description": "Deterministic Agent Workflows runtime contract for adapter-backed agent execution packs.",
   "type": "object",
   "required": ["runtimeVersion", "defaults", "roles", "prompts", "pipelines"],
   "additionalProperties": false,
@@ -20,10 +20,10 @@
     "providers": {
       "$ref": "#/$defs/providers"
     },
-    "issueTrackers": {
+    "workSources": {
       "type": "object",
       "additionalProperties": {
-        "$ref": "#/$defs/issueTracker"
+        "$ref": "#/$defs/workSource"
       }
     },
     "roles": {
@@ -90,7 +90,7 @@
         "agentProvider": { "$ref": "#/$defs/referenceOrDefault" },
         "sandboxProvider": { "$ref": "#/$defs/referenceOrDefault" },
         "model": { "type": "string", "minLength": 1 },
-        "issueTracker": { "$ref": "#/$defs/referenceOrDefault" },
+        "workSource": { "$ref": "#/$defs/referenceOrDefault" },
         "imagePolicy": { "$ref": "#/$defs/referenceOrDefault" },
         "branchPolicy": { "$ref": "#/$defs/referenceOrDefault" },
         "completionPolicy": { "$ref": "#/$defs/referenceOrDefault" },
@@ -131,7 +131,7 @@
         }
       }
     },
-    "issueTracker": {
+    "workSource": {
       "type": "object",
       "required": ["kind"],
       "additionalProperties": true,
@@ -337,7 +337,7 @@
         "role": { "$ref": "#/$defs/referenceOrDefault" },
         "prompt": { "$ref": "#/$defs/referenceOrDefault" },
         "promptOverride": { "type": "string", "minLength": 1 },
-        "issueTracker": { "$ref": "#/$defs/referenceOrDefault" },
+        "workSource": { "$ref": "#/$defs/referenceOrDefault" },
         "limit": { "type": "integer", "minimum": 1 },
         "over": { "type": "string", "minLength": 1 },
         "concurrency": { "type": "integer", "minimum": 1 },

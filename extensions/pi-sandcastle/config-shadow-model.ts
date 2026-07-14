@@ -22,6 +22,8 @@ export interface ConfigShadowSnapshot {
 	defaultModel?: string;
 	defaultPipeline?: string;
 	defaultAgent?: string;
+	workSource?: string;
+	workSourceSetupCommand?: string;
 	issueTracker?: string;
 	issueTrackerSetupCommand?: string;
 	imageNamePattern?: string;

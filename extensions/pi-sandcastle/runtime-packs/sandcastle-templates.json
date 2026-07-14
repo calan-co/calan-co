@@ -1,7 +1,7 @@
 {
   "runtimeVersion": 1,
   "metadata": {
-    "id": "pi-sandcastle.sandcastle-templates",
+    "id": "agent-workflows.sandcastle-templates",
     "label": "Sandcastle template equivalents",
     "description": "Pi-native deterministic runtime pack ported from the bundled Sandcastle template concepts.",
     "inspiredBy": [
@@ -16,10 +16,10 @@
     "agentProvider": "claude-code",
     "sandboxProvider": "docker",
     "model": "Agent Default",
-    "issueTracker": "github-issues",
     "imagePolicy": "repo-default",
     "branchPolicy": "branch-per-run",
-    "completionPolicy": "promise-complete"
+    "completionPolicy": "promise-complete",
+    "workSource": "github-issues"
   },
   "providers": {
     "agentProviders": {
@@ -87,23 +87,6 @@
       "no-sandbox": {
         "adapter": "sandcastle"
       }
-    }
-  },
-  "issueTrackers": {
-    "github-issues": {
-      "kind": "github-issues",
-      "listCommand": "gh issue list --state open",
-      "inspectCommand": "gh issue view {{ id }}",
-      "closeCommand": "gh issue close {{ id }}"
-    },
-    "beads": {
-      "kind": "beads",
-      "listCommand": "bd list --status open",
-      "inspectCommand": "bd show {{ id }}",
-      "closeCommand": "bd close {{ id }}"
-    },
-    "custom": {
-      "kind": "custom"
     }
   },
   "roles": {
@@ -366,6 +349,23 @@
           "role": "reviewer"
         }
       ]
+    }
+  },
+  "workSources": {
+    "github-issues": {
+      "kind": "github-issues",
+      "listCommand": "gh issue list --state open",
+      "inspectCommand": "gh issue view {{ id }}",
+      "closeCommand": "gh issue close {{ id }}"
+    },
+    "beads": {
+      "kind": "beads",
+      "listCommand": "bd list --status open",
+      "inspectCommand": "bd show {{ id }}",
+      "closeCommand": "bd close {{ id }}"
+    },
+    "custom": {
+      "kind": "custom"
     }
   }
 }
