@@ -64,6 +64,67 @@ test('/work:plan runs planning phase and caches authoritative plan output', asyn
   assert.equal(record.plan.summary, 'Planner chose implementation first.');
 });
 
+test('/work:plan fails closed and caches invalid planner output for inspection', async () => {
+  const cwd = makeRepo();
+  const pi = fakePi();
+  const notifications = [];
+  piSandcastle(pi, {
+    work: {
+      now: () => 123456,
+      async planPhase() {
+        return { summary: 'not executable', iterations: [{ items: [{ title: 'Missing id' }] }] };
+      },
+    },
+  });
+
+  await pi.commands.get('work:plan').handler('', {
+    cwd,
+    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  });
+
+  assert.equal(notifications[0].type, 'error');
+  assert.match(notifications[0].message, /Planner output is not executable/);
+  assert.match(notifications[0].message, /Cached invalid output: invalid-plan-/);
+  const invalidPlanId = notifications[0].message.match(/Cached invalid output: (\S+)/)[1];
+  const invalidRecordPath = join(cwd, '.pi', 'sandcastle', 'plans', `${invalidPlanId}.json`);
+  assert.equal(existsSync(invalidRecordPath), true);
+  const record = JSON.parse(readFileSync(invalidRecordPath, 'utf8'));
+  assert.equal(record.kind, 'invalid-work-plan');
+  assert.equal(record.rawOutput.summary, 'not executable');
+  assert.match(record.validationErrors.join('\n'), /item id/);
+});
+
+test('/work:process --plan refuses cached invalid planner output', async () => {
+  const cwd = makeRepo();
+  const pi = fakePi();
+  const calls = [];
+  const notifications = [];
+  mkdirSync(join(cwd, '.pi', 'sandcastle', 'plans'), { recursive: true });
+  await import('node:fs').then(({ writeFileSync }) => writeFileSync(join(cwd, '.pi', 'sandcastle', 'plans', 'invalid-plan-test.json'), JSON.stringify({
+    id: 'invalid-plan-test',
+    kind: 'invalid-work-plan',
+    validationErrors: ['Plan group 1 item 1 is missing a canonical item id.'],
+    rawOutput: { iterations: [{ items: [{ title: 'Missing id' }] }] },
+  }, null, 2)));
+  piSandcastle(pi, {
+    work: {
+      async execute(repo, input) {
+        calls.push({ repo, input });
+        return { status: 'done' };
+      },
+    },
+  });
+
+  await pi.commands.get('work:process').handler('--plan invalid-plan-test', {
+    cwd,
+    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  });
+
+  assert.equal(calls.length, 0);
+  assert.equal(notifications[0].type, 'error');
+  assert.match(notifications[0].message, /not an executable Work Plan/);
+});
+
 test('/work:process --plan uses a cached authoritative plan', async () => {
   const cwd = makeRepo();
   const pi = fakePi();

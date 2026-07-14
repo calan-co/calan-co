@@ -31,7 +31,7 @@ import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { ConfigShadowModel } from "./config-shadow-model.ts";
 import { buildSandcastleImage } from "./build-image.ts";
-import { registerBacklogCommands } from "./backlog.mjs";
+import { registerWorkCommands } from "./backlog.mjs";
 import { buildDefaultConfigText, configToYaml, packsToConfig } from "./pipeline-packs.mjs";
 import { loadExecutionRuntimePack, listRuntimeAgents, listRuntimePipelines } from "./execution-runtime.ts";
 import {
@@ -1046,6 +1046,10 @@ function createBacklogPlanId(createdAt: number): string {
 	return `plan-${createdAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function createInvalidBacklogPlanId(createdAt: number): string {
+	return `invalid-plan-${createdAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 function writeBacklogPlanRecord(cwd: string, record: any): string {
 	mkdirSync(join(cwd, PLANS_DIR), { recursive: true });
 	const recordPath = join(cwd, PLANS_DIR, `${record.id}.json`);
@@ -1056,7 +1060,12 @@ function writeBacklogPlanRecord(cwd: string, record: any): string {
 function readBacklogPlanRecord(cwd: string, planId: string): any {
 	const path = join(cwd, PLANS_DIR, `${planId}.json`);
 	if (!existsSync(path)) throw new Error(`Unknown Work Plan '${planId}'.`);
-	return JSON.parse(readFileSync(path, "utf8"));
+	const record = JSON.parse(readFileSync(path, "utf8"));
+	if (record.kind !== "work-plan") {
+		const reason = Array.isArray(record.validationErrors) && record.validationErrors.length ? ` Validation errors: ${record.validationErrors.join("; ")}.` : "";
+		throw new Error(`Cached plan '${planId}' is not an executable Work Plan.${reason}`);
+	}
+	return record;
 }
 
 function readFrontmatter(text: string): Record<string, string> {
@@ -3263,6 +3272,25 @@ Work views and processing:
 		return JSON.stringify(plan, null, 2);
 	}
 
+	function validateExecutablePlanArtifact(plan: any): string[] {
+		const errors: string[] = [];
+		if (!plan || typeof plan !== "object" || Array.isArray(plan)) return ["Planner output must be a JSON object."];
+		const groups = Array.isArray(plan.iterations) ? plan.iterations : Array.isArray(plan.groups) ? plan.groups : Array.isArray(plan.items) ? [{ items: plan.items }] : undefined;
+		if (!groups) return ["Planner output must contain an items, iterations, or groups array."];
+		for (const [groupIndex, group] of groups.entries()) {
+			if (!group || typeof group !== "object" || !Array.isArray(group.items)) {
+				errors.push(`Plan group ${groupIndex + 1} must contain an items array.`);
+				continue;
+			}
+			for (const [itemIndex, item] of group.items.entries()) {
+				if (!item || typeof item !== "object" || typeof item.id !== "string" || !item.id.trim()) {
+					errors.push(`Plan group ${groupIndex + 1} item ${itemIndex + 1} is missing a canonical item id.`);
+				}
+			}
+		}
+		return errors;
+	}
+
 	async function runPlannerPhase(args: string, ctx: any): Promise<any> {
 		if (backlogDeps.planPhase) return backlogDeps.planPhase(ctx.cwd, args);
 		const cfg = await loadConfig(ctx.cwd);
@@ -3283,6 +3311,13 @@ Work views and processing:
 			const effectiveArgs = overrides?.iterations && !/--iterations(?:=|\s|$)/.test(args) ? `${args} --iterations=${overrides.iterations}`.trim() : args;
 			const plan = await runPlannerPhase(effectiveArgs, ctx);
 			const createdAt = getBacklogTimestamp(backlogDeps.now);
+			const validationErrors = validateExecutablePlanArtifact(plan);
+			if (validationErrors.length) {
+				const invalidRecord = { id: createInvalidBacklogPlanId(createdAt), kind: "invalid-work-plan", createdAt, args: effectiveArgs, rawOutput: plan, validationErrors };
+				const invalidRecordPath = writeBacklogPlanRecord(ctx.cwd, invalidRecord);
+				ctx.ui.notify(`Planner output is not executable:\n- ${validationErrors.join("\n- ")}\n\nCached invalid output: ${invalidRecord.id}\nRecord: ${invalidRecordPath}`, "error");
+				return;
+			}
 			const record = { id: createBacklogPlanId(createdAt), kind: "work-plan", createdAt, args: effectiveArgs, plan };
 			const recordPath = writeBacklogPlanRecord(ctx.cwd, record);
 			ctx.ui.notify(`${formatAuthoritativePlan(plan)}\n\nCached plan: ${record.id}\nRecord: ${recordPath}`, "info");
@@ -3919,7 +3954,7 @@ Work views and processing:
 		handler: async (args, ctx) => notifyBacklogPlan(args, ctx, { iterations: 1 }),
 	});
 
-	registerBacklogCommands(pi);
+	registerWorkCommands(pi);
 	pi.registerCommand("work:runs", {
 		description: "List backlog processing runs: /work:runs [query]",
 		handler: async (args, ctx) => {

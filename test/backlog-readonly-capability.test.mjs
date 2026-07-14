@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import * as path from "node:path";
 import test from "node:test";
 
-import { createBacklogCapability, registerBacklogCommands } from "../extensions/pi-sandcastle/backlog.mjs";
+import { createBacklogCapability, createWorkSourceCapability, registerBacklogCommands, registerWorkCommands } from "../extensions/pi-sandcastle/backlog.mjs";
 
 function makeDirent(name, kind) {
   return {
@@ -102,6 +102,11 @@ tags:
 ${summary}
 `;
 }
+
+test("Work Source aliases expose the /work command seam", async () => {
+  assert.equal(createWorkSourceCapability, createBacklogCapability);
+  assert.equal(registerWorkCommands, registerBacklogCommands);
+});
 
 test("backlog commands register on the extension API", async () => {
   const registered = [];

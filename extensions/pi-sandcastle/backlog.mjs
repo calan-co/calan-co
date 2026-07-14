@@ -535,6 +535,8 @@ export function createBacklogCapability({
   };
 }
 
+export const createWorkSourceCapability = createBacklogCapability;
+
 export function registerBacklogCommands(pi, { capabilityFactory = (cwd) => createBacklogCapability({ cwd }) } = {}) {
   pi.registerCommand("work:list", {
     description: "List read-only Work Items",
@@ -546,3 +548,5 @@ export function registerBacklogCommands(pi, { capabilityFactory = (cwd) => creat
     handler: createBacklogCommandHandler((capability, args) => capability.inspect(args), capabilityFactory),
   });
 }
+
+export const registerWorkCommands = registerBacklogCommands;
