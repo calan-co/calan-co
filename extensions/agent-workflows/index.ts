@@ -272,7 +272,7 @@ async function loadSandbox(kind) {
 
 try {
   const { run, claudeCode, codex, cursor, opencode, copilot, pi } = await import("@ai-hero/sandcastle");
-  const sandbox = await loadSandbox(job.sandbox || "docker");
+  const sandbox = job.readOnly ? noSandbox() : await loadSandbox(job.sandbox || "docker");
   const makeAgent = (provider, model) => {
     if (provider === "claude") return claudeCode(model);
     if (provider === "codex") return codex(model);
@@ -295,7 +295,7 @@ try {
     sandbox,
     prompt,
     maxIterations: job.maxIterations || 1,
-    branchStrategy: job.branch ? { type: "branch", branch: job.branch } : undefined,
+    branchStrategy: job.readOnly ? { type: "head" } : (job.branch ? { type: "branch", branch: job.branch } : undefined),
     copyToWorktree: job.copyToWorktree,
     logging: {
       type: "file",
@@ -3355,6 +3355,7 @@ Work views and processing:
 	}
 
 	async function dispatch(cwd: string, agentName: string, task: string, ctx?: any, options: { readOnly?: boolean } = {}): Promise<RunState> {
+		ensureScaffold(cwd, { hydrate: false });
 		const cfg = await loadConfig(cwd);
 		const agent = cfg.agents[agentName];
 		if (!agent) throw new Error(`Unknown execution agent '${agentName}'. Run /work:config show to inspect configured agents.`);
@@ -3371,7 +3372,8 @@ Work views and processing:
 			cwd,
 			model: runtime.model,
 			provider: runtime.provider,
-			sandbox: runtime.sandbox,
+			sandbox: options.readOnly ? "no-sandbox" : runtime.sandbox,
+			readOnly: Boolean(options.readOnly),
 			systemPrompt: agent.systemPrompt || "",
 			prompt: task,
 			maxIterations: agent.maxIterations || 1,
@@ -3387,7 +3389,7 @@ Work views and processing:
 		refreshWidget();
 
 		try {
-			await ensureSandboxImage(cwd, runtime.sandbox, deps.image, (reason, imageName) => {
+			if (!options.readOnly) await ensureSandboxImage(cwd, runtime.sandbox, deps.image, (reason, imageName) => {
 				state.lastLine = `building ${reason} image ${imageName}`;
 				ctx?.ui?.notify(`Execution image ${imageName} is ${reason}; rebuilding before dispatch.`, "info");
 				refreshWidget();
