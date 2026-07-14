@@ -16,7 +16,7 @@ import {
   selectBacklogRunForStatus,
   backlogRunRecordPath,
   writeBacklogRunRecord,
-} from '../extensions/pi-sandcastle/backlog-runs.mjs';
+} from '../extensions/pi-sandcastle/work-runs.mjs';
 
 async function withTempDir(fn) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-sandcastle-backlog-'));

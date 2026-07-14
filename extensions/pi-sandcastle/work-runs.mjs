@@ -424,3 +424,18 @@ export async function resumeBacklogRun(cwd, runId, resumeCapability) {
     message: `Resumed work run '${record.id}'.`,
   };
 }
+
+export const WORK_RUNS_DIR = BACKLOG_RUNS_DIR;
+export const WORK_RESULTS_DIR = BACKLOG_RESULTS_DIR;
+export const WORK_PROCESS_RUN_KIND = BACKLOG_PROCESS_RUN_KIND;
+export const readWorkRunRecords = readBacklogRunRecords;
+export const matchesWorkRunQuery = matchesBacklogRunQuery;
+export const listWorkRuns = listBacklogRuns;
+export const selectWorkRunForStatus = selectBacklogRunForStatus;
+export const selectWorkRunForResume = selectBacklogRunForResume;
+export const isWorkRunResumable = isBacklogRunResumable;
+export const summarizeWorkRun = summarizeBacklogRun;
+export const formatWorkRunList = formatBacklogRunList;
+export const workRunRecordPath = backlogRunRecordPath;
+export const writeWorkRunRecord = writeBacklogRunRecord;
+export const resumeWorkRun = resumeBacklogRun;

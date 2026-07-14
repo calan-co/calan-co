@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import * as path from "node:path";
 import test from "node:test";
 
-import { createBacklogCapability, createWorkSourceCapability, registerBacklogCommands, registerWorkCommands } from "../extensions/pi-sandcastle/backlog.mjs";
+import { createBacklogCapability, createWorkSourceCapability, registerBacklogCommands, registerWorkCommands } from "../extensions/pi-sandcastle/work-source.mjs";
 
 function makeDirent(name, kind) {
   return {

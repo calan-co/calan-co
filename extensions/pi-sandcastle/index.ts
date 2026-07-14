@@ -31,17 +31,17 @@ import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { ConfigShadowModel } from "./config-shadow-model.ts";
 import { buildSandcastleImage } from "./build-image.ts";
-import { registerWorkCommands } from "./backlog.mjs";
+import { registerWorkCommands } from "./work-source.mjs";
 import { buildDefaultConfigText, configToYaml, packsToConfig } from "./pipeline-packs.mjs";
 import { renderWorkBrief } from "./work-brief.mjs";
 import { loadExecutionRuntimePack, listRuntimeAgents, listRuntimePipelines } from "./execution-runtime.ts";
 import {
-	formatBacklogRunList,
 	formatStatusSelection,
-	listBacklogRuns,
-	resumeBacklogRun,
-	selectBacklogRunForStatus,
-} from "./backlog-runs.mjs";
+	formatWorkRunList,
+	listWorkRuns,
+	resumeWorkRun,
+	selectWorkRunForStatus,
+} from "./work-runs.mjs";
 
 const ToolType = {
 	Object(schema: Record<string, unknown>) {
@@ -3968,15 +3968,15 @@ Work views and processing:
 	pi.registerCommand("work:runs", {
 		description: "List backlog processing runs: /work:runs [query]",
 		handler: async (args, ctx) => {
-			const runs = listBacklogRuns(ctx.cwd, args.trim());
-			ctx.ui.notify(formatBacklogRunList(runs), "info");
+			const runs = listWorkRuns(ctx.cwd, args.trim());
+			ctx.ui.notify(formatWorkRunList(runs), "info");
 		},
 	});
 
 	pi.registerCommand("work:status", {
 		description: "Inspect a backlog processing run: /work:status [run-id]",
 		handler: async (args, ctx) => {
-			const selection = selectBacklogRunForStatus(listBacklogRuns(ctx.cwd), args.trim());
+			const selection = selectWorkRunForStatus(listWorkRuns(ctx.cwd), args.trim());
 			const message = formatStatusSelection(selection);
 			ctx.ui.notify(message, selection.kind === "record" ? "info" : "error");
 		},
@@ -3985,7 +3985,7 @@ Work views and processing:
 	pi.registerCommand("work:logs", {
 		description: "Show log paths for a backlog processing run: /work:logs [run-id]",
 		handler: async (args, ctx) => {
-			const selection = selectBacklogRunForStatus(listBacklogRuns(ctx.cwd), args.trim());
+			const selection = selectWorkRunForStatus(listWorkRuns(ctx.cwd), args.trim());
 			if (selection.kind !== "record") {
 				ctx.ui.notify(formatStatusSelection(selection), "error");
 				return;
@@ -4006,7 +4006,7 @@ Work views and processing:
 		description: "Resume a backlog processing run: /work:resume [run-id]",
 		handler: async (args, ctx) => {
 			const resumeCapability = getBacklogResumeCapability(ctx);
-			const result = await resumeBacklogRun(ctx.cwd, args.trim(), resumeCapability);
+			const result = await resumeWorkRun(ctx.cwd, args.trim(), resumeCapability);
 			ctx.ui.notify(result.message, result.ok ? "success" : "error");
 		},
 	});
