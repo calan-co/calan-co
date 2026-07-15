@@ -84,6 +84,13 @@ roles:
   assert.throws(() => selectPlanWorkRoleName(parseSimpleYaml('roles:\n  planner:\n    provider: pi\n')), /kind: planWork/);
 });
 
+test('/work:plan dispatches planner snapshots through the normal sandbox workspace path', async () => {
+  const source = readFileSync(new URL('../extensions/agent-workflows/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /dispatch\(ctx\.cwd, agent, task, ctx, \{ executionCwd: snapshotCwd, branchPrefix: "agent-workflows\/planner" \}\)/);
+  assert.doesNotMatch(source, /readOnly: true/);
+  assert.match(source, /imageName: defaultSandcastleImageName\(cwd, cfg\.imageNamePattern\)/);
+});
+
 test('createPlannerSnapshot creates a disposable git repo without host-private state', async () => {
   const cwd = makeRepo();
   mkdirSync(join(cwd, '.git'), { recursive: true });

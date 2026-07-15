@@ -95,7 +95,8 @@ test('issue 00002 registers /work:config-raw and manages repo-local config', () 
     execFileSyncInner(process.execPath, ['--check', runnerPath], { encoding: 'utf8' });
     assert.doesNotMatch(readFileSync(runnerPath, 'utf8'), /importUserPackage|PI_AGENT_NODE_MODULES/);
     assert.match(readFileSync(runnerPath, 'utf8'), /import\("@ai-hero\/sandcastle"\)/);
-    assert.match(readFileSync(runnerPath, 'utf8'), /job\.readOnly \? \{ type: "head" \}/);
+    assert.match(readFileSync(runnerPath, 'utf8'), /loadSandbox\(job\.sandbox \|\| "docker", job\.imageName\)/);
+    assert.match(readFileSync(runnerPath, 'utf8'), /branchStrategy: job\.branch \? \{ type: "branch", branch: job\.branch \} : undefined/);
 
     const forceNotifications = await invoke('init --force');
     assert.equal(forceNotifications[0].type, 'success');

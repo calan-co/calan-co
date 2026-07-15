@@ -438,16 +438,16 @@ function emit(event) {
   console.log(JSON.stringify({ source: "agent-workflows", ...event }));
 }
 
-async function loadSandbox(kind) {
-  if (kind === "podman") return (await import("@ai-hero/sandcastle/sandboxes/podman")).podman();
+async function loadSandbox(kind, imageName) {
+  if (kind === "podman") return (await import("@ai-hero/sandcastle/sandboxes/podman")).podman(imageName ? { imageName } : undefined);
   if (kind === "vercel") return (await import("@ai-hero/sandcastle/sandboxes/vercel")).vercel();
   if (kind === "no-sandbox") return (await import("@ai-hero/sandcastle/sandboxes/no-sandbox")).noSandbox();
-  return (await import("@ai-hero/sandcastle/sandboxes/docker")).docker();
+  return (await import("@ai-hero/sandcastle/sandboxes/docker")).docker(imageName ? { imageName } : undefined);
 }
 
 try {
   const { run, claudeCode, codex, cursor, opencode, copilot, pi } = await import("@ai-hero/sandcastle");
-  const sandbox = job.readOnly ? noSandbox() : await loadSandbox(job.sandbox || "docker");
+  const sandbox = await loadSandbox(job.sandbox || "docker", job.imageName);
   const makeAgent = (provider, model) => {
     if (provider === "claude") return claudeCode(model);
     if (provider === "codex") return codex(model);
@@ -470,7 +470,7 @@ try {
     sandbox,
     prompt,
     maxIterations: job.maxIterations || 1,
-    branchStrategy: job.readOnly ? { type: "head" } : (job.branch ? { type: "branch", branch: job.branch } : undefined),
+    branchStrategy: job.branch ? { type: "branch", branch: job.branch } : undefined,
     copyToWorktree: job.copyToWorktree,
     logging: {
       type: "file",
@@ -3606,7 +3606,7 @@ Work views and processing:
 		}
 	}
 
-	async function dispatch(cwd: string, agentName: string, task: string, ctx?: any, options: { readOnly?: boolean; executionCwd?: string; branchPrefix?: string } = {}): Promise<RunState> {
+	async function dispatch(cwd: string, agentName: string, task: string, ctx?: any, options: { executionCwd?: string; branchPrefix?: string } = {}): Promise<RunState> {
 		ensureScaffold(cwd, { hydrate: false });
 		const cfg = await loadConfig(cwd);
 		const agent = cfg.agents[agentName];
@@ -3614,7 +3614,7 @@ Work views and processing:
 		const id = `${Date.now().toString(36)}-${randomUUID().slice(0, 8)}-${agentName}`;
 		const resultPath = join(cwd, RESULTS_DIR, `${id}.json`);
 		const logPath = join(cwd, RESULTS_DIR, `${id}.log`);
-		const branch = options.readOnly ? undefined : (agent.branch || `${options.branchPrefix || "sandcastle"}/${agentName}/${id}`);
+		const branch = agent.branch || `${options.branchPrefix || "sandcastle"}/${agentName}/${id}`;
 		const jobPath = join(cwd, JOBS_DIR, `${id}.json`);
 		const runtime = resolveAgentRuntimeSettings(agent, cfg);
 		const job = {
@@ -3624,8 +3624,8 @@ Work views and processing:
 			cwd: options.executionCwd || cwd,
 			model: runtime.model,
 			provider: runtime.provider,
-			sandbox: options.readOnly ? "no-sandbox" : runtime.sandbox,
-			readOnly: Boolean(options.readOnly),
+			sandbox: runtime.sandbox,
+			imageName: defaultSandcastleImageName(cwd, cfg.imageNamePattern),
 			systemPrompt: agent.systemPrompt || "",
 			prompt: task,
 			maxIterations: agent.maxIterations || 1,
@@ -3641,7 +3641,7 @@ Work views and processing:
 		refreshWidget();
 
 		try {
-			if (!options.readOnly) await ensureSandboxImage(cwd, runtime.sandbox, deps.image, (reason, imageName) => {
+			await ensureSandboxImage(cwd, runtime.sandbox, deps.image, (reason, imageName) => {
 				state.lastLine = `building ${reason} image ${imageName}`;
 				ctx?.ui?.notify(`Execution image ${imageName} is ${reason}; rebuilding before dispatch.`, "info");
 				refreshWidget();
