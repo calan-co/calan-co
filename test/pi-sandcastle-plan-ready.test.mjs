@@ -31,7 +31,7 @@ test('Agent Workflows registers /work planning commands without legacy /backlog 
   const pi = fakePi();
   agentWorkflows(pi, {});
 
-  for (const name of ['work:ready', 'work:plan', 'work:next', 'work:process']) {
+  for (const name of ['work:help', 'work:ready', 'work:plan', 'work:next', 'work:process']) {
     assert.equal(pi.commands.has(name), true, `${name} should be registered`);
   }
   for (const name of ['backlog:ready', 'backlog:plan', 'backlog:next', 'backlog:process']) {

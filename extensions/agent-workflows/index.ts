@@ -4187,6 +4187,11 @@ Work views and processing:
 		},
 	});
 
+	pi.registerCommand("work:help", {
+		description: "Show Agent Workflows command help",
+		handler: async (_args, ctx) => ctx.ui.notify(helpText(), "info"),
+	});
+
 	pi.registerCommand("work:ready", {
 		description: "List deterministic ready Work candidates from the configured Work Source: /work:ready [query]",
 		handler: async (args, ctx) => notifyBacklogReady(args, ctx),

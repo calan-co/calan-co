@@ -73,6 +73,7 @@ test('agentWorkflows registers only the updated /work:* and /work:* slash-comman
     'work:cancel',
     'work:config',
     'work:config-raw',
+    'work:help',
     'work:inspect',
     'work:list',
     'work:logs',
