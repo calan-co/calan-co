@@ -461,6 +461,10 @@ interface RunState {
 	resultPath?: string;
 	branch?: string;
 	commits?: string[];
+	kind?: string;
+	nodePath?: string;
+	laneId?: string;
+	itemId?: string;
 	proc?: SandcastleProcess;
 }
 
@@ -2772,10 +2776,13 @@ function buildRunSummary(record: ScRunRecord): string {
 
 function formatPipelineWorkerRows(record: Pick<WorkProcessRunRecord, "workerStatuses"> | undefined): string[] {
 	return (record?.workerStatuses || []).map((step) => {
-		const commits = step.commits?.length ? `; commits ${step.commits.join(", ")}` : "";
+		const item = step.itemId ? `; item ${step.itemId}` : "";
+		const node = step.nodePath ? `; node ${step.nodePath}` : "";
+		const lane = step.laneId ? `; lane ${step.laneId}` : "";
 		const branch = step.branch ? `; branch ${step.branch}` : "";
+		const commits = step.commits?.length ? `; commits ${step.commits.join(", ")}` : "";
 		const log = step.logPath ? `; log ${step.logPath}` : "";
-		return `Worker ${step.index + 1}: ${step.role} ${step.status}${branch}${commits}${log}`;
+		return `Worker ${step.index + 1}: ${step.role} ${step.status}${item}${node}${lane}${branch}${commits}${log}`;
 	});
 }
 
@@ -3276,6 +3283,10 @@ interface PipelineRunStepRecord {
 	commits: string[];
 	logPath: string;
 	error?: string;
+	kind?: string;
+	nodePath?: string;
+	laneId?: string;
+	itemId?: string;
 }
 
 interface PipelineRunNodeRecord {
@@ -3471,6 +3482,11 @@ function collectGraphResultStringArray(result: NodeResult, key: "commits" | "eff
 	return own;
 }
 
+function graphStatusNodePath(context: GraphNodeExecutionContext): string {
+	if (context.loop) return context.path.replace(/\.node(?=\.|$)/, `.iterations.${context.loop.index}`);
+	return context.path;
+}
+
 function graphResultSummary(result: NodeResult): Record<string, unknown> {
 	return {
 		type: result.type,
@@ -3659,7 +3675,8 @@ export async function executePipeline(
 				if (!workspaceWorktree || typeof workspaceWorktree.run !== "function") throw new Error(`${context.path} agent node must execute inside git.worktree`);
 				const contextBranch = graphContextString(context, "branch") || graphWorkspaceString(context, "branch");
 				const itemId = graphContextString(context, "itemId");
-				const laneId = graphContextString(context, "contextId") || (context.loop ? `${context.path}:${context.loop.index}` : undefined);
+				const nodePath = graphStatusNodePath(context);
+				const laneId = graphContextString(context, "contextId") || (context.loop ? `${nodePath}:${context.loop.index}` : undefined);
 				const contextPromptPrefix = graphLoopItem(context) ? `Execution context: ${laneId || "unknown"}${itemId ? `\nWork Item: ${itemId}` : ""}${contextBranch ? `\nBranch: ${contextBranch}` : ""}\n\n` : "";
 				if (!roleName) throw new Error(`${context.path} agent node must reference a role`);
 				const role = cfg.agents[roleName];
@@ -3671,7 +3688,11 @@ export async function executePipeline(
 					maxIterations: Number.isInteger((node as any).maxIterations) ? Number((node as any).maxIterations) : cfg.maxIterations || 10,
 					commits: [],
 					logPath: buildPipelineStepLogPath(logDir, record.steps.length, roleName),
+					kind: node.kind,
+					nodePath,
 					...(contextBranch ? { branch: contextBranch } : {}),
+					...(itemId ? { itemId } : {}),
+					...(laneId ? { laneId } : {}),
 				};
 				record.steps.push(stepRecord);
 				await writePipelineRunRecord(record);
@@ -3762,7 +3783,8 @@ export async function executePipeline(
 							const commits = childResults.flatMap((child) => collectGraphResultStringArray(child, "commits"));
 							const childEffects = childResults.flatMap((child) => collectGraphResultStringArray(child, "effects")).filter((effect) => !isLogArtifactEffect(effect));
 							const itemId = graphContextString(context, "itemId");
-							const laneId = graphContextString(context, "contextId") || (context.loop ? `${context.path}:${context.loop.index}` : undefined);
+							const nodePath = graphStatusNodePath(context);
+							const laneId = graphContextString(context, "contextId") || (context.loop ? `${nodePath}:${context.loop.index}` : undefined);
 							record.branch = record.branch || workspaceBranch;
 							record.worktreePath = record.worktreePath || laneWorktree.worktreePath;
 							return {
@@ -3862,6 +3884,16 @@ export async function executePipeline(
 	}
 }
 
+function formatRunStateLine(run: RunState): string {
+	const details = [
+		run.itemId ? `item ${run.itemId}` : undefined,
+		run.nodePath ? `node ${run.nodePath}` : undefined,
+		run.laneId ? `lane ${run.laneId}` : undefined,
+	].filter((entry): entry is string => Boolean(entry));
+	const statusText = run.lastLine || run.task.slice(0, 48);
+	return details.length ? `${details.join("; ")}; ${statusText}` : statusText;
+}
+
 function renderWidget(runs: Map<string, RunState>): string[] {
 	const active = [...runs.values()].sort((a, b) => b.startedAt - a.startedAt).slice(0, 8);
 	const lines = [`Execution workers: ${runs.size}`];
@@ -3869,7 +3901,7 @@ function renderWidget(runs: Map<string, RunState>): string[] {
 		const ageSource = run.endedAt || Date.now();
 		const age = Math.max(0, Math.round((ageSource - run.startedAt) / 1000));
 		const commits = run.commits?.length ? ` · ${run.commits.length} commit(s)` : "";
-		lines.push(`${run.status.padEnd(9)} ${run.agent.padEnd(12)} ${age}s · ${run.lastLine || run.task.slice(0, 48)}${commits}`);
+		lines.push(`${run.status.padEnd(9)} ${run.agent.padEnd(12)} ${age}s · ${formatRunStateLine(run)}${commits}`);
 	}
 	return lines;
 }
@@ -4948,23 +4980,27 @@ Work views and processing:
 		].join("\n");
 		const statusRows = new Map<number, RunState[]>();
 		const cfg = await loadConfig(cwd);
-		for (const [index, step] of (cfg.pipelines[input.pipeline]?.steps || []).entries()) {
-			const parallelSlots = input.parallel && step.role === "implementer" ? Math.max(1, Number(cfg.maxWorkers || 5)) : 1;
-			const rows = Array.from({ length: parallelSlots }, (_, fanoutIndex) => {
-				const item = input.parallel && step.role === "implementer" ? input.items[fanoutIndex] : undefined;
-				const suffix = item ? `-${sanitizePathSegment(item.id)}` : parallelSlots > 1 ? `-slot-${fanoutIndex + 1}` : "";
-				const row: RunState = {
-					id: `${input.runId}-worker-${index + 1}${suffix}`,
-					agent: step.role,
-					task: `Work process ${input.runId} · pipeline ${input.pipeline} · worker ${index + 1}`,
-					status: "queued",
-					startedAt: Date.now(),
-					lastLine: item ? `waiting for ${item.id}` : parallelSlots > 1 ? `waiting for parallel slot ${fanoutIndex + 1}` : `waiting for step ${index + 1}`,
-				};
-				runs.set(row.id, row);
-				return row;
-			});
-			statusRows.set(index, rows);
+		const processPipeline = cfg.pipelines[input.pipeline];
+		const useGraphStatusRows = Boolean(processPipeline && pipelineHasGraphNodes(processPipeline));
+		if (!useGraphStatusRows) {
+			for (const [index, step] of (processPipeline?.steps || []).entries()) {
+				const parallelSlots = input.parallel && step.role === "implementer" ? Math.max(1, Number(cfg.maxWorkers || 5)) : 1;
+				const rows = Array.from({ length: parallelSlots }, (_, fanoutIndex) => {
+					const item = input.parallel && step.role === "implementer" ? input.items[fanoutIndex] : undefined;
+					const suffix = item ? `-${sanitizePathSegment(item.id)}` : parallelSlots > 1 ? `-slot-${fanoutIndex + 1}` : "";
+					const row: RunState = {
+						id: `${input.runId}-worker-${index + 1}${suffix}`,
+						agent: step.role,
+						task: `Work process ${input.runId} · pipeline ${input.pipeline} · worker ${index + 1}`,
+						status: "queued",
+						startedAt: Date.now(),
+						lastLine: item ? `waiting for ${item.id}` : parallelSlots > 1 ? `waiting for parallel slot ${fanoutIndex + 1}` : `waiting for step ${index + 1}`,
+					};
+					runs.set(row.id, row);
+					return row;
+				});
+				statusRows.set(index, rows);
+			}
 		}
 		if (statusRows.size) refreshWidget();
 		const updateWorkerStatus = (step: PipelineRunStepRecord) => {
@@ -4984,13 +5020,20 @@ Work views and processing:
 			}
 			for (const row of rows) {
 				const nextStatus = step.status === "completed" ? "done" : step.status === "failed" ? "error" : "running";
+				const terminal = row.status === "done" || row.status === "error" || row.status === "cancelled";
+				if (terminal && nextStatus === "running") continue;
+				row.agent = step.role;
 				row.status = nextStatus;
 				if ((nextStatus === "done" || nextStatus === "error") && row.endedAt === undefined) row.endedAt = Date.now();
 				if (nextStatus === "running") row.endedAt = undefined;
 				row.branch = step.branch;
 				row.commits = step.commits;
 				row.logPath = step.logPath;
-				if (step.status === "running" && row.lastLine.startsWith("waiting")) row.lastLine = `iter 0${step.maxIterations ? `/${step.maxIterations}` : ""}: started step ${step.index + 1}`;
+				row.kind = step.kind;
+				row.nodePath = step.nodePath;
+				row.laneId = step.laneId;
+				row.itemId = step.itemId;
+				if (step.status === "running" && row.lastLine.startsWith("waiting")) row.lastLine = `iter 0${step.maxIterations ? `/${step.maxIterations}` : ""}: started ${step.nodePath || `step ${step.index + 1}`}`;
 				if (step.status === "completed" || step.status === "failed") row.lastLine = `${step.status}${step.branch ? ` on ${step.branch}` : ""}`;
 			}
 			refreshWidget();
@@ -5015,7 +5058,7 @@ Work views and processing:
 					const rows = statusRows.get(step.index) || [];
 					const status = formatAgentStreamStatus(event, step.maxIterations);
 					if (status) {
-						for (const row of rows) row.lastLine = status;
+						for (const row of rows) if (row.status === "running") row.lastLine = status;
 						refreshWidget();
 					}
 					deps.pipeline?.onStepStreamEvent?.(step, event, record);
