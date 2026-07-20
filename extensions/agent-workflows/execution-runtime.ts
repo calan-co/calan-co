@@ -417,6 +417,8 @@ export function runtimeToSandcastleConfig(pack = loadExecutionRuntimePack(), def
 		const branchPolicy = String(pipeline.defaults?.branchPolicy || pack.defaults?.branchPolicy || "branch-per-run");
 		pipelines[name] = {
 			description: pipeline.description,
+			kind: pipeline.kind || "composite",
+			nodes: JSON.parse(JSON.stringify(pipeline.nodes || {})),
 			branchStrategy: branchPolicy === "merge-to-head" ? { type: "merge-to-head" } : { type: "branch", branch: `sandcastle/${name}` },
 			model: defaultModel,
 			copyToWorktree: ["node_modules"],

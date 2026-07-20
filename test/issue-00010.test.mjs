@@ -88,8 +88,8 @@ const requiredDocsSnippets = [
       '`/work:config-raw init` hydrates missing repo-local files and prompt templates without overwriting existing edits.',
   },
   {
-    message: 'issue 00010 should document fixed pipeline execution',
-    snippet: '`/work:pipeline <pipeline> [prompt]` runs a fixed-domain Pipeline directly.',
+    message: 'issue 00010 should document graph pipeline execution',
+    snippet: '`/work:pipeline <pipeline> [prompt]` runs a graph-native Pipeline directly, with legacy `steps[]` fallback for older configs.',
   },
   {
     message: 'issue 00010 should explain deterministic query parsing',
@@ -106,7 +106,7 @@ const requiredDocsSnippets = [
   {
     message: 'issue 00010 should define where durable state begins',
     snippet:
-      'Durable state begins when `/work:process` or `/work:resume` executes an adapter-backed pipeline.'
+      'Durable state begins when `/work:process` or `/work:resume` executes an adapter-backed graph pipeline.'
   },
   {
     message: 'issue 00010 should reserve a separate namespace for PR workflows',

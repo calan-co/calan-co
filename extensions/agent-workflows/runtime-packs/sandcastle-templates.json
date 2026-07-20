@@ -206,10 +206,15 @@
       },
       "kind": "composite",
       "nodes": {
-        "run": {
-          "kind": "agent.pi",
-          "prompt": "blank",
-          "role": "worker"
+        "workspace": {
+          "kind": "git.worktree",
+          "nodes": {
+            "run": {
+              "kind": "agent.pi",
+              "prompt": "blank",
+              "role": "worker"
+            }
+          }
         }
       }
     },
@@ -220,10 +225,15 @@
       },
       "kind": "composite",
       "nodes": {
-        "run": {
-          "kind": "agent.pi",
-          "prompt": "simple-loop",
-          "role": "worker"
+        "workspace": {
+          "kind": "git.worktree",
+          "nodes": {
+            "run": {
+              "kind": "agent.pi",
+              "prompt": "simple-loop",
+              "role": "worker"
+            }
+          }
         }
       }
     },
@@ -234,18 +244,23 @@
       },
       "kind": "composite",
       "nodes": {
-        "implement": {
-          "kind": "agent.pi",
-          "prompt": "implement-work",
-          "role": "implementer"
-        },
-        "review": {
-          "kind": "agent.pi",
-          "prompt": "review-work",
-          "role": "reviewer",
-          "needs": [
-            "implement"
-          ]
+        "workspace": {
+          "kind": "git.worktree",
+          "nodes": {
+            "implement": {
+              "kind": "agent.pi",
+              "prompt": "implement-work",
+              "role": "implementer"
+            },
+            "review": {
+              "kind": "agent.pi",
+              "prompt": "review-work",
+              "role": "reviewer",
+              "needs": [
+                "implement"
+              ]
+            }
+          }
         }
       }
     },
@@ -364,10 +379,15 @@
       },
       "kind": "composite",
       "nodes": {
-        "archive": {
-          "kind": "agent.pi",
-          "prompt": "archive-terminal-work",
-          "role": "reviewer"
+        "workspace": {
+          "kind": "git.worktree",
+          "nodes": {
+            "archive": {
+              "kind": "agent.pi",
+              "prompt": "archive-terminal-work",
+              "role": "reviewer"
+            }
+          }
         }
       }
     }

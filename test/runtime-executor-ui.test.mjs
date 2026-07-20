@@ -7,6 +7,7 @@ import test from 'node:test';
 import { promisify } from 'node:util';
 
 import { executePipeline } from '../extensions/agent-workflows/index.ts';
+import { configToYaml, packsToConfig } from '../extensions/agent-workflows/pipeline-packs.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -84,6 +85,33 @@ function fakeSuccessfulGit() {
     return { status: 0, stdout: '', stderr: '' };
   };
 }
+
+test('executePipeline uses graph executor for generated default runtime config', async () => {
+  const repoRoot = await createGraphRepo(configToYaml(packsToConfig()).split('\n'));
+  const calls = [];
+
+  const record = await executePipeline(repoRoot, 'simple-loop', 'finish default graph work', {
+    now: () => 1700000003000,
+    createWorktree: async () => fakeWorktree(repoRoot, async (options) => {
+      calls.push(options.prompt);
+      return {
+        iterations: [],
+        commits: [{ sha: 'commit-default' }],
+        branch: 'sandcastle/simple-loop',
+        stdout: '',
+        logFilePath: options.logging.path,
+      };
+    }),
+    loadSandboxProvider: async (kind) => ({ kind }),
+    makeAgent: (model, provider) => ({ model, provider }),
+  });
+
+  assert.equal(record.status, 'completed');
+  assert.equal(record.executor, 'graph');
+  assert.equal(record.nodes.find((node) => node.nodePath === 'root.nodes.workspace').resultType, 'WorkspaceResult');
+  assert.deepEqual(record.steps.map((step) => step.role), ['worker']);
+  assert.match(calls[0], /Pick the next open Work Item/);
+});
 
 test('executePipeline runs composite graph nodes by needs and records graph node summaries', async () => {
   const repoRoot = await createGraphRepo(baseGraphConfig([

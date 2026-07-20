@@ -1763,7 +1763,7 @@ function configPackText(pack: string): string {
 
 function listConfigPacks(): SelectItem[] {
 	return [
-		{ value: "default", label: "Sandcastle defaults", description: "Out-of-the-box Sandcastle template pipelines plus archive helper" },
+		{ value: "default", label: "Graph workflow defaults", description: "Out-of-the-box graph-native Agent Workflows pipelines plus archive helper" },
 		{ value: "simple-loop", label: "simple-loop", description: "Worker picks and closes issues one by one" },
 		{ value: "sequential-reviewer", label: "sequential-reviewer", description: "Implement then review one issue branch" },
 		{ value: "parallel-planner", label: "parallel-planner", description: "Plan unblocked work, implement, merge" },
@@ -1894,6 +1894,7 @@ function readConfigValue(cfg: SandcastleConfig, path: string): unknown {
 		return cfg.agents[parts[1]]?.[parts[2]];
 	}
 	if (parts[0] === "pipelines" && parts.length === 3) return (cfg.pipelines[parts[1]] as any)?.[parts[2]];
+	if (parts[0] === "pipelines" && parts[2] === "nodes" && parts.length >= 5) return parts.slice(2).reduce((current: any, part) => current?.[part], cfg.pipelines[parts[1]] as any);
 	if (parts[0] === "pipelines" && parts[2] === "steps" && parts.length === 5) return (cfg.pipelines[parts[1]]?.steps?.[Number(parts[3])] as any)?.[parts[4]];
 	if (parts[0] === "chains" && parts.length === 2) return cfg.chains[parts[1]];
 	return undefined;
@@ -1904,6 +1905,7 @@ function supportedConfigPath(path: string): boolean {
 	if (parts.length === 1) return isRootConfigKey(parts[0]);
 	if (parts[0] === "roles" && parts.length === 3 && isEditableAgentField(parts[2])) return true;
 	if (parts[0] === "pipelines" && parts.length === 3 && ["description", "model", "sandbox"].includes(parts[2])) return true;
+	if (parts[0] === "pipelines" && parts[2] === "nodes" && parts.length >= 5 && ["role", "prompt", "promptOverride", "model", "sandbox", "maxIterations"].includes(parts.at(-1)!)) return true;
 	if (parts[0] === "pipelines" && parts[2] === "steps" && parts.length === 5 && ["role", "prompt", "model", "sandbox", "maxIterations"].includes(parts[4])) return true;
 	return false;
 }
@@ -1962,6 +1964,12 @@ function setConfigValueInText(raw: string, path: string, value: unknown): string
 		}
 		lines.push(replacement);
 		return lines.join("\n");
+	}
+
+	if (parts[0] === "pipelines" && parts[2] === "nodes" && parts.length >= 5) {
+		const model = new ConfigShadowModel(mergeWithPackDefaults(normalizeConfig(parseSimpleYaml(raw))));
+		model.setConfigValue(path, value);
+		return configToYaml(model.snapshot());
 	}
 
 	if (parts[0] === "roles" && parts.length === 3) {
@@ -2068,7 +2076,19 @@ function appendAgentText(raw: string, name: string): string {
 
 function appendPipelineText(raw: string, name: string): string {
 	if (new RegExp(`^  ${yamlMapKeyRegex(name)}:\\s*$`, "m").test(raw)) throw new Error(`Pipeline '${name}' already exists.`);
-	const block = [`  ${formatYamlMapKey(name)}:`, `    description: ${name} pipeline`, `    steps:`, `      - role: worker`, `        prompt: |`, `          Complete the requested task.`].join("\n");
+	const block = [
+		`  ${formatYamlMapKey(name)}:`,
+		`    description: ${name} graph pipeline`,
+		`    kind: composite`,
+		`    nodes:`,
+		`      workspace:`,
+		`        kind: git.worktree`,
+		`        nodes:`,
+		`          run:`,
+		`            kind: agent.pi`,
+		`            role: worker`,
+		`            prompt: blank`,
+	].join("\n");
 	return appendToYamlSection(raw, "pipelines", block);
 }
 
@@ -2113,6 +2133,23 @@ function schemaEnumForPath(path: string): string[] | undefined {
 	return Array.isArray(current.enum) ? current.enum.map(String) : undefined;
 }
 
+function configuredGraphNodePaths(pipelineName: string, nodes: Record<string, PipelineNodeDef> | undefined, prefix = `pipelines.${pipelineName}.nodes`): string[] {
+	if (!nodes) return [];
+	return Object.entries(nodes).flatMap(([nodeId, node]) => {
+		const nodePrefix = `${prefix}.${nodeId}`;
+		return [
+			...(node.role !== undefined ? [`${nodePrefix}.role`] : []),
+			...(node.prompt !== undefined ? [`${nodePrefix}.prompt`] : []),
+			...(node.promptOverride !== undefined ? [`${nodePrefix}.promptOverride`] : []),
+			...((node as any).model !== undefined ? [`${nodePrefix}.model`] : []),
+			...((node as any).sandbox !== undefined ? [`${nodePrefix}.sandbox`] : []),
+			...((node as any).maxIterations !== undefined ? [`${nodePrefix}.maxIterations`] : []),
+			...configuredGraphNodePaths(pipelineName, node.nodes, `${nodePrefix}.nodes`),
+			...(node.node ? configuredGraphNodePaths(pipelineName, { node: node.node }, nodePrefix) : []),
+		];
+	});
+}
+
 function configuredConfigPaths(cfg: SandcastleConfig): string[] {
 	const rootPaths = ROOT_CONFIG_KEYS;
 	const agentFields = ["description", "kind", "model", "sandbox", "provider", "maxIterations", "branch", "systemPrompt"];
@@ -2120,7 +2157,10 @@ function configuredConfigPaths(cfg: SandcastleConfig): string[] {
 	return [
 		...rootPaths,
 		...Object.keys(cfg.agents).flatMap((agent) => agentFields.map((field) => `roles.${agent}.${field}`)),
-		...Object.keys(cfg.pipelines).flatMap((pipeline) => pipelineFields.map((field) => `pipelines.${pipeline}.${field}`)),
+		...Object.entries(cfg.pipelines).flatMap(([pipeline, def]) => [
+			...pipelineFields.map((field) => `pipelines.${pipeline}.${field}`),
+			...configuredGraphNodePaths(pipeline, def.nodes),
+		]),
 	].sort();
 }
 
@@ -2291,7 +2331,17 @@ function mergeWithPackDefaults(cfg: SandcastleConfig): SandcastleConfig {
 	const agents = { ...DEFAULT_CONFIG.agents } as Record<string, AgentDef>;
 	for (const [name, agent] of Object.entries(cfg.agents || {})) agents[name] = { ...(DEFAULT_CONFIG.agents[name] || { name }), ...agent, name };
 	const pipelines = { ...DEFAULT_CONFIG.pipelines } as Record<string, PipelineDef>;
-	for (const [name, pipeline] of Object.entries(cfg.pipelines || {})) pipelines[name] = { ...(DEFAULT_CONFIG.pipelines[name] || { steps: [] }), ...pipeline, steps: pipeline.steps || DEFAULT_CONFIG.pipelines[name]?.steps || [] };
+	for (const [name, pipeline] of Object.entries(cfg.pipelines || {})) {
+		const defaultPipeline = DEFAULT_CONFIG.pipelines[name] || { steps: [] };
+		const userDefinesLegacySteps = Array.isArray(pipeline.steps) && pipeline.steps.length > 0 && !pipeline.nodes;
+		pipelines[name] = {
+			...defaultPipeline,
+			...pipeline,
+			kind: pipeline.kind ?? (userDefinesLegacySteps ? undefined : defaultPipeline.kind),
+			nodes: pipeline.nodes ?? (userDefinesLegacySteps ? undefined : defaultPipeline.nodes),
+			steps: pipeline.steps || defaultPipeline.steps || [],
+		};
+	}
 	return {
 		...DEFAULT_CONFIG,
 		...cfg,
@@ -4022,6 +4072,7 @@ function isTuiEscape(data: string): boolean {
 function isDefaultableConfigPath(path: string): boolean {
 	const parts = splitConfigPath(path);
 	return (parts.length === 3 && ["roles", "pipelines"].includes(parts[0]) && ["model", "sandbox"].includes(parts[2]))
+		|| (parts[0] === "pipelines" && parts[2] === "nodes" && ["model", "sandbox", "maxIterations"].includes(parts.at(-1)!))
 		|| (parts[0] === "pipelines" && parts[2] === "steps" && ["model", "sandbox", "maxIterations"].includes(parts[4]));
 }
 
@@ -4040,6 +4091,7 @@ function selectableValuesForPath(cfg: SandcastleConfig, path: string): string[] 
 		|| (path === "defaultPipeline" ? ["simple-loop", "sequential-reviewer", "parallel-planner", "parallel-planner-with-review", "archive"] : undefined)
 		|| (path === "defaultAgent" ? ["claude-code", "pi", "codex", "cursor", "opencode", "copilot"] : undefined)
 		|| (path === "workSource" ? ["github-issues", "custom", "beads"] : undefined)
+		|| (parts[0] === "pipelines" && parts[2] === "nodes" && parts.at(-1) === "role" ? Object.keys(cfg.agents) : undefined)
 		|| (parts[0] === "pipelines" && parts[2] === "steps" && parts[4] === "role" ? Object.keys(cfg.agents) : undefined);
 	const withDefault = isDefaultableConfigPath(path) ? ["default", ...(values || [])] : (values || []);
 	return [...new Set(withDefault)];
@@ -4236,8 +4288,8 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 			title: "PIPELINES",
 			subtitle: "Choose a pipeline for detailed inspection/editing",
 			items: [
-				{ value: "text:add-pipeline", label: "New pipeline", description: "Create a simple worker pipeline" },
-				...Object.entries(cfg.pipelines).filter(([name]) => name !== "blank").map(([name, pipeline]) => ({ value: `nav:pipeline:${name}`, label: name, description: pipeline.description || `${pipeline.steps?.length || 0} step(s)` })),
+				{ value: "text:add-pipeline", label: "New pipeline", description: "Create a graph-native worker pipeline" },
+				...Object.entries(cfg.pipelines).filter(([name]) => name !== "blank").map(([name, pipeline]) => ({ value: `nav:pipeline:${name}`, label: name, description: pipeline.description || (pipeline.nodes ? "graph composite" : `${pipeline.steps?.length || 0} step(s)`) })),
 			],
 		});
 
@@ -4247,24 +4299,41 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 			return resolved.split(/\n/).find((line) => line.trim())?.trim().slice(0, 100) || "Not set";
 		};
 
+		const graphNodeItems = (pipelineName: string, nodes: Record<string, PipelineNodeDef> | undefined, prefix = `pipelines.${pipelineName}.nodes`, labelPrefix = "Node"): SelectItem[] => {
+			if (!nodes) return [];
+			return Object.entries(nodes).flatMap(([nodeId, node]) => {
+				const nodePrefix = `${prefix}.${nodeId}`;
+				const label = `${labelPrefix} ${nodeId}: ${node.kind || "unknown"}`;
+				return [
+					{ value: `info:${nodePrefix}`, label, description: node.role ? `role ${node.role}` : node.needs?.length ? `needs ${node.needs.join(", ")}` : "Graph node" },
+					...(node.role !== undefined ? [field(`${nodePrefix}.role`, `${nodeId} role`)] : []),
+					...(node.prompt !== undefined ? [field(`${nodePrefix}.prompt`, `${nodeId} prompt`)] : []),
+					...graphNodeItems(pipelineName, node.nodes, `${nodePrefix}.nodes`, `${labelPrefix} ${nodeId}/node`),
+					...(node.node ? graphNodeItems(pipelineName, { node: node.node }, nodePrefix, `${labelPrefix} ${nodeId}`) : []),
+				];
+			});
+		};
+
 		const pipelineScreen = (name: string): Screen => {
 			const pipeline = cfg.pipelines[name];
 			const branch = pipeline?.branchStrategy ? `${pipeline.branchStrategy.type || "branch"}${pipeline.branchStrategy.branch ? ` → ${pipeline.branchStrategy.branch}` : ""}` : "Inherited";
-			const stepItems = (pipeline?.steps || []).map((step, index) => ({
+			const isGraph = Boolean(pipeline?.nodes && Object.keys(pipeline.nodes).length);
+			const stepItems = isGraph ? [] : (pipeline?.steps || []).map((step, index) => ({
 				value: `nav:pipeline-step:${name}:${index}`,
 				label: `Step ${index + 1}: ${step.role || "No role selected"}`,
 				description: promptSummary(step.prompt),
 			}));
 			return {
 				title: `PIPELINE / ${name}`,
-				subtitle: `Branch strategy: ${branch}`,
+				subtitle: `${isGraph ? "Graph composite" : "Legacy steps"} · Branch strategy: ${branch}`,
 				items: [
 					{ value: `text:rename-pipeline:${name}`, label: "Rename pipeline", description: name },
 					field(`pipelines.${name}.description`),
 					field(`pipelines.${name}.model`),
 					field(`pipelines.${name}.sandbox`),
+					...graphNodeItems(name, pipeline?.nodes),
 					...stepItems,
-					{ value: `add-pipeline-step:${name}`, label: "Add step", description: "Append a worker step to this pipeline" },
+					...(isGraph ? [] : [{ value: `add-pipeline-step:${name}`, label: "Add step", description: "Append a worker step to this legacy pipeline" }]),
 					{ value: `delete-pipeline:${name}`, label: "Delete pipeline", description: "Remove this pipeline from the config" },
 				],
 			};
@@ -4630,8 +4699,11 @@ export default function agentWorkflows(
 		return `Agent Workflows commands
 
 Setup and configuration:
-  /work:config [show|init|edit|editor|get|set|reset|validate]
-    Open the friendly config TUI, or run raw config utility actions when arguments are supplied.
+  /work:config
+    Open the friendly graph-aware config TUI.
+
+  /work:config-raw show|init|edit|editor|get|set|reset|validate
+    Run raw config utility actions for graph-native or legacy configs.
 
 Execution utilities:
   /work:build-image [docker|podman]
@@ -4641,7 +4713,7 @@ Execution utilities:
     Run one configured Role directly.
 
   /work:pipeline <pipeline> [prompt]
-    Run a fixed-domain runtime Pipeline directly.
+    Run a graph-native runtime Pipeline directly, with legacy steps[] fallback.
 
 Work views and processing:
   /work:list [query]
@@ -4657,7 +4729,7 @@ Work views and processing:
     Plan the next Work iteration.
 
   /work:process [query] --pipeline <pipeline>
-    Start durable Work processing through the execution runtime adapter.
+    Start durable Work processing through graph lanes, per-lane worktrees, and the runtime adapter.
 
   /work:runs|status|resume
     Manage durable Work Process runs.`;
@@ -5383,7 +5455,7 @@ Work views and processing:
 	});
 
 	pi.registerCommand("work:pipeline", {
-		description: "Run a fixed-domain pipeline: /work:pipeline <pipeline> [prompt]",
+		description: "Run a graph-native or legacy-compatible pipeline: /work:pipeline <pipeline> [prompt]",
 		getArgumentCompletions: (prefix: string) => pipelineCompletionItems(tokenAfterLastSpace(prefix)),
 		handler: async (args, ctx) => {
 			if (isConfigImageRebuildInProgress()) {
@@ -5409,7 +5481,7 @@ Work views and processing:
 	});
 
 	pi.registerCommand("work:process", {
-		description: "Start durable Work processing: /work:process [query] --pipeline <pipeline>",
+		description: "Start durable graph Work processing: /work:process [query] --pipeline <pipeline>",
 		getArgumentCompletions: (prefix: string) => {
 			const pipelineMatch = prefix.match(/(?:^|\s)(?:--pipeline\s+|-p\s+)(\S*)$/);
 			if (pipelineMatch) return pipelineCompletionItems(pipelineMatch[1] || "");

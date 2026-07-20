@@ -81,10 +81,8 @@ function hasMapFormPipeline(pipeline) {
 function renderMapFormPipeline(name, pipeline) {
   const lines = [`  ${yamlMapKey(name)}:`];
   const order = ['description', 'kind', 'needs', 'branchStrategy', 'sandbox', 'model', 'copyToWorktree', 'nodes'];
-  for (const line of yamlObjectLines(pipeline, 4, order)) {
-    if (/^    steps:/.test(line) && (!Array.isArray(pipeline.steps) || pipeline.steps.length === 0)) continue;
-    lines.push(line);
-  }
+  const { steps: _legacySteps, ...graphPipeline } = pipeline;
+  lines.push(...yamlObjectLines(graphPipeline, 4, order));
   return lines;
 }
 

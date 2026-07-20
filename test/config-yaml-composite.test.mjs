@@ -90,6 +90,50 @@ test('configToYaml round-trips representative composite pipeline nodes', () => {
   assert.equal(reparsed.pipelines.legacy.steps[0].role, 'implementer');
 });
 
+test('/work:config-raw get and set support composite node role paths', async () => {
+  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-composite-config-'));
+  await fs.mkdir(path.join(repoRoot, '.pi/sandcastle'), { recursive: true });
+  await fs.writeFile(path.join(repoRoot, '.pi/sandcastle', 'run-job.mjs'), '', 'utf8');
+  await fs.writeFile(path.join(repoRoot, '.pi/sandcastle', 'config.yaml'), compositeYaml(), 'utf8');
+  const pi = createFakePi();
+  agentWorkflows(pi);
+  const notifications = [];
+  const ui = { notify: (message, type = 'info') => notifications.push({ message, type }) };
+
+  await pi.commands.get('work:config-raw')('get pipelines.issue-work.nodes.each-item.nodes.workspace.nodes.implement.role', { cwd: repoRoot, ui });
+  await pi.commands.get('work:config-raw')('set pipelines.issue-work.nodes.each-item.nodes.workspace.nodes.implement.role reviewer', { cwd: repoRoot, ui });
+
+  const reparsed = parseSimpleYaml(await fs.readFile(path.join(repoRoot, '.pi/sandcastle', 'config.yaml'), 'utf8'));
+  assert.equal(notifications[0].message, 'implementer');
+  assert.equal(reparsed.pipelines['issue-work'].nodes['each-item'].nodes.workspace.nodes.implement.role, 'reviewer');
+  assert.equal(reparsed.pipelines['issue-work'].nodes.merge.kind, 'git.merge');
+});
+
+test('/work:config-raw set graph node paths merges pack defaults before editing root-only config', async () => {
+  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-root-only-config-'));
+  await fs.mkdir(path.join(repoRoot, '.pi/sandcastle'), { recursive: true });
+  await fs.writeFile(path.join(repoRoot, '.pi/sandcastle', 'run-job.mjs'), '', 'utf8');
+  await fs.writeFile(path.join(repoRoot, '.pi/sandcastle', 'config.yaml'), [
+    'runtimeVersion: 1',
+    'defaultPipeline: simple-loop',
+    'defaultAgent: claude-code',
+  ].join('\n'), 'utf8');
+  const pi = createFakePi();
+  agentWorkflows(pi);
+  const notifications = [];
+  const ui = { notify: (message, type = 'info') => notifications.push({ message, type }) };
+
+  await pi.commands.get('work:config-raw')('set pipelines.simple-loop.nodes.workspace.nodes.run.role reviewer', { cwd: repoRoot, ui });
+  await pi.commands.get('work:config-raw')('validate', { cwd: repoRoot, ui });
+
+  const reparsed = parseSimpleYaml(await fs.readFile(path.join(repoRoot, '.pi/sandcastle', 'config.yaml'), 'utf8'));
+  assert.equal(reparsed.pipelines['simple-loop'].kind, 'composite');
+  assert.equal(reparsed.pipelines['simple-loop'].nodes.workspace.kind, 'git.worktree');
+  assert.equal(reparsed.pipelines['simple-loop'].nodes.workspace.nodes.run.kind, 'agent.pi');
+  assert.equal(reparsed.pipelines['simple-loop'].nodes.workspace.nodes.run.role, 'reviewer');
+  assert.equal(notifications.at(-1).type, 'success');
+});
+
 test('/work:config-raw validate accepts composite pipeline map-form nodes', async () => {
   const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-composite-config-'));
   await fs.mkdir(path.join(repoRoot, '.pi/sandcastle'), { recursive: true });

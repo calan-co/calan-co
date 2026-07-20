@@ -136,7 +136,7 @@ test('execution runtime validates negative fixtures with useful diagnostics', ()
   );
 });
 
-test('runtime compiler normalizes map-form concrete-node pipelines to legacy execution config', () => {
+test('runtime compiler preserves map-form concrete-node pipelines and legacy-compatible steps', () => {
   const pack = validateExecutionRuntimePack({
     runtimeVersion: 1,
     defaults: { branchPolicy: 'merge-to-head' },
@@ -175,6 +175,9 @@ test('runtime compiler normalizes map-form concrete-node pipelines to legacy exe
   assert.equal(pack.pipelines.legacy.kind, 'composite');
   assert.equal(pack.pipelines.legacy.nodes.run.kind, 'agent.pi');
   const cfg = runtimeToSandcastleConfig(pack);
+  assert.equal(cfg.pipelines.map.kind, 'composite');
+  assert.equal(cfg.pipelines.map.nodes.run.kind, 'agent.pi');
+  assert.equal(cfg.pipelines.map.nodes.merge.kind, 'git.merge');
   assert.equal(cfg.pipelines.map.steps[0].role, 'worker');
   assert.equal(cfg.pipelines.map.steps[1].role, 'reviewer');
   assert.equal(cfg.pipelines.map.steps[2].role, 'merger');
@@ -230,7 +233,7 @@ test('execution runtime schema supports composite map nodes and concrete contain
   assert.equal(schema.$defs.containerImage.properties.strategy, undefined);
 });
 
-test('runtime compiler converts deterministic runtime pipelines to legacy execution config', () => {
+test('runtime compiler converts deterministic runtime pipelines to graph-native execution config', () => {
   const pack = loadExecutionRuntimePack();
   const cfg = runtimeToSandcastleConfig(pack, { defaultSandbox: 'podman', defaultPipeline: 'archive' });
   assert.equal(cfg.defaultSandbox, 'podman');
@@ -243,17 +246,22 @@ test('runtime compiler converts deterministic runtime pipelines to legacy execut
   assert.equal(cfg.pipelines.archive.sandbox, undefined);
   assert.ok(cfg.agents.planner.systemPrompt.includes('planner'));
   assert.equal(cfg.pipelines.archive.branchStrategy.type, 'merge-to-head');
+  assert.equal(cfg.pipelines['parallel-planner'].kind, 'composite');
+  assert.equal(cfg.pipelines['parallel-planner'].nodes.implement.kind, 'loop');
+  assert.equal(cfg.pipelines['parallel-planner'].nodes.implement.node.kind, 'git.worktree');
+  assert.equal(cfg.pipelines['parallel-planner'].nodes.merge.kind, 'git.merge');
   assert.equal(cfg.pipelines['parallel-planner'].steps[0].kind, 'planWork');
   assert.equal(cfg.pipelines['parallel-planner'].steps[0].role, 'planner');
   assert.equal(cfg.pipelines['parallel-planner'].steps[1].role, 'implementer');
   assert.equal(cfg.pipelines['parallel-planner'].steps[1].maxIterations, undefined);
   assert.equal(cfg.pipelines['parallel-planner'].steps[1].concurrency, undefined);
+  assert.equal(cfg.pipelines['parallel-planner-with-review'].nodes.merge.kind, 'git.merge');
   assert.equal(cfg.pipelines['parallel-planner-with-review'].steps.at(-1).role, 'merger');
   assert.equal(compileRuntimeSteps([{ id: 'plan', kind: 'planWork', prompt: 'plan-work' }], pack)[0].role, 'planner');
   assert.equal(compileRuntimeSteps([{ id: 'noop', kind: 'gate' }], pack)[0].prompt, '$INPUT');
 });
 
-test('configToYaml renders compiled runtime roles and pipelines', () => {
+test('configToYaml renders graph-native runtime roles and pipelines', () => {
   const yaml = configToYaml(packsToConfig());
   assert.match(yaml, /^roles:/m);
   assert.match(yaml, /^  implementer:/m);
@@ -265,8 +273,11 @@ test('configToYaml renders compiled runtime roles and pipelines', () => {
   assert.match(yaml, /^prompts:/m);
   assert.match(yaml, /template: \|\n      Inspect the configured Work Source/s);
   assert.doesNotMatch(yaml, /configured issue tracker|next open task|selected work item/);
-  assert.match(yaml, /kind: planWork\n        role: planner\n        description: planner planWork\n        prompt: plan-work/);
-  assert.match(yaml, /role: merger\n        description: merger merge\n        prompt: merge-work/);
+  assert.match(yaml, /^    kind: composite/m);
+  assert.match(yaml, /^    nodes:/m);
+  assert.match(yaml, /kind: git\.worktree/);
+  assert.match(yaml, /kind: git\.merge/);
+  assert.doesNotMatch(yaml, /^    steps:/m);
   assert.match(yaml, /^maxWorkers: 5/m);
   assert.match(yaml, /^maxIterations: 10/m);
   assert.doesNotMatch(yaml, /role: implementer[\s\S]{0,120}maxIterations:/);

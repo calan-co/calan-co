@@ -70,6 +70,38 @@ test('ConfigShadowModel adds and deletes pipeline steps', () => {
   assert.deepEqual(changes.map((change) => change.type), ['add-pipeline-step', 'delete-pipeline-step']);
 });
 
+test('ConfigShadowModel preserves and edits graph pipeline node fields without legacy step mutation', () => {
+  const cfg = baseConfig();
+  cfg.pipelines.graph = {
+    description: 'Graph pipeline',
+    kind: 'composite',
+    nodes: {
+      workspace: {
+        kind: 'git.worktree',
+        nodes: {
+          implement: { kind: 'agent.pi', role: 'planner', prompt: 'Do it' },
+        },
+      },
+    },
+    steps: [{ role: 'planner', prompt: 'legacy compatibility' }],
+  };
+  const model = new ConfigShadowModel(cfg);
+
+  model.setConfigValue('pipelines.graph.description', 'Updated graph pipeline');
+  model.setConfigValue('pipelines.graph.nodes.workspace.nodes.implement.role', 'worker');
+  model.setConfigValue('pipelines.graph.nodes.workspace.nodes.implement.prompt', 'Implement graph work');
+
+  assert.throws(() => model.addPipelineStep('graph'), /graph-native/);
+  assert.throws(() => model.deletePipelineStep('graph', 0), /graph-native/);
+  assert.throws(() => model.setConfigValue('pipelines.graph.steps.0.role', 'worker'), /graph-native/);
+
+  const snapshot = model.snapshot();
+  assert.equal(snapshot.pipelines.graph.description, 'Updated graph pipeline');
+  assert.equal(snapshot.pipelines.graph.nodes.workspace.nodes.implement.role, 'worker');
+  assert.equal(snapshot.pipelines.graph.nodes.workspace.nodes.implement.prompt, 'Implement graph work');
+  assert.deepEqual(snapshot.pipelines.graph.steps, [{ role: 'planner', prompt: 'legacy compatibility' }]);
+});
+
 test('ConfigShadowModel creates missing nested pipeline and role entries when edited', () => {
   const model = new ConfigShadowModel(baseConfig());
   model.setConfigValue('defaultAgent', 'pi');
@@ -86,4 +118,15 @@ test('ConfigShadowModel creates missing nested pipeline and role entries when ed
   assert.equal(snapshot.pipelines.newPipeline.steps[1].role, 'worker');
   assert.equal(snapshot.pipelines.newPipeline.steps[1].sandbox, undefined);
   assert.equal(snapshot.pipelines.createdByStep.steps.length, 1);
+});
+
+test('ConfigShadowModel creates new pipelines as graph-native worktree pipelines', () => {
+  const model = new ConfigShadowModel(baseConfig());
+  model.addPipeline('newGraph');
+  const pipeline = model.snapshot().pipelines.newGraph;
+  assert.equal(pipeline.kind, 'composite');
+  assert.equal(pipeline.nodes.workspace.kind, 'git.worktree');
+  assert.equal(pipeline.nodes.workspace.nodes.run.kind, 'agent.pi');
+  assert.equal(pipeline.nodes.workspace.nodes.run.role, 'worker');
+  assert.equal(pipeline.steps, undefined);
 });
