@@ -98,7 +98,7 @@ test('executePipeline runs composite graph nodes by needs and records graph node
   assert.equal(durable.nodes.find((node) => node.nodePath === 'root.nodes.merge').status, 'completed');
 });
 
-test('executePipeline fails graph git.merge when worktree children produce no effects', async () => {
+test('executePipeline fails graph git.merge when worktree children produce no commits but return a log path', async () => {
   const repoRoot = await createGraphRepo(baseGraphConfig([
     '  graph:',
     '    kind: composite',
@@ -118,11 +118,12 @@ test('executePipeline fails graph git.merge when worktree children produce no ef
   await assert.rejects(
     executePipeline(repoRoot, 'graph', 'no-op work', {
       now: () => 1700000005000,
-      createWorktree: async () => fakeWorktree(repoRoot, async () => ({
+      createWorktree: async () => fakeWorktree(repoRoot, async (options) => ({
         iterations: [],
         commits: [],
         branch: 'sandcastle/graph',
         stdout: '',
+        logFilePath: options.logging.path,
       })),
       loadSandboxProvider: async (kind) => ({ kind }),
       makeAgent: (model, provider) => ({ model, provider }),
@@ -137,7 +138,7 @@ test('executePipeline fails graph git.merge when worktree children produce no ef
   assert.match(durable.error, /requires effectful mergeable needs|no effects/);
 });
 
-test('executePipeline fails graph completion when no node produced effects', async () => {
+test('executePipeline fails graph completion when no node produced commits but returns a log path', async () => {
   const repoRoot = await createGraphRepo(baseGraphConfig([
     '  graph:',
     '    kind: composite',
@@ -154,11 +155,12 @@ test('executePipeline fails graph completion when no node produced effects', asy
   await assert.rejects(
     executePipeline(repoRoot, 'graph', 'no-op work', {
       now: () => 1700000006000,
-      createWorktree: async () => fakeWorktree(repoRoot, async () => ({
+      createWorktree: async () => fakeWorktree(repoRoot, async (options) => ({
         iterations: [],
         commits: [],
         branch: 'sandcastle/graph',
         stdout: '',
+        logFilePath: options.logging.path,
       })),
       loadSandboxProvider: async (kind) => ({ kind }),
       makeAgent: (model, provider) => ({ model, provider }),

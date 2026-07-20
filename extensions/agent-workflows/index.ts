@@ -3405,7 +3405,7 @@ function nodeResultBranch(result: NodeResult): string | undefined {
 }
 
 function graphResultHasEffects(result: NodeResult): boolean {
-	if (nodeResultStringArray(result, "commits").length || nodeResultStringArray(result, "effects").length || nodeResultLogPath(result)) return true;
+	if (nodeResultStringArray(result, "commits").length || nodeResultStringArray(result, "effects").length) return true;
 	if (result.type === "CompositeResult" || result.type === "WorkspaceResult") return Object.values((result as any).children || {}).some((child) => graphResultHasEffects(child as NodeResult));
 	if (result.type === "LoopResult") return ((result as any).iterations || []).some((child: NodeResult) => graphResultHasEffects(child));
 	return false;
@@ -3569,12 +3569,12 @@ export async function executePipeline(
 					"git.worktree": async ({ children }) => {
 						const childResults = Object.values(children || {}) as NodeResult[];
 						const commits = childResults.flatMap((child) => nodeResultStringArray(child, "commits"));
-						const logPaths = childResults.map((child) => nodeResultLogPath(child)).filter((logPath): logPath is string => !!logPath);
+						const childEffects = childResults.flatMap((child) => nodeResultStringArray(child, "effects"));
 						return {
 							branch: record.branch,
 							worktreePath: record.worktreePath,
 							commits,
-							effects: [...commits.map((commit) => `commit:${commit}`), ...logPaths.map((logPath) => `log:${logPath}`)],
+							effects: [...commits.map((commit) => `commit:${commit}`), ...childEffects],
 						};
 					},
 				},
