@@ -298,6 +298,7 @@ test('work:process reports one worker row per pipeline step in the plan-style co
     assert.match(message, /Pipeline: implement/);
     assert.match(message, /Worker 1: researcher completed/);
     assert.match(message, /Worker 2: builder completed/);
+    assert.doesNotMatch(message, /; item wi-00008; node /, 'legacy step summaries should not gain graph-only node metadata');
     assert.ok(widgets.some((entry) => entry.lines.some((line) => /running\s+researcher.*tool: Search/.test(line))));
     assert.ok(widgets.some((entry) => entry.lines.some((line) => /running\s+builder.*tool: Bash/.test(line))));
     assert.equal(widgets.some((entry) => entry.lines.some((line) => /running\s+researcher\s+\d+s · running$/.test(line))), false);
