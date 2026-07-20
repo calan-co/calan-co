@@ -243,6 +243,37 @@ test('enforces mergeable inputs and effectful workspace merge defaults', async (
     /root\.nodes\.merge requires effectful mergeable needs; 'workspace' produced no effects or commits/,
   );
 
+  await assert.rejects(
+    executeGraphWorkflow({
+      kind: 'composite',
+      nodes: {
+        workspace: {
+          kind: 'git.worktree',
+          nodes: {
+            implement: { kind: 'agent' },
+          },
+        },
+        merge: { kind: 'git.merge', needs: ['workspace'] },
+      },
+    }, {
+      handlers: {
+        agent: async () => ({ text: 'done' }),
+        'git.worktree': async () => ({ effects: ['log:/tmp/agent.log'] }),
+      },
+    }),
+    /root\.nodes\.merge requires effectful mergeable needs; 'workspace' produced no effects or commits/,
+  );
+
+  await assert.rejects(
+    executeGraphWorkflow({
+      kind: 'composite',
+      nodes: {
+        merge: { kind: 'git.merge' },
+      },
+    }),
+    /root\.nodes\.merge requires mergeable needs/,
+  );
+
   const result = await executeGraphWorkflow({
     kind: 'composite',
     nodes: {

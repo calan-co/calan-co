@@ -62,6 +62,10 @@ export interface GitMergeResult extends BaseNodeResult {
 	merged: string[];
 	inputs: Record<string, MergeableNodeResult>;
 	effects: string[];
+	branch?: string;
+	commits?: string[];
+	mergedBranches?: string[];
+	mergedCommits?: string[];
 }
 
 export type MergeableNodeResult = WorkspaceResult | LoopResult;
@@ -440,11 +444,19 @@ function isMergeableResult(result: NodeResult | undefined): result is MergeableN
 
 function hasMergeEffects(result: MergeableNodeResult): boolean {
 	if (result.type === "LoopResult") return result.mergeableResults.some((entry) => hasMergeEffects(entry));
-	return hasNonEmptyStringArray((result as WorkspaceResult).effects) || hasNonEmptyStringArray((result as WorkspaceResult).commits);
+	return hasRepositoryEffects((result as WorkspaceResult).effects) || hasNonEmptyStringArray((result as WorkspaceResult).commits);
+}
+
+function hasRepositoryEffects(value: unknown): value is string[] {
+	return Array.isArray(value) && value.some((entry) => typeof entry === "string" && entry.length > 0 && !isLogArtifactEffect(entry));
 }
 
 function hasNonEmptyStringArray(value: unknown): value is string[] {
 	return Array.isArray(value) && value.some((entry) => typeof entry === "string" && entry.length > 0);
+}
+
+function isLogArtifactEffect(value: string): boolean {
+	return /^(log|logs|logPath|logFilePath)(:|=|$)/i.test(value.trim());
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
