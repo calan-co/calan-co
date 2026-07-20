@@ -49,6 +49,32 @@ test('execution runtime validates negative fixtures with useful diagnostics', ()
   assert.throws(
     () => validateExecutionRuntimePack({
       runtimeVersion: 1,
+      roles: { worker: {}, reviewer: { kind: 'review' } },
+      prompts: { implement: { format: 'markdown', template: 'x' }, review: { format: 'markdown', template: 'x' } },
+      pipelines: {
+        p: {
+          kind: 'composite',
+          nodes: {
+            fan: {
+              kind: 'loop',
+              each: '$.items',
+              node: {
+                kind: 'git.worktree',
+                nodes: {
+                  implement: { kind: 'agent.pi', role: 'worker', prompt: 'implement' },
+                  review: { kind: 'agent.pi', role: 'reviewer', prompt: 'review', needs: ['implement'] },
+                },
+              },
+            },
+          },
+        },
+      },
+    }),
+    /loop compiles to 2 nested legacy steps.*legacy fanOut supports exactly one nested step/s,
+  );
+  assert.throws(
+    () => validateExecutionRuntimePack({
+      runtimeVersion: 1,
       roles: { planner: { kind: 'planWork' }, otherPlanner: { kind: 'planWork' } },
       prompts: { ok: { format: 'markdown', template: 'x' } },
       pipelines: { p: { steps: [{ id: 'plan', kind: 'planWork', role: 'planner', prompt: 'ok' }] } },
@@ -108,6 +134,41 @@ test('runtime compiler normalizes map-form concrete-node pipelines to legacy exe
   assert.equal(cfg.pipelines.map.steps[0].role, 'worker');
   assert.equal(cfg.pipelines.map.steps[1].role, 'reviewer');
   assert.equal(cfg.pipelines.map.steps[2].role, 'merger');
+});
+
+test('runtime compiler preserves all git.worktree child agent nodes in legacy DAG order', () => {
+  const pack = validateExecutionRuntimePack({
+    runtimeVersion: 1,
+    defaults: {},
+    roles: {
+      worker: { role: 'worker' },
+      reviewer: { role: 'reviewer', kind: 'review' },
+    },
+    prompts: {
+      implement: { format: 'markdown', template: 'Implement $INPUT' },
+      review: { format: 'markdown', template: 'Review $INPUT' },
+    },
+    pipelines: {
+      worktree: {
+        kind: 'composite',
+        nodes: {
+          branch: {
+            kind: 'git.worktree',
+            nodes: {
+              review: { kind: 'agent.pi', role: 'reviewer', prompt: 'review', needs: ['implement'] },
+              implement: { kind: 'agent.pi', role: 'worker', prompt: 'implement' },
+            },
+          },
+        },
+      },
+    },
+  });
+
+  assert.deepEqual(pack.pipelines.worktree.steps.map((step) => step.id), ['branch.implement', 'branch.review']);
+  assert.deepEqual(pack.pipelines.worktree.steps.map((step) => step.role), ['worker', 'reviewer']);
+  assert.deepEqual(pack.pipelines.worktree.steps.map((step) => step.prompt), ['implement', 'review']);
+  const cfg = runtimeToSandcastleConfig(pack);
+  assert.deepEqual(cfg.pipelines.worktree.steps.map((step) => step.role), ['worker', 'reviewer']);
 });
 
 test('execution runtime schema supports composite map nodes and concrete container image requirements', () => {

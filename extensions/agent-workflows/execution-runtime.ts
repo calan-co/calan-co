@@ -224,42 +224,74 @@ function legacyStepToNode(step: RuntimePipelineStep, pack: ExecutionRuntimePack)
 	return normalizeNode({ kind: "agent.pi", role: step.role, ...common });
 }
 
-function nodesToLegacySteps(nodes: Record<string, RuntimePipelineNode>, pack: ExecutionRuntimePack): Array<RuntimePipelineStep | undefined> {
-	return Object.entries(nodes).map(([id, node]) => nodeToLegacyStep(id, node, pack));
+function nodesToLegacySteps(nodes: Record<string, RuntimePipelineNode>, pack: ExecutionRuntimePack, prefix?: string): RuntimePipelineStep[] {
+	return orderedNodeEntries(nodes).flatMap(([id, node]) => nodeToLegacySteps(prefix ? `${prefix}.${id}` : id, node, pack));
 }
 
-function nodeToLegacyStep(id: string, node: RuntimePipelineNode, pack: ExecutionRuntimePack): RuntimePipelineStep | undefined {
+function orderedNodeEntries(nodes: Record<string, RuntimePipelineNode>): Array<[string, RuntimePipelineNode]> {
+	const entries = Object.entries(nodes);
+	const emitted = new Set<string>();
+	const remaining = new Set(entries.map(([id]) => id));
+	const ordered: Array<[string, RuntimePipelineNode]> = [];
+	while (remaining.size > 0) {
+		let progressed = false;
+		for (const [id, node] of entries) {
+			if (!remaining.has(id)) continue;
+			const localNeeds = (node.needs || []).filter((need) => Object.prototype.hasOwnProperty.call(nodes, need));
+			if (!localNeeds.every((need) => emitted.has(need))) continue;
+			ordered.push([id, node]);
+			emitted.add(id);
+			remaining.delete(id);
+			progressed = true;
+		}
+		if (!progressed) {
+			for (const [id, node] of entries) {
+				if (!remaining.has(id)) continue;
+				ordered.push([id, node]);
+				remaining.delete(id);
+			}
+		}
+	}
+	return ordered;
+}
+
+function nodeToLegacySteps(id: string, node: RuntimePipelineNode, pack: ExecutionRuntimePack): RuntimePipelineStep[] {
 	if (node.kind === "loop") {
-		const nested = node.node ? { id: `${id}-one`, node: node.node } : firstNode(node.nodes);
-		return {
+		const nested = loopNestedLegacyStep(id, node, pack);
+		return [{
 			id,
 			kind: "fanOut",
 			needs: node.needs,
 			over: node.each,
 			concurrency: node.mode === "parallel" ? node.max : undefined,
 			limit: node.mode !== "parallel" ? node.max : undefined,
-			step: nested ? nodeToLegacyStep(nested.id, nested.node, pack) : undefined,
+			step: nested,
 			when: node.when,
 			with: node.with,
 			overrides: node.overrides,
-		};
+		}];
 	}
 	if (node.kind === "git.merge") {
-		return nodeToStep(id, node, "merge", node.role);
+		return [nodeToStep(id, node, "merge", node.role)];
 	}
 	if (node.kind === "composite" || node.kind === "git.worktree") {
-		const nestedSteps = nodesToLegacySteps(node.nodes || {}, pack).filter(Boolean) as RuntimePipelineStep[];
-		return nestedSteps[0] ? { ...nestedSteps[0], id } : undefined;
+		return nodesToLegacySteps(node.nodes || {}, pack, id);
 	}
 	if (node.kind === "agent.pi") {
 		const roleKind = node.role && node.role !== "default" ? pack.roles?.[node.role]?.kind : undefined;
 		const legacyKind = BUILT_IN_STEP_KINDS.has(String(roleKind)) ? String(roleKind) : "runRole";
-		return nodeToStep(id, node, legacyKind, legacyKind === "planWork" ? undefined : node.role);
+		return [nodeToStep(id, node, legacyKind, legacyKind === "planWork" ? undefined : node.role)];
 	}
 	if (PROVIDER_QUALIFIED_NODE_KIND.test(node.kind) && node.role) {
-		return nodeToStep(id, node, "runRole", node.role);
+		return [nodeToStep(id, node, "runRole", node.role)];
 	}
-	return undefined;
+	return [];
+}
+
+function loopNestedLegacyStep(id: string, node: RuntimePipelineNode, pack: ExecutionRuntimePack): RuntimePipelineStep | undefined {
+	if (node.node) return nodeToLegacySteps(`${id}-one`, node.node, pack)[0];
+	const [childId, childNode] = orderedNodeEntries(node.nodes || {})[0] || [];
+	return childId && childNode ? nodeToLegacySteps(`${id}.${childId}`, childNode, pack)[0] : undefined;
 }
 
 function nodeToStep(id: string, node: RuntimePipelineNode, kind: string, role?: string): RuntimePipelineStep {
@@ -279,14 +311,21 @@ function nodeToStep(id: string, node: RuntimePipelineNode, kind: string, role?: 
 	};
 }
 
-function firstNode(nodes?: Record<string, RuntimePipelineNode>): { id: string; node: RuntimePipelineNode } | undefined {
-	const first = Object.entries(nodes || {})[0];
-	return first ? { id: first[0], node: first[1] } : undefined;
-}
-
 function trySelectRuntimePlanWorkRoleName(pack: ExecutionRuntimePack): string | undefined {
 	const matches = Object.entries(pack.roles || {}).filter(([, role]) => role?.kind === "planWork").map(([name]) => name);
 	return matches.length === 1 ? matches[0] : undefined;
+}
+
+function countLegacyStepsForLoopChild(node: RuntimePipelineNode): number {
+	if (node.node) return countLegacyStepsForNode(node.node);
+	return Object.values(node.nodes || {}).reduce((count, child) => count + countLegacyStepsForNode(child), 0);
+}
+
+function countLegacyStepsForNode(node: RuntimePipelineNode): number {
+	if (node.kind === "composite" || node.kind === "git.worktree") return Object.values(node.nodes || {}).reduce((count, child) => count + countLegacyStepsForNode(child), 0);
+	if (node.kind === "agent.pi" || node.kind === "git.merge" || node.kind === "loop") return 1;
+	if (PROVIDER_QUALIFIED_NODE_KIND.test(node.kind) && node.role) return 1;
+	return 0;
 }
 
 function validatePipeline(scope: string, pipeline: RuntimePipeline, errors: string[], pack: ExecutionRuntimePack): void {
@@ -308,6 +347,8 @@ function validateNode(scope: string, id: string, node: RuntimePipelineNode, erro
 		if (!node.each) errors.push(`${nodeScope} loop must define each`);
 		if (node.mode && !["sequential", "parallel"].includes(node.mode)) errors.push(`${nodeScope} loop mode must be sequential or parallel`);
 		if (!node.node && (!node.nodes || Object.keys(node.nodes).length === 0)) errors.push(`${nodeScope} loop must define node or nodes`);
+		const nestedStepCount = countLegacyStepsForLoopChild(node);
+		if (nestedStepCount > 1) errors.push(`${nodeScope} loop compiles to ${nestedStepCount} nested legacy steps, but legacy fanOut supports exactly one nested step; use a single child node until graph execution is available`);
 	}
 	if (node.kind === "composite" || node.kind === "git.worktree") {
 		if (!node.nodes || Object.keys(node.nodes).length === 0) errors.push(`${nodeScope} ${node.kind} must define nodes`);
