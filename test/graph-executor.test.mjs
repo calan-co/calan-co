@@ -154,6 +154,59 @@ test('runs loop.each in parallel while respecting max concurrency', async () => 
   assert.deepEqual([...items].sort((a, b) => a - b), [1, 2, 3, 4, 5]);
 });
 
+test('waits for started parallel loop lanes to settle before throwing', async () => {
+  const closed = [];
+
+  await assert.rejects(
+    executeGraphWorkflow({
+      kind: 'composite',
+      nodes: {
+        fanOut: {
+          kind: 'loop',
+          mode: 'parallel',
+          each: ['fast', 'slow'],
+          max: 2,
+          node: {
+            kind: 'git.worktree',
+            nodes: {
+              run: { kind: 'agent' },
+            },
+          },
+        },
+      },
+    }, {
+      handlers: {
+        'git.worktree': async (context) => {
+          const branch = `branch-${context.loop.item}`;
+          try {
+            const childRun = await context.executeChildren({
+              workspace: { branch, worktreePath: `/tmp/${branch}` },
+            });
+            return {
+              branch,
+              worktreePath: `/tmp/${branch}`,
+              commits: [`commit-${context.loop.item}`],
+              effects: [`commit:commit-${context.loop.item}`],
+              children: childRun.children,
+              order: childRun.order,
+            };
+          } finally {
+            closed.push(branch);
+          }
+        },
+        agent: async ({ loop }) => {
+          if (loop.item === 'fast') throw new Error('fast lane failed');
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          return { branch: 'branch-slow', commits: ['commit-slow'] };
+        },
+      },
+    }),
+    /fast lane failed/,
+  );
+
+  assert.deepEqual([...closed].sort(), ['branch-fast', 'branch-slow']);
+});
+
 test('enforces mergeable inputs and effectful workspace merge defaults', async () => {
   await assert.rejects(
     executeGraphWorkflow({

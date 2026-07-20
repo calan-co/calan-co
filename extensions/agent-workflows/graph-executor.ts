@@ -359,14 +359,20 @@ async function runParallel<T, R>(items: T[], concurrency: number, task: (item: T
 	const limit = Math.max(1, concurrency);
 	const results = new Array<R>(items.length);
 	let nextIndex = 0;
+	let firstError: unknown;
 	const workerCount = Math.min(limit, items.length);
 	await Promise.all(Array.from({ length: workerCount }, async () => {
-		while (nextIndex < items.length) {
+		while (nextIndex < items.length && !firstError) {
 			const index = nextIndex;
 			nextIndex += 1;
-			results[index] = await task(items[index]);
+			try {
+				results[index] = await task(items[index]);
+			} catch (error) {
+				if (!firstError) firstError = error;
+			}
 		}
 	}));
+	if (firstError) throw firstError;
 	return results;
 }
 
