@@ -98,6 +98,122 @@ test('executePipeline runs composite graph nodes by needs and records graph node
   assert.equal(durable.nodes.find((node) => node.nodePath === 'root.nodes.merge').status, 'completed');
 });
 
+test('executePipeline creates one graph worktree per process lane and runs agents in matching worktrees', async () => {
+  const repoRoot = await createGraphRepo(baseGraphConfig([
+    '  laneGraph:',
+    '    kind: composite',
+    '    nodes:',
+    '      lanes:',
+    '        kind: loop',
+    '        mode: parallel',
+    '        each: $.executionContexts',
+    '        nodes:',
+    '          workspace:',
+    '            kind: git.worktree',
+    '            nodes:',
+    '              implement:',
+    '                kind: agent.pi',
+    '                role: implementer',
+    '                prompt: Implement $INPUT',
+  ]));
+  const createCalls = [];
+  const runCalls = [];
+  const closeCalls = [];
+  const contexts = [
+    { contextId: 'run/item-a/0-0', branch: 'agent-workflows/lane-graph/run/item-a', groupIndex: 0, itemIndex: 0, itemId: 'item-a' },
+    { contextId: 'run/item-b/0-1', branch: 'agent-workflows/lane-graph/run/item-b', groupIndex: 0, itemIndex: 1, itemId: 'item-b' },
+  ];
+
+  const record = await executePipeline(repoRoot, 'laneGraph', 'process lanes', {
+    now: () => 1700000007000,
+    graphInput: { prompt: 'process lanes', executionContexts: contexts },
+    createWorktree: async (options) => {
+      const branch = options.branchStrategy.branch;
+      const worktreePath = path.join(repoRoot, '.pi/sandcastle/worktrees', branch.replaceAll('/', '-'));
+      createCalls.push({ branch, worktreePath });
+      return {
+        branch,
+        worktreePath,
+        close: async () => { closeCalls.push(branch); },
+        run: async (runOptions) => {
+          runCalls.push({ branch, worktreePath, prompt: runOptions.prompt });
+          return {
+            iterations: [],
+            commits: [{ sha: `commit-${branch.split('/').at(-1)}` }],
+            branch,
+            stdout: '',
+            logFilePath: runOptions.logging.path,
+          };
+        },
+      };
+    },
+    loadSandboxProvider: async (kind) => ({ kind }),
+    makeAgent: (model, provider) => ({ model, provider }),
+  });
+
+  assert.equal(record.status, 'completed');
+  assert.equal(record.executor, 'graph');
+  assert.deepEqual(createCalls.map((call) => call.branch).sort(), contexts.map((context) => context.branch).sort());
+  assert.deepEqual(closeCalls.sort(), contexts.map((context) => context.branch).sort());
+  assert.deepEqual(runCalls.map((call) => call.branch).sort(), contexts.map((context) => context.branch).sort());
+  for (const context of contexts) {
+    const run = runCalls.find((call) => call.branch === context.branch);
+    assert.ok(run, `missing run for ${context.branch}`);
+    assert.match(run.prompt, new RegExp(`Branch: ${context.branch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  }
+  const workspaceRecords = record.nodes.filter((node) => node.resultType === 'WorkspaceResult');
+  assert.deepEqual(workspaceRecords.map((node) => node.branch).sort(), contexts.map((context) => context.branch).sort());
+  assert.deepEqual(workspaceRecords.map((node) => node.itemId).sort(), ['item-a', 'item-b']);
+});
+
+test('executePipeline closes graph lane worktree when a child agent fails', async () => {
+  const repoRoot = await createGraphRepo(baseGraphConfig([
+    '  laneGraph:',
+    '    kind: composite',
+    '    nodes:',
+    '      lanes:',
+    '        kind: loop',
+    '        each: $.executionContexts',
+    '        nodes:',
+    '          workspace:',
+    '            kind: git.worktree',
+    '            nodes:',
+    '              implement:',
+    '                kind: agent.pi',
+    '                role: implementer',
+    '                prompt: Implement $INPUT',
+  ]));
+  const closeCalls = [];
+  const contexts = [
+    { contextId: 'run/item-a/0-0', branch: 'agent-workflows/lane-graph/run/item-a', groupIndex: 0, itemIndex: 0, itemId: 'item-a' },
+  ];
+
+  await assert.rejects(
+    executePipeline(repoRoot, 'laneGraph', 'process lane failure', {
+      now: () => 1700000008000,
+      graphInput: { prompt: 'process lane failure', executionContexts: contexts },
+      createWorktree: async (options) => {
+        const branch = options.branchStrategy.branch;
+        return {
+          branch,
+          worktreePath: path.join(repoRoot, '.pi/sandcastle/worktrees/failing'),
+          close: async () => { closeCalls.push(branch); },
+          run: async () => { throw new Error('agent failed in lane'); },
+        };
+      },
+      loadSandboxProvider: async (kind) => ({ kind }),
+      makeAgent: (model, provider) => ({ model, provider }),
+    }),
+    /agent failed in lane/,
+  );
+
+  assert.deepEqual(closeCalls, [contexts[0].branch]);
+  const runId = `${(1700000008000).toString(36)}-laneGraph`;
+  const durable = JSON.parse(await fs.readFile(path.join(repoRoot, '.pi/sandcastle/runs', runId, 'record.json'), 'utf8'));
+  assert.equal(durable.status, 'failed');
+  assert.match(durable.error, /agent failed in lane/);
+});
+
 test('executePipeline fails graph git.merge when worktree children produce no commits but return a log path', async () => {
   const repoRoot = await createGraphRepo(baseGraphConfig([
     '  graph:',
