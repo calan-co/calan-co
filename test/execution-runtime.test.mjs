@@ -8,6 +8,7 @@ import {
   runtimeToSandcastleConfig,
   validateExecutionRuntimePack,
 } from '../extensions/agent-workflows/execution-runtime.ts';
+import { readFileSync } from 'node:fs';
 import { configToYaml, packsToConfig } from '../extensions/agent-workflows/pipeline-packs.mjs';
 
 test('execution runtime pack ports prompts, roles, and pipelines', () => {
@@ -15,6 +16,9 @@ test('execution runtime pack ports prompts, roles, and pipelines', () => {
   assert.equal(pack.runtimeVersion, 1);
   assert.ok(pack.prompts['simple-loop'].template.includes('$INPUT'));
   assert.equal(pack.roles.implementer.role, 'implementer');
+  assert.equal(pack.pipelines['parallel-planner-with-review'].kind, 'composite');
+  assert.equal(pack.pipelines['parallel-planner-with-review'].nodes.plan.kind, 'agent.pi');
+  assert.equal(pack.pipelines['parallel-planner-with-review'].nodes.implement.kind, 'loop');
   assert.equal(pack.pipelines['parallel-planner-with-review'].steps[0].kind, 'planWork');
   assert.equal(pack.pipelines['parallel-planner-with-review'].steps[2].kind, 'fanOut');
   assert.ok(listRuntimeAgents(pack).some((agent) => agent.name === 'reviewer'));
@@ -45,12 +49,185 @@ test('execution runtime validates negative fixtures with useful diagnostics', ()
   assert.throws(
     () => validateExecutionRuntimePack({
       runtimeVersion: 1,
+      roles: { worker: {}, reviewer: { kind: 'review' } },
+      prompts: { implement: { format: 'markdown', template: 'x' }, review: { format: 'markdown', template: 'x' } },
+      pipelines: {
+        p: {
+          kind: 'composite',
+          nodes: {
+            fan: {
+              kind: 'loop',
+              each: '$.items',
+              node: {
+                kind: 'git.worktree',
+                nodes: {
+                  implement: { kind: 'agent.pi', role: 'worker', prompt: 'implement' },
+                  review: { kind: 'agent.pi', role: 'reviewer', prompt: 'review', needs: ['implement'] },
+                },
+              },
+            },
+          },
+        },
+      },
+    }),
+    /loop compiles to 2 nested legacy steps.*legacy fanOut supports exactly one nested step/s,
+  );
+  assert.throws(
+    () => validateExecutionRuntimePack({
+      runtimeVersion: 1,
+      roles: { worker: {} },
+      prompts: { ok: { format: 'markdown', template: 'x' } },
+      pipelines: {
+        p: {
+          kind: 'composite',
+          nodes: {
+            fan: {
+              kind: 'loop',
+              each: '$.items',
+              node: { kind: 'agent.pi', role: 'worker', prompt: 'ok' },
+              nodes: {
+                other: { kind: 'agent.pi', role: 'worker', prompt: 'ok' },
+              },
+            },
+          },
+        },
+      },
+    }),
+    /loop must define exactly one of node or nodes/s,
+  );
+  assert.throws(
+    () => validateExecutionRuntimePack({
+      runtimeVersion: 1,
+      roles: { worker: {} },
+      prompts: { ok: { format: 'markdown', template: 'x' } },
+      pipelines: {
+        p: {
+          kind: 'composite',
+          nodes: {
+            fan: {
+              kind: 'loop',
+              each: '$.items',
+              node: { kind: 'agent.pi', role: 'worker', prompt: 'ok' },
+              nodes: {},
+            },
+          },
+        },
+      },
+    }),
+    /loop must define exactly one of node or nodes/s,
+  );
+  assert.throws(
+    () => validateExecutionRuntimePack({
+      runtimeVersion: 1,
       roles: { planner: { kind: 'planWork' }, otherPlanner: { kind: 'planWork' } },
       prompts: { ok: { format: 'markdown', template: 'x' } },
       pipelines: { p: { steps: [{ id: 'plan', kind: 'planWork', role: 'planner', prompt: 'ok' }] } },
     }),
     /planWork must not reference a role.*exactly one role with kind planWork/s,
   );
+  assert.throws(
+    () => validateExecutionRuntimePack({
+      runtimeVersion: 1,
+      roles: { worker: {} },
+      prompts: { ok: { format: 'markdown', template: 'x' } },
+      pipelines: { p: { kind: 'composite', nodes: { sandbox: { kind: 'docker.container', image: { strategy: 'auto' } } } } },
+    }),
+    /image\.name is required.*image\.strategy is not supported/s,
+  );
+});
+
+test('runtime compiler normalizes map-form concrete-node pipelines to legacy execution config', () => {
+  const pack = validateExecutionRuntimePack({
+    runtimeVersion: 1,
+    defaults: { branchPolicy: 'merge-to-head' },
+    roles: {
+      worker: { role: 'worker' },
+      reviewer: { role: 'reviewer', kind: 'review' },
+      merger: { role: 'merger', kind: 'merge' },
+    },
+    prompts: {
+      blank: { format: 'markdown', template: '$INPUT' },
+      review: { format: 'markdown', template: 'Review $INPUT' },
+      merge: { format: 'markdown', template: 'Merge $INPUT' },
+    },
+    pipelines: {
+      map: {
+        description: 'Concrete map pipeline',
+        kind: 'composite',
+        nodes: {
+          run: { kind: 'agent.pi', role: 'worker', prompt: 'blank' },
+          review: { kind: 'agent.pi', needs: ['run'], role: 'reviewer', prompt: 'review' },
+          merge: { kind: 'git.merge', needs: ['review'], prompt: 'merge' },
+        },
+      },
+      legacy: {
+        description: 'Legacy step pipeline',
+        steps: [{ id: 'run', kind: 'runRole', role: 'worker', prompt: 'blank' }],
+      },
+    },
+  });
+  assert.equal(pack.pipelines.map.kind, 'composite');
+  assert.equal(pack.pipelines.map.nodes.run.kind, 'agent.pi');
+  assert.deepEqual(pack.pipelines.map.steps.map((step) => step.id), ['run', 'review', 'merge']);
+  assert.equal(pack.pipelines.map.steps[0].kind, 'runRole');
+  assert.equal(pack.pipelines.map.steps[1].kind, 'review');
+  assert.equal(pack.pipelines.map.steps[2].kind, 'merge');
+  assert.equal(pack.pipelines.legacy.kind, 'composite');
+  assert.equal(pack.pipelines.legacy.nodes.run.kind, 'agent.pi');
+  const cfg = runtimeToSandcastleConfig(pack);
+  assert.equal(cfg.pipelines.map.steps[0].role, 'worker');
+  assert.equal(cfg.pipelines.map.steps[1].role, 'reviewer');
+  assert.equal(cfg.pipelines.map.steps[2].role, 'merger');
+});
+
+test('runtime compiler preserves all git.worktree child agent nodes in legacy DAG order', () => {
+  const pack = validateExecutionRuntimePack({
+    runtimeVersion: 1,
+    defaults: {},
+    roles: {
+      worker: { role: 'worker' },
+      reviewer: { role: 'reviewer', kind: 'review' },
+    },
+    prompts: {
+      implement: { format: 'markdown', template: 'Implement $INPUT' },
+      review: { format: 'markdown', template: 'Review $INPUT' },
+    },
+    pipelines: {
+      worktree: {
+        kind: 'composite',
+        nodes: {
+          branch: {
+            kind: 'git.worktree',
+            nodes: {
+              review: { kind: 'agent.pi', role: 'reviewer', prompt: 'review', needs: ['implement'] },
+              implement: { kind: 'agent.pi', role: 'worker', prompt: 'implement' },
+            },
+          },
+        },
+      },
+    },
+  });
+
+  assert.deepEqual(pack.pipelines.worktree.steps.map((step) => step.id), ['branch.implement', 'branch.review']);
+  assert.deepEqual(pack.pipelines.worktree.steps.map((step) => step.role), ['worker', 'reviewer']);
+  assert.deepEqual(pack.pipelines.worktree.steps.map((step) => step.prompt), ['implement', 'review']);
+  const cfg = runtimeToSandcastleConfig(pack);
+  assert.deepEqual(cfg.pipelines.worktree.steps.map((step) => step.role), ['worker', 'reviewer']);
+});
+
+test('execution runtime schema supports composite map nodes and concrete container image requirements', () => {
+  const schema = JSON.parse(readFileSync(new URL('../extensions/agent-workflows/schema/execution-runtime.schema.json', import.meta.url), 'utf8'));
+  const configSchema = JSON.parse(readFileSync(new URL('../extensions/agent-workflows/schema/config.schema.json', import.meta.url), 'utf8'));
+  assert.deepEqual(schema.required, ['runtimeVersion', 'defaults', 'roles', 'prompts', 'pipelines']);
+  assert.ok(schema.properties.pipelines, 'repo root schema keeps pipelines key');
+  assert.ok(schema.$defs.pipeline.properties.kind, 'pipeline values support kind');
+  assert.ok(schema.$defs.pipeline.properties.nodes, 'pipeline values support map-form nodes');
+  assert.match(JSON.stringify(schema.$defs.concreteNode.properties.kind), /git\.worktree/);
+  assert.match(JSON.stringify(schema.$defs.concreteNode.properties.kind), /git\.merge/);
+  assert.match(JSON.stringify(schema.$defs.concreteNode.allOf), /oneOf/);
+  assert.match(JSON.stringify(configSchema.$defs.concreteNode.allOf), /oneOf/);
+  assert.deepEqual(schema.$defs.containerImage.required, ['name']);
+  assert.equal(schema.$defs.containerImage.properties.strategy, undefined);
 });
 
 test('runtime compiler converts deterministic runtime pipelines to legacy execution config', () => {
