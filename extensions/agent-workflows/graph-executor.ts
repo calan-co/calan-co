@@ -46,6 +46,7 @@ export interface WorkspaceResult extends BaseNodeResult {
 	children: Record<string, NodeResult>;
 	order: string[];
 	effects: string[];
+	commits?: string[];
 }
 
 export interface LoopResult extends BaseNodeResult {
@@ -188,6 +189,7 @@ async function executeMergeNode(
 	for (const need of needed) {
 		const result = needs[need];
 		if (!isMergeableResult(result)) throw new Error(`${path} requires mergeable needs; '${need}' produced ${result?.type || "no result"}`);
+		if (!hasMergeEffects(result)) throw new Error(`${path} requires effectful mergeable needs; '${need}' produced no effects or commits`);
 		inputs[need] = result;
 	}
 	const handlerOutput = scope.handlers["git.merge"]
@@ -228,9 +230,14 @@ async function executeLoopNode(id: string, path: string, node: GraphWorkflowNode
 	const mode = node.mode || "sequential";
 	if (mode !== "sequential" && mode !== "parallel") throw new Error(`${path} mode must be 'sequential' or 'parallel'`);
 	const iterations = resolveLoopIterations(path, node, scope.input, scope.loop);
+	const hasNode = Object.prototype.hasOwnProperty.call(node, "node");
+	const hasNodes = Object.prototype.hasOwnProperty.call(node, "nodes");
+	if (hasNode && hasNodes) throw new Error(`${path} loop must define exactly one of node or nodes`);
+	if (!hasNode && !hasNodes) throw new Error(`${path} loop must define node or nodes`);
+
 	const runIteration = async (iteration: LoopExecutionContext): Promise<NodeResult> => {
 		const iterationScope = { ...scope, loop: iteration };
-		if (node.node) return executeNode(`${id}[${iteration.index}]`, `${path}.node`, node.node, iterationScope, {});
+		if (hasNode) return executeNode(`${id}[${iteration.index}]`, `${path}.node`, node.node as GraphWorkflowNode, iterationScope, {});
 		const { children, order } = await executeNodeMap(node.nodes, `${path}.nodes`, iterationScope);
 		return {
 			type: "CompositeResult",
@@ -363,12 +370,14 @@ function makeHandlerContext(
 }
 
 function coerceResult(value: unknown, type: string, nodeId: string, kind: string): NodeResult {
-	if (isRecord(value) && typeof value.type === "string") {
+	if (isRecord(value)) {
+		const { type: _type, status: _status, nodeId: _nodeId, kind: _kind, ...data } = value;
 		return {
+			...data,
+			type,
 			status: "succeeded",
 			nodeId,
 			kind,
-			...(value as Record<string, unknown>),
 		} as NodeResult;
 	}
 	return {
@@ -394,7 +403,19 @@ function collectMergeableResults(result: NodeResult): MergeableNodeResult[] {
 }
 
 function isMergeableResult(result: NodeResult | undefined): result is MergeableNodeResult {
-	return Boolean(result && (result as { mergeable?: unknown }).mergeable === true);
+	if (!result || (result as { mergeable?: unknown }).mergeable !== true) return false;
+	if (result.type === "WorkspaceResult") return true;
+	if (result.type === "LoopResult") return Array.isArray((result as LoopResult).mergeableResults) && (result as LoopResult).mergeableResults.every((entry) => entry.type === "WorkspaceResult");
+	return false;
+}
+
+function hasMergeEffects(result: MergeableNodeResult): boolean {
+	if (result.type === "LoopResult") return result.mergeableResults.some((entry) => hasMergeEffects(entry));
+	return hasNonEmptyStringArray((result as WorkspaceResult).effects) || hasNonEmptyStringArray((result as WorkspaceResult).commits);
+}
+
+function hasNonEmptyStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.some((entry) => typeof entry === "string" && entry.length > 0);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

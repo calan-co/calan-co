@@ -154,7 +154,7 @@ test('runs loop.each in parallel while respecting max concurrency', async () => 
   assert.deepEqual([...items].sort((a, b) => a - b), [1, 2, 3, 4, 5]);
 });
 
-test('enforces mergeable inputs and uses zero-effect workspace and merge defaults', async () => {
+test('enforces mergeable inputs and effectful workspace merge defaults', async () => {
   await assert.rejects(
     executeGraphWorkflow({
       kind: 'composite',
@@ -168,6 +168,26 @@ test('enforces mergeable inputs and uses zero-effect workspace and merge default
       },
     }),
     /root\.nodes\.merge requires mergeable needs; 'implement' produced AgentResult/,
+  );
+
+  await assert.rejects(
+    executeGraphWorkflow({
+      kind: 'composite',
+      nodes: {
+        workspace: {
+          kind: 'git.worktree',
+          nodes: {
+            implement: { kind: 'agent' },
+          },
+        },
+        merge: { kind: 'git.merge', needs: ['workspace'] },
+      },
+    }, {
+      handlers: {
+        agent: async () => ({ text: 'done' }),
+      },
+    }),
+    /root\.nodes\.merge requires effectful mergeable needs; 'workspace' produced no effects or commits/,
   );
 
   const result = await executeGraphWorkflow({
@@ -184,13 +204,48 @@ test('enforces mergeable inputs and uses zero-effect workspace and merge default
   }, {
     handlers: {
       agent: async () => ({ text: 'done' }),
+      'git.worktree': async () => ({ effects: ['commit:abc123'] }),
     },
   });
 
   assert.equal(result.children.workspace.type, 'WorkspaceResult');
   assert.equal(result.children.workspace.mergeable, true);
-  assert.deepEqual(result.children.workspace.effects, []);
+  assert.deepEqual(result.children.workspace.effects, ['commit:abc123']);
   assert.equal(result.children.merge.type, 'GitMergeResult');
   assert.deepEqual(result.children.merge.merged, ['workspace']);
   assert.deepEqual(result.children.merge.effects, []);
+});
+
+test('rejects spoofed mergeable handler results and ambiguous loop child shape', async () => {
+  await assert.rejects(
+    executeGraphWorkflow({
+      kind: 'composite',
+      nodes: {
+        script: { kind: 'script' },
+        merge: { kind: 'git.merge', needs: ['script'] },
+      },
+    }, {
+      handlers: {
+        script: async () => ({ type: 'WorkspaceResult', mergeable: true, effects: ['fake-change'] }),
+      },
+    }),
+    /root\.nodes\.merge requires mergeable needs; 'script' produced ScriptResult/,
+  );
+
+  await assert.rejects(
+    executeGraphWorkflow({
+      kind: 'composite',
+      nodes: {
+        ambiguous: {
+          kind: 'loop',
+          max: 1,
+          node: { kind: 'script' },
+          nodes: {
+            ignored: { kind: 'agent' },
+          },
+        },
+      },
+    }),
+    /root\.nodes\.ambiguous loop must define exactly one of node or nodes/,
+  );
 });
