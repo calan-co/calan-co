@@ -17,6 +17,77 @@ function yamlBlock(text, indent = 6) {
   return `|\n${String(text || '').split('\n').map((line) => `${pad}${line}`).join('\n')}`;
 }
 
+function yamlMapKey(value) {
+  return /^[A-Za-z0-9_-]+$/.test(value) ? value : JSON.stringify(value);
+}
+
+function isPlainObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function yamlValueLines(key, value, indent) {
+  const pad = ' '.repeat(indent);
+  if (value === undefined) return [];
+  if (typeof value === 'string' && value.includes('\n')) return [`${pad}${yamlMapKey(key)}: ${yamlBlock(value, indent + 2)}`];
+  if (Array.isArray(value)) {
+    if (value.every((entry) => !isPlainObject(entry) && !Array.isArray(entry))) return [`${pad}${yamlMapKey(key)}: ${yamlScalar(value)}`];
+    const lines = [`${pad}${yamlMapKey(key)}:`];
+    for (const entry of value) {
+      if (isPlainObject(entry)) {
+        const entries = Object.entries(entry).filter(([, child]) => child !== undefined);
+        if (!entries.length) {
+          lines.push(`${' '.repeat(indent + 2)}- {}`);
+          continue;
+        }
+        const [[firstKey, firstValue], ...rest] = entries;
+        if (isPlainObject(firstValue) || Array.isArray(firstValue) || (typeof firstValue === 'string' && firstValue.includes('\n'))) {
+          lines.push(`${' '.repeat(indent + 2)}- ${yamlMapKey(firstKey)}:`);
+          lines.push(...yamlObjectLines(firstValue, indent + 4));
+        } else {
+          lines.push(`${' '.repeat(indent + 2)}- ${yamlMapKey(firstKey)}: ${yamlScalar(firstValue)}`);
+        }
+        for (const [childKey, childValue] of rest) lines.push(...yamlValueLines(childKey, childValue, indent + 4));
+      } else {
+        lines.push(`${' '.repeat(indent + 2)}- ${yamlScalar(entry)}`);
+      }
+    }
+    return lines;
+  }
+  if (isPlainObject(value)) return [`${pad}${yamlMapKey(key)}:`, ...yamlObjectLines(value, indent + 2)];
+  return [`${pad}${yamlMapKey(key)}: ${yamlScalar(value)}`];
+}
+
+function yamlObjectLines(value, indent, preferredOrder = []) {
+  if (!isPlainObject(value)) return [`${' '.repeat(indent)}${yamlScalar(value)}`];
+  const emitted = new Set();
+  const lines = [];
+  for (const key of preferredOrder) {
+    if (Object.prototype.hasOwnProperty.call(value, key) && value[key] !== undefined) {
+      lines.push(...yamlValueLines(key, value[key], indent));
+      emitted.add(key);
+    }
+  }
+  for (const [key, entry] of Object.entries(value)) {
+    if (emitted.has(key) || entry === undefined || key === 'name') continue;
+    lines.push(...yamlValueLines(key, entry, indent));
+  }
+  return lines;
+}
+
+function hasMapFormPipeline(pipeline) {
+  return pipeline && (pipeline.kind !== undefined || pipeline.nodes !== undefined);
+}
+
+function renderMapFormPipeline(name, pipeline) {
+  const lines = [`  ${yamlMapKey(name)}:`];
+  const order = ['description', 'kind', 'needs', 'branchStrategy', 'sandbox', 'model', 'copyToWorktree', 'nodes'];
+  for (const line of yamlObjectLines(pipeline, 4, order)) {
+    if (/^    steps:/.test(line) && (!Array.isArray(pipeline.steps) || pipeline.steps.length === 0)) continue;
+    lines.push(line);
+  }
+  return lines;
+}
+
 export function loadPipelinePacks() {
   return listRuntimePipelines(loadExecutionRuntimePack()).map((pipeline) => ({
     name: pipeline.name,
@@ -71,6 +142,10 @@ export function configToYaml(config) {
   }
   lines.push('', 'pipelines:');
   for (const [name, pipeline] of Object.entries(config.pipelines)) {
+    if (hasMapFormPipeline(pipeline)) {
+      lines.push(...renderMapFormPipeline(name, pipeline), '');
+      continue;
+    }
     lines.push(`  ${name}:`, `    description: ${yamlScalar(pipeline.description)}`, '    branchStrategy:');
     for (const [key, value] of Object.entries(pipeline.branchStrategy || {})) lines.push(`      ${key}: ${yamlScalar(value)}`);
     if (pipeline.sandbox !== undefined) lines.push(`    sandbox: ${yamlScalar(pipeline.sandbox)}`);

@@ -14,8 +14,9 @@ export interface ConfigAgentDef {
 }
 
 export interface ConfigChainStep { role: string; prompt: string }
-export interface ConfigPipelineStep { role: string; description?: string; prompt: string; sandbox?: ConfigAgentDef["sandbox"]; model?: string; maxIterations?: number; copyToWorktree?: string[] }
-export interface ConfigPipelineDef { description?: string; branchStrategy?: Record<string, unknown>; sandbox?: ConfigAgentDef["sandbox"]; model?: string; copyToWorktree?: string[]; steps: ConfigPipelineStep[] }
+export interface ConfigPipelineStep { role: string; description?: string; prompt: string; sandbox?: ConfigAgentDef["sandbox"]; model?: string; maxIterations?: number; copyToWorktree?: string[]; [key: string]: unknown }
+export interface ConfigPipelineNodeDef { kind?: string; needs?: string[]; role?: string; prompt?: string; promptOverride?: string; nodes?: Record<string, ConfigPipelineNodeDef>; [key: string]: unknown }
+export interface ConfigPipelineDef { description?: string; kind?: string; needs?: string[]; branchStrategy?: Record<string, unknown>; sandbox?: ConfigAgentDef["sandbox"]; model?: string; copyToWorktree?: string[]; nodes?: Record<string, ConfigPipelineNodeDef>; steps: ConfigPipelineStep[]; [key: string]: unknown }
 
 export interface ConfigShadowSnapshot {
 	defaultSandbox?: ConfigAgentDef["sandbox"];
@@ -35,6 +36,17 @@ export interface ConfigShadowSnapshot {
 }
 
 export type ConfigShadowChange = ShadowChange<ConfigShadowSnapshot>;
+
+function renameRoleReferences(value: unknown, oldName: string, newName: string): void {
+	if (Array.isArray(value)) {
+		for (const entry of value) renameRoleReferences(entry, oldName, newName);
+		return;
+	}
+	if (!value || typeof value !== "object") return;
+	const record = value as Record<string, unknown>;
+	if (record.role === oldName) record.role = newName;
+	for (const entry of Object.values(record)) renameRoleReferences(entry, oldName, newName);
+}
 
 export class ConfigShadowModel extends ShadowModelBase<ConfigShadowSnapshot> {
 	private state: ConfigShadowSnapshot;
@@ -98,7 +110,7 @@ export class ConfigShadowModel extends ShadowModelBase<ConfigShadowSnapshot> {
 		this.state.agents[newName].name = newName;
 		delete this.state.agents[oldName];
 		for (const chain of Object.values(this.state.chains)) for (const step of chain) if (step.role === oldName) step.role = newName;
-		for (const pipeline of Object.values(this.state.pipelines)) for (const step of pipeline.steps || []) if (step.role === oldName) step.role = newName;
+		for (const pipeline of Object.values(this.state.pipelines)) renameRoleReferences(pipeline, oldName, newName);
 		this.emit("rename-agent", `Rename role ${oldName} → ${newName}`, before, { oldName, newName });
 	}
 

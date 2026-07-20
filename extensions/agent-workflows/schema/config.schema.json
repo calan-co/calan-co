@@ -138,6 +138,7 @@
           ]
         },
         "role": { "type": "string" },
+        "description": { "type": "string" },
         "prompt": { "type": "string" },
         "promptOverride": { "type": "string" },
         "with": { "type": "object", "additionalProperties": true },
@@ -151,11 +152,35 @@
       },
       "required": ["role", "prompt"]
     },
+    "pipelineNode": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "kind": { "type": "string", "minLength": 1 },
+        "needs": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "role": { "type": "string" },
+        "prompt": { "type": "string" },
+        "promptOverride": { "type": "string" },
+        "with": { "type": "object", "additionalProperties": true },
+        "nodes": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/pipelineNode" }
+        }
+      }
+    },
     "pipeline": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "description": { "type": "string" },
+        "kind": { "type": "string", "minLength": 1 },
+        "needs": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
         "branchStrategy": { "$ref": "#/$defs/branchStrategy" },
         "sandbox": { "$ref": "#/$defs/sandbox" },
         "model": { "type": "string", "minLength": 1 },
@@ -163,13 +188,16 @@
           "type": "array",
           "items": { "type": "string" }
         },
+        "nodes": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/pipelineNode" }
+        },
         "steps": {
           "type": "array",
           "items": { "$ref": "#/$defs/pipelineStep" },
           "minItems": 1
         }
-      },
-      "required": ["steps"]
+      }
     },
     "chainStep": {
       "type": "object",
