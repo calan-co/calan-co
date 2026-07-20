@@ -57,6 +57,10 @@ export interface WorkProcessWorkerStatus {
 	commits?: string[];
 	logPath?: string;
 	error?: string;
+	nodePath?: string;
+	kind?: string;
+	laneId?: string;
+	itemId?: string;
 }
 
 export interface WorkProcessRunRecord {
