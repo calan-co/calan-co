@@ -346,8 +346,8 @@ function validateNode(scope: string, id: string, node: RuntimePipelineNode, erro
 	if (node.kind === "loop") {
 		if (!node.each) errors.push(`${nodeScope} loop must define each`);
 		if (node.mode && !["sequential", "parallel"].includes(node.mode)) errors.push(`${nodeScope} loop mode must be sequential or parallel`);
-		const hasNode = !!node.node;
-		const hasNodes = !!node.nodes && Object.keys(node.nodes).length > 0;
+		const hasNode = Object.prototype.hasOwnProperty.call(node, "node");
+		const hasNodes = Object.prototype.hasOwnProperty.call(node, "nodes");
 		if (!hasNode && !hasNodes) errors.push(`${nodeScope} loop must define node or nodes`);
 		if (hasNode && hasNodes) errors.push(`${nodeScope} loop must define exactly one of node or nodes`);
 		const nestedStepCount = countLegacyStepsForLoopChild(node);

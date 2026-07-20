@@ -98,6 +98,27 @@ test('execution runtime validates negative fixtures with useful diagnostics', ()
   assert.throws(
     () => validateExecutionRuntimePack({
       runtimeVersion: 1,
+      roles: { worker: {} },
+      prompts: { ok: { format: 'markdown', template: 'x' } },
+      pipelines: {
+        p: {
+          kind: 'composite',
+          nodes: {
+            fan: {
+              kind: 'loop',
+              each: '$.items',
+              node: { kind: 'agent.pi', role: 'worker', prompt: 'ok' },
+              nodes: {},
+            },
+          },
+        },
+      },
+    }),
+    /loop must define exactly one of node or nodes/s,
+  );
+  assert.throws(
+    () => validateExecutionRuntimePack({
+      runtimeVersion: 1,
       roles: { planner: { kind: 'planWork' }, otherPlanner: { kind: 'planWork' } },
       prompts: { ok: { format: 'markdown', template: 'x' } },
       pipelines: { p: { steps: [{ id: 'plan', kind: 'planWork', role: 'planner', prompt: 'ok' }] } },
