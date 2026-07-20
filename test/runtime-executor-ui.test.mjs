@@ -1,13 +1,41 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { promisify } from 'node:util';
 
 import { executePipeline } from '../extensions/agent-workflows/index.ts';
 
-async function createGraphRepo(configLines) {
+const execFileAsync = promisify(execFile);
+
+async function runGit(cwd, args) {
+  const result = await execFileAsync('git', args, {
+    cwd,
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'Agent Workflows Test',
+      GIT_AUTHOR_EMAIL: 'agent-workflows@example.test',
+      GIT_COMMITTER_NAME: 'Agent Workflows Test',
+      GIT_COMMITTER_EMAIL: 'agent-workflows@example.test',
+    },
+  });
+  return result.stdout.trim();
+}
+
+async function initGitRepo(repoRoot) {
+  await runGit(repoRoot, ['init', '-b', 'main']);
+  await runGit(repoRoot, ['config', 'user.name', 'Agent Workflows Test']);
+  await runGit(repoRoot, ['config', 'user.email', 'agent-workflows@example.test']);
+  await fs.writeFile(path.join(repoRoot, 'README.md'), 'base\n', 'utf8');
+  await runGit(repoRoot, ['add', 'README.md']);
+  await runGit(repoRoot, ['commit', '-m', 'initial commit']);
+}
+
+async function createGraphRepo(configLines, { git = false } = {}) {
   const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-graph-runtime-'));
+  if (git) await initGitRepo(repoRoot);
   await fs.mkdir(path.join(repoRoot, '.pi/sandcastle'), { recursive: true });
   await fs.writeFile(path.join(repoRoot, '.pi/sandcastle/config.yaml'), configLines.join('\n'), 'utf8');
   return repoRoot;
@@ -33,12 +61,27 @@ function baseGraphConfig(extraPipelineLines) {
   ];
 }
 
-function fakeWorktree(repoRoot, runImpl) {
+function fakeWorktree(repoRoot, runImpl, options = {}) {
   return {
-    branch: 'sandcastle/graph',
-    worktreePath: path.join(repoRoot, '.pi/sandcastle/worktrees/graph'),
+    branch: options.branch || 'sandcastle/graph',
+    worktreePath: options.worktreePath || path.join(repoRoot, '.pi/sandcastle/worktrees/graph'),
     close: async () => ({}),
     run: runImpl,
+  };
+}
+
+function fakeSuccessfulGit() {
+  let head = 'base-head';
+  let merges = 0;
+  return async (args) => {
+    if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return { status: 0, stdout: 'sandcastle/graph\n', stderr: '' };
+    if (args[0] === 'rev-parse' && args[1] === 'HEAD') return { status: 0, stdout: `${head}\n`, stderr: '' };
+    if (args[0] === 'merge') {
+      merges += 1;
+      head = `merge-head-${merges}`;
+      return { status: 0, stdout: `Merged ${args.at(-1)}\n`, stderr: '' };
+    }
+    return { status: 0, stdout: '', stderr: '' };
   };
 }
 
@@ -82,6 +125,7 @@ test('executePipeline runs composite graph nodes by needs and records graph node
     }),
     loadSandboxProvider: async (kind) => ({ kind }),
     makeAgent: (model, provider) => ({ model, provider }),
+    runGit: fakeSuccessfulGit(),
   });
 
   assert.deepEqual(calls.map((prompt) => prompt.match(/(Implement|Review)/)?.[1]), ['Implement', 'Review']);
@@ -96,6 +140,158 @@ test('executePipeline runs composite graph nodes by needs and records graph node
   const durable = JSON.parse(await fs.readFile(path.join(repoRoot, '.pi/sandcastle/runs', runId, 'record.json'), 'utf8'));
   assert.equal(durable.executor, 'graph');
   assert.equal(durable.nodes.find((node) => node.nodePath === 'root.nodes.merge').status, 'completed');
+});
+
+test('executePipeline graph git.merge merges accepted workspace branch content into the target worktree', async () => {
+  const repoRoot = await createGraphRepo(baseGraphConfig([
+    '  graph:',
+    '    kind: composite',
+    '    nodes:',
+    '      workspace:',
+    '        kind: git.worktree',
+    '        nodes:',
+    '          implement:',
+    '            kind: agent.pi',
+    '            role: implementer',
+    '            prompt: Implement $INPUT',
+    '      merge:',
+    '        kind: git.merge',
+    '        needs: [workspace]',
+  ]), { git: true });
+
+  const record = await executePipeline(repoRoot, 'graph', 'merge feature branch', {
+    now: () => 1700000004500,
+    createWorktree: async () => fakeWorktree(repoRoot, async (options) => {
+      await runGit(repoRoot, ['checkout', '-B', 'feature/accepted', 'main']);
+      await fs.writeFile(path.join(repoRoot, 'feature.txt'), 'accepted branch content\n', 'utf8');
+      await runGit(repoRoot, ['add', 'feature.txt']);
+      await runGit(repoRoot, ['commit', '-m', 'add accepted feature']);
+      const sha = await runGit(repoRoot, ['rev-parse', 'HEAD']);
+      await runGit(repoRoot, ['checkout', 'main']);
+      return {
+        iterations: [],
+        commits: [{ sha }],
+        branch: 'feature/accepted',
+        stdout: '',
+        logFilePath: options.logging.path,
+      };
+    }, { branch: 'main', worktreePath: repoRoot }),
+    loadSandboxProvider: async (kind) => ({ kind }),
+    makeAgent: (model, provider) => ({ model, provider }),
+  });
+
+  assert.equal(record.status, 'completed');
+  assert.equal(await fs.readFile(path.join(repoRoot, 'feature.txt'), 'utf8'), 'accepted branch content\n');
+  const headParents = (await runGit(repoRoot, ['show', '--no-patch', '--pretty=%P', 'HEAD'])).split(/\s+/).filter(Boolean);
+  assert.equal(headParents.length, 2, 'git.merge should create a merge commit on the target branch');
+  const mergeNode = record.nodes.find((node) => node.nodePath === 'root.nodes.merge');
+  assert.equal(mergeNode.branch, 'main');
+  assert.deepEqual(mergeNode.mergedBranches, ['feature/accepted']);
+  assert.ok(mergeNode.commits?.length >= 1);
+  assert.ok(mergeNode.effects?.some((effect) => effect === 'merge:feature/accepted'));
+});
+
+test('executePipeline fails graph git.merge with no mergeable inputs', async () => {
+  const repoRoot = await createGraphRepo(baseGraphConfig([
+    '  graph:',
+    '    kind: composite',
+    '    nodes:',
+    '      merge:',
+    '        kind: git.merge',
+  ]));
+
+  await assert.rejects(
+    executePipeline(repoRoot, 'graph', 'nothing to merge', {
+      now: () => 1700000004700,
+      createWorktree: async () => fakeWorktree(repoRoot, async () => ({ iterations: [], commits: [], branch: 'sandcastle/graph', stdout: '' })),
+      loadSandboxProvider: async (kind) => ({ kind }),
+      makeAgent: (model, provider) => ({ model, provider }),
+    }),
+    /requires mergeable needs/,
+  );
+});
+
+test('executePipeline graph git.merge fails closed when an effectful input branch has no target merge effect', async () => {
+  const repoRoot = await createGraphRepo(baseGraphConfig([
+    '  graph:',
+    '    kind: composite',
+    '    nodes:',
+    '      workspace:',
+    '        kind: git.worktree',
+    '        nodes:',
+    '          implement:',
+    '            kind: agent.pi',
+    '            role: implementer',
+    '            prompt: Implement $INPUT',
+    '      merge:',
+    '        kind: git.merge',
+    '        needs: [workspace]',
+  ]), { git: true });
+  const head = await runGit(repoRoot, ['rev-parse', 'HEAD']);
+  await runGit(repoRoot, ['branch', 'feature/already-merged', 'HEAD']);
+
+  await assert.rejects(
+    executePipeline(repoRoot, 'graph', 'merge already merged branch', {
+      now: () => 1700000004750,
+      createWorktree: async () => fakeWorktree(repoRoot, async (options) => ({
+        iterations: [],
+        commits: [{ sha: head }],
+        branch: 'feature/already-merged',
+        stdout: '',
+        logFilePath: options.logging.path,
+      }), { branch: 'main', worktreePath: repoRoot }),
+      loadSandboxProvider: async (kind) => ({ kind }),
+      makeAgent: (model, provider) => ({ model, provider }),
+    }),
+    /completed without merge effects/,
+  );
+});
+
+test('executePipeline graph git.merge fails closed on merge conflicts', async () => {
+  const repoRoot = await createGraphRepo(baseGraphConfig([
+    '  graph:',
+    '    kind: composite',
+    '    nodes:',
+    '      workspace:',
+    '        kind: git.worktree',
+    '        nodes:',
+    '          implement:',
+    '            kind: agent.pi',
+    '            role: implementer',
+    '            prompt: Implement $INPUT',
+    '      merge:',
+    '        kind: git.merge',
+    '        needs: [workspace]',
+  ]), { git: true });
+  await fs.writeFile(path.join(repoRoot, 'conflict.txt'), 'base\n', 'utf8');
+  await runGit(repoRoot, ['add', 'conflict.txt']);
+  await runGit(repoRoot, ['commit', '-m', 'add conflict base']);
+  await runGit(repoRoot, ['checkout', '-B', 'feature/conflict', 'main']);
+  await fs.writeFile(path.join(repoRoot, 'conflict.txt'), 'feature\n', 'utf8');
+  await runGit(repoRoot, ['commit', '-am', 'feature conflict change']);
+  const featureSha = await runGit(repoRoot, ['rev-parse', 'HEAD']);
+  await runGit(repoRoot, ['checkout', 'main']);
+  await fs.writeFile(path.join(repoRoot, 'conflict.txt'), 'target\n', 'utf8');
+  await runGit(repoRoot, ['commit', '-am', 'target conflict change']);
+
+  await assert.rejects(
+    executePipeline(repoRoot, 'graph', 'merge conflicting branch', {
+      now: () => 1700000004800,
+      createWorktree: async () => fakeWorktree(repoRoot, async (options) => ({
+        iterations: [],
+        commits: [{ sha: featureSha }],
+        branch: 'feature/conflict',
+        stdout: '',
+        logFilePath: options.logging.path,
+      }), { branch: 'main', worktreePath: repoRoot }),
+      loadSandboxProvider: async (kind) => ({ kind }),
+      makeAgent: (model, provider) => ({ model, provider }),
+    }),
+    /failed to merge 'feature\/conflict'/,
+  );
+
+  assert.equal((await runGit(repoRoot, ['status', '--porcelain', 'conflict.txt'])), '');
+  assert.equal(await fs.readFile(path.join(repoRoot, 'conflict.txt'), 'utf8'), 'target\n');
 });
 
 test('executePipeline fails graph git.merge when worktree children produce no commits but return a log path', async () => {

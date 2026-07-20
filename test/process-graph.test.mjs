@@ -48,6 +48,8 @@ async function setupProcessGraphRepo({ noEffects = false } = {}) {
   const notifications = [];
   const widgets = [];
   const runCalls = [];
+  let gitHead = 'process-base';
+  let gitMerges = 0;
   agentWorkflows({
     registerCommand(name, spec) { commands.set(name, spec); },
     on(name, handler) { events.set(name, handler); },
@@ -86,6 +88,16 @@ async function setupProcessGraphRepo({ noEffects = false } = {}) {
       }),
       loadSandboxProvider: async (kind) => ({ kind }),
       makeAgent: (model, provider) => ({ model, provider }),
+      runGit: async (args) => {
+        if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return { status: 0, stdout: 'sandcastle/graph-process\n', stderr: '' };
+        if (args[0] === 'rev-parse' && args[1] === 'HEAD') return { status: 0, stdout: `${gitHead}\n`, stderr: '' };
+        if (args[0] === 'merge') {
+          gitMerges += 1;
+          gitHead = `process-merge-${gitMerges}`;
+          return { status: 0, stdout: `Merged ${args.at(-1)}\n`, stderr: '' };
+        }
+        return { status: 0, stdout: '', stderr: '' };
+      },
     },
   });
 

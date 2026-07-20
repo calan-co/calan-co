@@ -47,7 +47,7 @@ import { registerWorkCommands } from "./work-source.mjs";
 import { buildDefaultConfigText, configToYaml, packsToConfig } from "./pipeline-packs.mjs";
 import { renderWorkBrief } from "./work-brief.mjs";
 import { loadExecutionRuntimePack, listRuntimeAgents, listRuntimePipelines } from "./execution-runtime.ts";
-import { executeGraphWorkflow, type CompositeResult, type GraphNodeExecutionContext, type GraphWorkflowNode, type NodeResult } from "./graph-executor.ts";
+import { executeGraphWorkflow, type CompositeResult, type GitMergeResult, type GraphNodeExecutionContext, type GraphWorkflowNode, type NodeResult } from "./graph-executor.ts";
 import {
 	runWorkProcess,
 	validateExecutablePlanArtifact,
@@ -3288,6 +3288,8 @@ interface PipelineRunNodeRecord {
 	commits?: string[];
 	logPath?: string;
 	effects?: string[];
+	mergedBranches?: string[];
+	mergedCommits?: string[];
 	laneId?: string;
 	itemId?: string;
 }
@@ -3312,11 +3314,20 @@ interface PipelineRunRecord {
 	error?: string;
 }
 
+interface GitCommandResult {
+	status: number | null;
+	stdout: string;
+	stderr: string;
+}
+
+type GitCommandRunner = (args: string[], options: { cwd: string }) => GitCommandResult | Promise<GitCommandResult>;
+
 interface PipelineExecutionDeps {
 	createWorktree?: typeof createWorktree;
 	claudeCode?: typeof claudeCode;
 	makeAgent?: (model: string, provider?: AgentDef["provider"]) => any;
 	loadSandboxProvider?: (kind: AgentDef["sandbox"] | undefined, options?: Record<string, unknown>) => Promise<any>;
+	runGit?: GitCommandRunner;
 	onStepUpdate?: (step: PipelineRunStepRecord, record: PipelineRunRecord) => void;
 	onStepStreamEvent?: (step: PipelineRunStepRecord, event: unknown, record: PipelineRunRecord) => void;
 	image?: SandboxImageDeps;
@@ -3398,6 +3409,14 @@ function nodeResultStringArray(result: NodeResult, key: "commits" | "effects"): 
 	return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0) : [];
 }
 
+function nodeResultRepositoryEffects(result: NodeResult): string[] {
+	return nodeResultStringArray(result, "effects").filter((effect) => !isLogArtifactEffect(effect));
+}
+
+function isLogArtifactEffect(value: string): boolean {
+	return /^(log|logs|logPath|logFilePath)(:|=|$)/i.test(value.trim());
+}
+
 function nodeResultLogPath(result: NodeResult): string | undefined {
 	const logPath = (result as any).logPath;
 	return typeof logPath === "string" && logPath.length ? logPath : undefined;
@@ -3414,7 +3433,7 @@ function nodeResultString(result: NodeResult, key: string): string | undefined {
 }
 
 function graphResultHasEffects(result: NodeResult): boolean {
-	if (nodeResultStringArray(result, "commits").length || nodeResultStringArray(result, "effects").length) return true;
+	if (nodeResultStringArray(result, "commits").length || nodeResultRepositoryEffects(result).length) return true;
 	if (result.type === "CompositeResult" || result.type === "WorkspaceResult") return Object.values((result as any).children || {}).some((child) => graphResultHasEffects(child as NodeResult));
 	if (result.type === "LoopResult") return ((result as any).iterations || []).some((child: NodeResult) => graphResultHasEffects(child));
 	return false;
@@ -3451,6 +3470,8 @@ function collectGraphNodeRecords(result: NodeResult, path = "root"): PipelineRun
 		...(nodeResultStringArray(result, "commits").length ? { commits: nodeResultStringArray(result, "commits") } : {}),
 		...(nodeResultLogPath(result) ? { logPath: nodeResultLogPath(result) } : {}),
 		...(nodeResultStringArray(result, "effects").length ? { effects: nodeResultStringArray(result, "effects") } : {}),
+		...(Array.isArray((result as any).mergedBranches) ? { mergedBranches: (result as any).mergedBranches.filter((entry: unknown): entry is string => typeof entry === "string" && entry.length > 0) } : {}),
+		...(Array.isArray((result as any).mergedCommits) ? { mergedCommits: (result as any).mergedCommits.filter((entry: unknown): entry is string => typeof entry === "string" && entry.length > 0) } : {}),
 		...(nodeResultString(result, "laneId") ? { laneId: nodeResultString(result, "laneId") } : {}),
 		...(nodeResultString(result, "itemId") ? { itemId: nodeResultString(result, "itemId") } : {}),
 	};
@@ -3462,6 +3483,95 @@ function collectGraphNodeRecords(result: NodeResult, path = "root"): PipelineRun
 		for (const [index, child] of ((result as any).iterations || []).entries()) children.push(...collectGraphNodeRecords(child as NodeResult, `${path}.iterations.${index}`));
 	}
 	return [record, ...children];
+}
+
+interface GraphMergeCandidate {
+	need: string;
+	nodeId: string;
+	branch: string;
+	commits: string[];
+}
+
+function defaultRunGit(args: string[], options: { cwd: string }): GitCommandResult {
+	const result = spawnSync("git", args, { cwd: options.cwd, encoding: "utf8", env: process.env });
+	return {
+		status: result.status,
+		stdout: result.stdout || "",
+		stderr: result.stderr || (result.error ? result.error.message : ""),
+	};
+}
+
+async function runGraphGit(deps: PipelineExecutionDeps, cwd: string, args: string[]): Promise<GitCommandResult> {
+	return await (deps.runGit || defaultRunGit)(args, { cwd });
+}
+
+async function assertGraphGit(deps: PipelineExecutionDeps, cwd: string, args: string[], description: string): Promise<string> {
+	const result = await runGraphGit(deps, cwd, args);
+	if (result.status !== 0) throw new Error(`${description} failed: ${(result.stderr || result.stdout || `git ${args.join(" ")}`).trim()}`);
+	return result.stdout.trim();
+}
+
+function collectWorkspaceMergeCandidates(needs: Record<string, NodeResult>): GraphMergeCandidate[] {
+	const candidates: GraphMergeCandidate[] = [];
+	for (const [need, result] of Object.entries(needs)) collectWorkspaceMergeCandidatesFromResult(need, result, candidates);
+	return candidates;
+}
+
+function collectWorkspaceMergeCandidatesFromResult(need: string, result: NodeResult, candidates: GraphMergeCandidate[]): void {
+	if (result.type === "WorkspaceResult") {
+		const commits = nodeResultStringArray(result, "commits");
+		const effects = nodeResultRepositoryEffects(result);
+		if (!commits.length && !effects.length) return;
+		const branch = nodeResultBranch(result);
+		if (!branch) throw new Error(`git.merge requires mergeable branches; '${need}' produced no branch`);
+		candidates.push({ need, nodeId: result.nodeId, branch, commits });
+		return;
+	}
+	if (result.type === "LoopResult") {
+		for (const [index, child] of (((result as any).mergeableResults || []) as NodeResult[]).entries()) collectWorkspaceMergeCandidatesFromResult(`${need}[${index}]`, child, candidates);
+	}
+}
+
+async function mergeGraphWorkspaceBranches(
+	context: GraphNodeExecutionContext,
+	deps: PipelineExecutionDeps,
+	targetCwd: string,
+): Promise<Partial<GitMergeResult>> {
+	const candidates = collectWorkspaceMergeCandidates(context.needs);
+	if (!candidates.length) throw new Error(`${context.path} requires effectful mergeable branches`);
+	await assertGraphGit(deps, targetCwd, ["rev-parse", "--show-toplevel"], `${context.path} git repository check`);
+	const targetBranch = await assertGraphGit(deps, targetCwd, ["rev-parse", "--abbrev-ref", "HEAD"], `${context.path} target branch check`);
+	let previousHead = await assertGraphGit(deps, targetCwd, ["rev-parse", "HEAD"], `${context.path} target HEAD check`);
+	const startHead = previousHead;
+	const mergedBranches: string[] = [];
+	const mergedCommits: string[] = [];
+	const effects: string[] = [];
+
+	for (const candidate of candidates) {
+		const result = await runGraphGit(deps, targetCwd, ["merge", "--no-ff", "--no-edit", candidate.branch]);
+		if (result.status !== 0) {
+			await runGraphGit(deps, targetCwd, ["merge", "--abort"]);
+			throw new Error(`${context.path} failed to merge '${candidate.branch}' into '${targetBranch}': ${(result.stderr || result.stdout || "merge conflict").trim()}`);
+		}
+		const nextHead = await assertGraphGit(deps, targetCwd, ["rev-parse", "HEAD"], `${context.path} post-merge HEAD check`);
+		if (nextHead !== previousHead) {
+			mergedBranches.push(candidate.branch);
+			mergedCommits.push(nextHead);
+			effects.push(`merge:${candidate.branch}`);
+			for (const commit of candidate.commits) effects.push(`commit:${commit}`);
+		}
+		previousHead = nextHead;
+	}
+
+	if (previousHead === startHead || !effects.length) throw new Error(`${context.path} completed without merge effects`);
+	return {
+		branch: targetBranch,
+		merged: mergedBranches,
+		mergedBranches,
+		mergedCommits,
+		commits: mergedCommits,
+		effects,
+	};
 }
 
 export async function executePipeline(
@@ -3599,8 +3709,9 @@ export async function executePipeline(
 					"git.worktree": async (context) => {
 						const childResults = Object.values(context.children || {}) as NodeResult[];
 						const commits = childResults.flatMap((child) => nodeResultStringArray(child, "commits"));
-						const childEffects = childResults.flatMap((child) => nodeResultStringArray(child, "effects"));
-						const branch = graphContextString(context, "branch") || record.branch;
+						const childEffects = childResults.flatMap((child) => nodeResultRepositoryEffects(child));
+						const childBranches = [...new Set(childResults.map((child) => nodeResultBranch(child)).filter((branch): branch is string => Boolean(branch)))];
+						const branch = graphContextString(context, "branch") || (childBranches.length === 1 ? childBranches[0] : undefined) || record.branch;
 						const itemId = graphContextString(context, "itemId");
 						const laneId = graphContextString(context, "contextId") || (context.loop ? `${context.path}:${context.loop.index}` : undefined);
 						return {
@@ -3612,6 +3723,7 @@ export async function executePipeline(
 							...(laneId ? { laneId } : {}),
 						};
 					},
+					"git.merge": async (context) => mergeGraphWorkspaceBranches(context, deps, worktree?.worktreePath || cwd),
 				},
 			}) as CompositeResult;
 			record.nodes = collectGraphNodeRecords(graphResult);
