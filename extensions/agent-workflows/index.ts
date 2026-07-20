@@ -1,6 +1,18 @@
 // Agent Workflows extension: Pi-native delegation UI backed by Sandcastle sandboxes.
 // Commands: /work:* command surfaces backed by an Agent Workflows execution runtime adapter.
 
+export {
+	GLOBAL_NODE_DISCRIMINATOR,
+	MERGEABLE_RESULT_INTERFACE,
+	RESULT_CONTRACTS,
+	assertValidWorkflowModel,
+	validateWorkflowModel,
+	type ResultContract,
+	type WorkflowNodeModel,
+	type WorkflowValidationDiagnostic,
+	type WorkflowValidationResult,
+} from "./workflow-model.ts";
+
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { SelectList as PiSelectList, matchesKey } from "@earendil-works/pi-tui";
 import type { SelectListTheme as PiSelectListTheme } from "@earendil-works/pi-tui";
