@@ -75,6 +75,29 @@ test('execution runtime validates negative fixtures with useful diagnostics', ()
   assert.throws(
     () => validateExecutionRuntimePack({
       runtimeVersion: 1,
+      roles: { worker: {} },
+      prompts: { ok: { format: 'markdown', template: 'x' } },
+      pipelines: {
+        p: {
+          kind: 'composite',
+          nodes: {
+            fan: {
+              kind: 'loop',
+              each: '$.items',
+              node: { kind: 'agent.pi', role: 'worker', prompt: 'ok' },
+              nodes: {
+                other: { kind: 'agent.pi', role: 'worker', prompt: 'ok' },
+              },
+            },
+          },
+        },
+      },
+    }),
+    /loop must define exactly one of node or nodes/s,
+  );
+  assert.throws(
+    () => validateExecutionRuntimePack({
+      runtimeVersion: 1,
       roles: { planner: { kind: 'planWork' }, otherPlanner: { kind: 'planWork' } },
       prompts: { ok: { format: 'markdown', template: 'x' } },
       pipelines: { p: { steps: [{ id: 'plan', kind: 'planWork', role: 'planner', prompt: 'ok' }] } },
@@ -173,12 +196,15 @@ test('runtime compiler preserves all git.worktree child agent nodes in legacy DA
 
 test('execution runtime schema supports composite map nodes and concrete container image requirements', () => {
   const schema = JSON.parse(readFileSync(new URL('../extensions/agent-workflows/schema/execution-runtime.schema.json', import.meta.url), 'utf8'));
+  const configSchema = JSON.parse(readFileSync(new URL('../extensions/agent-workflows/schema/config.schema.json', import.meta.url), 'utf8'));
   assert.deepEqual(schema.required, ['runtimeVersion', 'defaults', 'roles', 'prompts', 'pipelines']);
   assert.ok(schema.properties.pipelines, 'repo root schema keeps pipelines key');
   assert.ok(schema.$defs.pipeline.properties.kind, 'pipeline values support kind');
   assert.ok(schema.$defs.pipeline.properties.nodes, 'pipeline values support map-form nodes');
   assert.match(JSON.stringify(schema.$defs.concreteNode.properties.kind), /git\.worktree/);
   assert.match(JSON.stringify(schema.$defs.concreteNode.properties.kind), /git\.merge/);
+  assert.match(JSON.stringify(schema.$defs.concreteNode.allOf), /oneOf/);
+  assert.match(JSON.stringify(configSchema.$defs.concreteNode.allOf), /oneOf/);
   assert.deepEqual(schema.$defs.containerImage.required, ['name']);
   assert.equal(schema.$defs.containerImage.properties.strategy, undefined);
 });

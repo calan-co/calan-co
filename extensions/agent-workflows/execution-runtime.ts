@@ -346,7 +346,10 @@ function validateNode(scope: string, id: string, node: RuntimePipelineNode, erro
 	if (node.kind === "loop") {
 		if (!node.each) errors.push(`${nodeScope} loop must define each`);
 		if (node.mode && !["sequential", "parallel"].includes(node.mode)) errors.push(`${nodeScope} loop mode must be sequential or parallel`);
-		if (!node.node && (!node.nodes || Object.keys(node.nodes).length === 0)) errors.push(`${nodeScope} loop must define node or nodes`);
+		const hasNode = !!node.node;
+		const hasNodes = !!node.nodes && Object.keys(node.nodes).length > 0;
+		if (!hasNode && !hasNodes) errors.push(`${nodeScope} loop must define node or nodes`);
+		if (hasNode && hasNodes) errors.push(`${nodeScope} loop must define exactly one of node or nodes`);
 		const nestedStepCount = countLegacyStepsForLoopChild(node);
 		if (nestedStepCount > 1) errors.push(`${nodeScope} loop compiles to ${nestedStepCount} nested legacy steps, but legacy fanOut supports exactly one nested step; use a single child node until graph execution is available`);
 	}

@@ -373,9 +373,9 @@
           "if": { "properties": { "kind": { "const": "loop" } }, "required": ["kind"] },
           "then": {
             "required": ["each"],
-            "anyOf": [
-              { "required": ["node"] },
-              { "required": ["nodes"] }
+            "oneOf": [
+              { "required": ["node"], "not": { "required": ["nodes"] } },
+              { "required": ["nodes"], "not": { "required": ["node"] } }
             ]
           }
         },
