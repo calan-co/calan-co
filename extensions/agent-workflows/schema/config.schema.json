@@ -126,6 +126,72 @@
         "baseBranch": { "type": "string" }
       }
     },
+    "concreteNode": {
+      "type": "object",
+      "required": ["kind"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "anyOf": [
+            { "enum": ["composite", "loop", "agent.pi", "git.worktree", "git.merge", "docker.container", "podman.container"] },
+            { "pattern": "^[a-z][a-z0-9-]*\\.[a-z][a-z0-9_-]*$" }
+          ]
+        },
+        "needs": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "role": { "type": "string" },
+        "prompt": { "type": "string" },
+        "promptOverride": { "type": "string" },
+        "each": { "type": "string", "minLength": 1 },
+        "mode": { "type": "string", "enum": ["sequential", "parallel"] },
+        "max": { "type": "integer", "minimum": 1 },
+        "node": { "$ref": "#/$defs/concreteNode" },
+        "nodes": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "$ref": "#/$defs/concreteNode" }
+        },
+        "image": { "$ref": "#/$defs/containerImage" },
+        "strategy": { "type": "string", "minLength": 1 },
+        "when": { "type": "string", "minLength": 1 },
+        "with": { "type": "object", "additionalProperties": true },
+        "overrides": { "type": "object", "additionalProperties": true }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "agent.pi" } }, "required": ["kind"] },
+          "then": { "required": ["role", "prompt"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "loop" } }, "required": ["kind"] },
+          "then": {
+            "required": ["each"],
+            "anyOf": [
+              { "required": ["node"] },
+              { "required": ["nodes"] }
+            ]
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "enum": ["composite", "git.worktree"] } }, "required": ["kind"] },
+          "then": { "required": ["nodes"] }
+        },
+        {
+          "if": { "properties": { "kind": { "enum": ["docker.container", "podman.container"] } }, "required": ["kind"] },
+          "then": { "required": ["image"] }
+        }
+      ]
+    },
+    "containerImage": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "dockerfile": { "type": "string", "minLength": 1 },
+        "context": { "type": "string", "minLength": 1 }
+      }
+    },
     "pipelineStep": {
       "type": "object",
       "additionalProperties": false,
@@ -155,6 +221,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "kind": { "type": "string", "const": "composite" },
         "description": { "type": "string" },
         "branchStrategy": { "$ref": "#/$defs/branchStrategy" },
         "sandbox": { "$ref": "#/$defs/sandbox" },
@@ -163,13 +230,23 @@
           "type": "array",
           "items": { "type": "string" }
         },
+        "nodes": {
+          "type": "object",
+          "minProperties": 1,
+          "description": "Map-form concrete nodes. Node ids are the map keys.",
+          "additionalProperties": { "$ref": "#/$defs/concreteNode" }
+        },
         "steps": {
           "type": "array",
+          "deprecated": true,
           "items": { "$ref": "#/$defs/pipelineStep" },
           "minItems": 1
         }
       },
-      "required": ["steps"]
+      "anyOf": [
+        { "required": ["kind", "nodes"] },
+        { "required": ["steps"] }
+      ]
     },
     "chainStep": {
       "type": "object",

@@ -10,6 +10,9 @@
       "sandcastle@0.12.0 templates/sequential-reviewer",
       "sandcastle@0.12.0 templates/parallel-planner",
       "sandcastle@0.12.0 templates/parallel-planner-with-review"
+    ],
+    "compatibility": [
+      "legacy steps[] normalized to composite nodes"
     ]
   },
   "defaults": {
@@ -119,14 +122,16 @@
       "provider": "default",
       "model": "default",
       "sandbox": "default",
-      "systemPrompt": "You are the Agent Workflows reviewer role. Review branch diffs for correctness, regressions, and missing tests."
+      "systemPrompt": "You are the Agent Workflows reviewer role. Review branch diffs for correctness, regressions, and missing tests.",
+      "kind": "review"
     },
     "merger": {
       "role": "merger",
       "provider": "default",
       "model": "default",
       "sandbox": "default",
-      "systemPrompt": "You are the Agent Workflows merger role. Merge accepted branches, resolve conflicts conservatively, and summarize the result."
+      "systemPrompt": "You are the Agent Workflows merger role. Merge accepted branches, resolve conflicts conservatively, and summarize the result.",
+      "kind": "merge"
     }
   },
   "prompts": {
@@ -199,83 +204,86 @@
       "defaults": {
         "branchPolicy": "merge-to-head"
       },
-      "steps": [
-        {
-          "id": "run",
-          "kind": "runRole",
+      "kind": "composite",
+      "nodes": {
+        "run": {
+          "kind": "agent.pi",
           "prompt": "blank",
           "role": "worker"
         }
-      ]
+      }
     },
     "simple-loop": {
       "description": "Worker picks and closes one open Work Item at a time.",
       "defaults": {
         "branchPolicy": "merge-to-head"
       },
-      "steps": [
-        {
-          "id": "run",
-          "kind": "runRole",
+      "kind": "composite",
+      "nodes": {
+        "run": {
+          "kind": "agent.pi",
           "prompt": "simple-loop",
           "role": "worker"
         }
-      ]
+      }
     },
     "sequential-reviewer": {
       "description": "Implement one Work Item, then review the resulting branch.",
       "defaults": {
         "branchPolicy": "branch-per-run"
       },
-      "steps": [
-        {
-          "id": "implement",
-          "kind": "runRole",
+      "kind": "composite",
+      "nodes": {
+        "implement": {
+          "kind": "agent.pi",
           "prompt": "implement-work",
           "role": "implementer"
         },
-        {
-          "id": "review",
-          "kind": "review",
+        "review": {
+          "kind": "agent.pi",
+          "prompt": "review-work",
+          "role": "reviewer",
           "needs": [
             "implement"
-          ],
-          "prompt": "review-work",
-          "role": "reviewer"
+          ]
         }
-      ]
+      }
     },
     "parallel-planner": {
       "description": "Plan unblocked work, fan out implementation, then merge accepted branches.",
       "defaults": {
         "branchPolicy": "branch-per-run"
       },
-      "steps": [
-        {
-          "id": "plan",
-          "kind": "planWork",
+      "kind": "composite",
+      "nodes": {
+        "plan": {
+          "kind": "agent.pi",
           "prompt": "plan-work",
+          "role": "planner",
           "overrides": {
             "maxIterations": 1
           }
         },
-        {
-          "id": "implement",
-          "kind": "fanOut",
+        "implement": {
+          "kind": "loop",
+          "mode": "parallel",
+          "each": "$.nodes.plan.outputs.items",
+          "node": {
+            "kind": "git.worktree",
+            "nodes": {
+              "implement": {
+                "kind": "agent.pi",
+                "prompt": "implement-work",
+                "role": "implementer"
+              }
+            }
+          },
           "needs": [
             "plan"
-          ],
-          "over": "$.steps.plan.outputs.items",
-          "step": {
-            "id": "implement-one",
-            "kind": "runRole",
-            "prompt": "implement-work",
-            "role": "implementer"
-          }
+          ]
         },
-        {
-          "id": "merge",
-          "kind": "merge",
+        "merge": {
+          "kind": "git.merge",
           "needs": [
             "implement"
           ],
@@ -284,53 +292,61 @@
             "maxIterations": 1
           }
         }
-      ]
+      }
     },
     "parallel-planner-with-review": {
       "description": "Plan unblocked work, fan out implementation, review completed branches, then merge accepted branches.",
       "defaults": {
         "branchPolicy": "branch-per-run"
       },
-      "steps": [
-        {
-          "id": "plan",
-          "kind": "planWork",
+      "kind": "composite",
+      "nodes": {
+        "plan": {
+          "kind": "agent.pi",
           "prompt": "plan-work",
+          "role": "planner",
           "overrides": {
             "maxIterations": 1
           }
         },
-        {
-          "id": "implement",
-          "kind": "fanOut",
+        "implement": {
+          "kind": "loop",
+          "mode": "parallel",
+          "each": "$.nodes.plan.outputs.items",
+          "node": {
+            "kind": "git.worktree",
+            "nodes": {
+              "implement": {
+                "kind": "agent.pi",
+                "prompt": "implement-work",
+                "role": "implementer"
+              }
+            }
+          },
           "needs": [
             "plan"
-          ],
-          "over": "$.steps.plan.outputs.items",
-          "step": {
-            "id": "implement-one",
-            "kind": "runRole",
-            "prompt": "implement-work",
-            "role": "implementer"
-          }
+          ]
         },
-        {
-          "id": "review",
-          "kind": "fanOut",
+        "review": {
+          "kind": "loop",
+          "mode": "parallel",
+          "each": "$.nodes.implement.outputs.branches",
+          "node": {
+            "kind": "git.worktree",
+            "nodes": {
+              "review": {
+                "kind": "agent.pi",
+                "prompt": "review-work",
+                "role": "reviewer"
+              }
+            }
+          },
           "needs": [
             "implement"
-          ],
-          "over": "$.steps.implement.outputs.branches",
-          "step": {
-            "id": "review-one",
-            "kind": "review",
-            "prompt": "review-work",
-            "role": "reviewer"
-          }
+          ]
         },
-        {
-          "id": "merge",
-          "kind": "merge",
+        "merge": {
+          "kind": "git.merge",
           "needs": [
             "review"
           ],
@@ -339,21 +355,21 @@
             "maxIterations": 1
           }
         }
-      ]
+      }
     },
     "archive": {
       "description": "Archive or summarize terminal-state Work.",
       "defaults": {
         "branchPolicy": "merge-to-head"
       },
-      "steps": [
-        {
-          "id": "archive",
-          "kind": "runRole",
+      "kind": "composite",
+      "nodes": {
+        "archive": {
+          "kind": "agent.pi",
           "prompt": "archive-terminal-work",
           "role": "reviewer"
         }
-      ]
+      }
     }
   },
   "workSources": {

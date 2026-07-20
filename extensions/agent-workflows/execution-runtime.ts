@@ -40,10 +40,38 @@ export interface RuntimePrompt {
 }
 
 export interface RuntimePipeline {
+	kind?: "composite";
 	description?: string;
 	defaults?: Record<string, unknown>;
 	inputs?: Record<string, unknown>;
+	nodes: Record<string, RuntimePipelineNode>;
 	steps: RuntimePipelineStep[];
+}
+
+export interface RuntimeContainerImage {
+	name: string;
+	dockerfile?: string;
+	context?: string;
+}
+
+export interface RuntimePipelineNode {
+	kind: string;
+	needs?: string[];
+	role?: string;
+	prompt?: string;
+	promptOverride?: string;
+	workSource?: string;
+	issueTracker?: string;
+	each?: string;
+	mode?: "sequential" | "parallel";
+	max?: number;
+	node?: RuntimePipelineNode;
+	nodes?: Record<string, RuntimePipelineNode>;
+	image?: RuntimeContainerImage;
+	strategy?: string;
+	when?: string;
+	with?: Record<string, unknown>;
+	overrides?: Record<string, unknown>;
 }
 
 export interface RuntimePipelineStep {
@@ -108,16 +136,189 @@ export function validateExecutionRuntimePack(value: unknown): ExecutionRuntimePa
 	for (const [name, prompt] of Object.entries(pack.prompts || {})) {
 		if (!prompt?.template && !prompt?.file) errors.push(`prompt '${name}' must define template or file`);
 	}
+	const normalizedPack: ExecutionRuntimePack = {
+		...(pack as ExecutionRuntimePack),
+		pipelines: {},
+	};
 	for (const [name, pipeline] of Object.entries(pack.pipelines || {})) {
-		if (!Array.isArray(pipeline.steps) || pipeline.steps.length === 0) errors.push(`pipeline '${name}' must define steps`);
-		for (const step of pipeline.steps || []) validateStep(name, step, errors, pack as ExecutionRuntimePack);
+		normalizedPack.pipelines[name] = normalizePipeline(name, pipeline as Partial<RuntimePipeline>, errors, normalizedPack);
+	}
+	for (const [name, pipeline] of Object.entries(normalizedPack.pipelines || {})) {
+		validatePipeline(name, pipeline, errors, normalizedPack);
 	}
 	if (errors.length) throw new Error(`Invalid execution runtime pack:\n- ${errors.join("\n- ")}`);
-	return pack as ExecutionRuntimePack;
+	return normalizedPack;
 }
 
 const BUILT_IN_STEP_KINDS = new Set(["planWork", "runRole", "selectWork", "fanOut", "fanIn", "review", "merge", "postProcess", "gate"]);
+const BUILT_IN_NODE_KINDS = new Set(["composite", "loop", "agent.pi", "git.worktree", "git.merge", "docker.container", "podman.container"]);
 const PROVIDER_QUALIFIED_STEP_KIND = /^[a-z][a-z0-9-]*\.[A-Za-z][A-Za-z0-9_-]*$/;
+const PROVIDER_QUALIFIED_NODE_KIND = /^[a-z][a-z0-9-]*\.[a-z][a-z0-9_-]*$/;
+
+function normalizePipeline(scope: string, pipeline: Partial<RuntimePipeline>, errors: string[], pack: ExecutionRuntimePack): RuntimePipeline {
+	const hasSteps = Array.isArray(pipeline.steps) && pipeline.steps.length > 0;
+	const hasNodes = isRecord(pipeline.nodes) && Object.keys(pipeline.nodes).length > 0;
+	if (!hasSteps && !hasNodes) errors.push(`pipeline '${scope}' must define nodes or legacy steps`);
+	if (pipeline.kind && pipeline.kind !== "composite") errors.push(`pipeline '${scope}' kind must be composite`);
+	const nodes = hasNodes ? normalizeNodeMap(pipeline.nodes || {}) : legacyStepsToNodes(pipeline.steps || [], pack);
+	const steps = hasSteps ? (pipeline.steps || []) : nodesToLegacySteps(nodes, pack).filter(Boolean) as RuntimePipelineStep[];
+	return {
+		...pipeline,
+		kind: "composite",
+		nodes,
+		steps,
+	} as RuntimePipeline;
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeNodeMap(nodes: Record<string, RuntimePipelineNode>): Record<string, RuntimePipelineNode> {
+	return Object.fromEntries(Object.entries(nodes).map(([id, node]) => [id, normalizeNode(node)]));
+}
+
+function normalizeNode(node: RuntimePipelineNode): RuntimePipelineNode {
+	const normalized: RuntimePipelineNode = { ...node };
+	if (normalized.kind === "loop" && !normalized.mode) normalized.mode = "sequential";
+	if (normalized.nodes) normalized.nodes = normalizeNodeMap(normalized.nodes);
+	if (normalized.node) normalized.node = normalizeNode(normalized.node);
+	return normalized;
+}
+
+function legacyStepsToNodes(steps: RuntimePipelineStep[], pack: ExecutionRuntimePack): Record<string, RuntimePipelineNode> {
+	return Object.fromEntries(steps.map((step, index) => [step.id || `step-${index + 1}`, legacyStepToNode(step, pack)]));
+}
+
+function legacyStepToNode(step: RuntimePipelineStep, pack: ExecutionRuntimePack): RuntimePipelineNode {
+	const common = {
+		needs: step.needs,
+		prompt: step.prompt,
+		promptOverride: step.promptOverride,
+		workSource: step.workSource,
+		issueTracker: step.issueTracker,
+		strategy: step.strategy,
+		when: step.when,
+		with: step.with,
+		overrides: step.overrides,
+	};
+	if (step.kind === "fanOut") {
+		return normalizeNode({
+			kind: "loop",
+			needs: step.needs,
+			each: step.over,
+			mode: "parallel",
+			max: step.concurrency || step.limit,
+			node: step.step ? legacyStepToNode(step.step, pack) : undefined,
+			when: step.when,
+			with: step.with,
+			overrides: step.overrides,
+		});
+	}
+	if (step.kind === "merge") {
+		return normalizeNode({ kind: "git.merge", role: step.role, ...common });
+	}
+	if (step.kind === "planWork") {
+		return normalizeNode({ kind: "agent.pi", role: step.role || trySelectRuntimePlanWorkRoleName(pack), ...common });
+	}
+	return normalizeNode({ kind: "agent.pi", role: step.role, ...common });
+}
+
+function nodesToLegacySteps(nodes: Record<string, RuntimePipelineNode>, pack: ExecutionRuntimePack): Array<RuntimePipelineStep | undefined> {
+	return Object.entries(nodes).map(([id, node]) => nodeToLegacyStep(id, node, pack));
+}
+
+function nodeToLegacyStep(id: string, node: RuntimePipelineNode, pack: ExecutionRuntimePack): RuntimePipelineStep | undefined {
+	if (node.kind === "loop") {
+		const nested = node.node ? { id: `${id}-one`, node: node.node } : firstNode(node.nodes);
+		return {
+			id,
+			kind: "fanOut",
+			needs: node.needs,
+			over: node.each,
+			concurrency: node.mode === "parallel" ? node.max : undefined,
+			limit: node.mode !== "parallel" ? node.max : undefined,
+			step: nested ? nodeToLegacyStep(nested.id, nested.node, pack) : undefined,
+			when: node.when,
+			with: node.with,
+			overrides: node.overrides,
+		};
+	}
+	if (node.kind === "git.merge") {
+		return nodeToStep(id, node, "merge", node.role);
+	}
+	if (node.kind === "composite" || node.kind === "git.worktree") {
+		const nestedSteps = nodesToLegacySteps(node.nodes || {}, pack).filter(Boolean) as RuntimePipelineStep[];
+		return nestedSteps[0] ? { ...nestedSteps[0], id } : undefined;
+	}
+	if (node.kind === "agent.pi") {
+		const roleKind = node.role && node.role !== "default" ? pack.roles?.[node.role]?.kind : undefined;
+		const legacyKind = BUILT_IN_STEP_KINDS.has(String(roleKind)) ? String(roleKind) : "runRole";
+		return nodeToStep(id, node, legacyKind, legacyKind === "planWork" ? undefined : node.role);
+	}
+	if (PROVIDER_QUALIFIED_NODE_KIND.test(node.kind) && node.role) {
+		return nodeToStep(id, node, "runRole", node.role);
+	}
+	return undefined;
+}
+
+function nodeToStep(id: string, node: RuntimePipelineNode, kind: string, role?: string): RuntimePipelineStep {
+	return {
+		id,
+		kind,
+		needs: node.needs,
+		role,
+		prompt: node.prompt,
+		promptOverride: node.promptOverride,
+		workSource: node.workSource,
+		issueTracker: node.issueTracker,
+		strategy: node.strategy,
+		when: node.when,
+		with: node.with,
+		overrides: node.overrides,
+	};
+}
+
+function firstNode(nodes?: Record<string, RuntimePipelineNode>): { id: string; node: RuntimePipelineNode } | undefined {
+	const first = Object.entries(nodes || {})[0];
+	return first ? { id: first[0], node: first[1] } : undefined;
+}
+
+function trySelectRuntimePlanWorkRoleName(pack: ExecutionRuntimePack): string | undefined {
+	const matches = Object.entries(pack.roles || {}).filter(([, role]) => role?.kind === "planWork").map(([name]) => name);
+	return matches.length === 1 ? matches[0] : undefined;
+}
+
+function validatePipeline(scope: string, pipeline: RuntimePipeline, errors: string[], pack: ExecutionRuntimePack): void {
+	if (!pipeline.nodes || Object.keys(pipeline.nodes).length === 0) errors.push(`pipeline '${scope}' must define nodes`);
+	for (const [id, node] of Object.entries(pipeline.nodes || {})) validateNode(scope, id, node, errors, pack);
+	if (!Array.isArray(pipeline.steps) || pipeline.steps.length === 0) errors.push(`pipeline '${scope}' must define legacy-compatible steps`);
+	for (const step of pipeline.steps || []) validateStep(scope, step, errors, pack);
+}
+
+function validateNode(scope: string, id: string, node: RuntimePipelineNode, errors: string[], pack: ExecutionRuntimePack): void {
+	const nodeScope = `${scope}.${id}`;
+	if (!node.kind) errors.push(`${nodeScope} is missing kind`);
+	else if (!BUILT_IN_NODE_KINDS.has(node.kind) && !PROVIDER_QUALIFIED_NODE_KIND.test(node.kind)) errors.push(`${nodeScope} references unknown node kind '${node.kind}'`);
+	if (node.kind === "agent.pi") {
+		if (!node.role) errors.push(`${nodeScope} must reference a role`);
+		if (!node.prompt) errors.push(`${nodeScope} must reference a prompt`);
+	}
+	if (node.kind === "loop") {
+		if (!node.each) errors.push(`${nodeScope} loop must define each`);
+		if (node.mode && !["sequential", "parallel"].includes(node.mode)) errors.push(`${nodeScope} loop mode must be sequential or parallel`);
+		if (!node.node && (!node.nodes || Object.keys(node.nodes).length === 0)) errors.push(`${nodeScope} loop must define node or nodes`);
+	}
+	if (node.kind === "composite" || node.kind === "git.worktree") {
+		if (!node.nodes || Object.keys(node.nodes).length === 0) errors.push(`${nodeScope} ${node.kind} must define nodes`);
+	}
+	if ((node.kind === "docker.container" || node.kind === "podman.container") && !node.image?.name) errors.push(`${nodeScope} ${node.kind} image.name is required`);
+	if (node.image && "strategy" in (node.image as any)) errors.push(`${nodeScope} image.strategy is not supported; use image.name with optional dockerfile`);
+	if (node.role && node.role !== "default" && !pack.roles?.[node.role]) errors.push(`${nodeScope} references unknown role '${node.role}'`);
+	if (node.prompt && node.prompt !== "default" && !pack.prompts?.[node.prompt]) errors.push(`${nodeScope} references unknown prompt '${node.prompt}'`);
+	for (const [childId, child] of Object.entries(node.nodes || {})) validateNode(nodeScope, childId, child, errors, pack);
+	if (node.node) validateNode(nodeScope, "node", node.node, errors, pack);
+}
 
 function validateStep(scope: string, step: RuntimePipelineStep, errors: string[], pack: ExecutionRuntimePack): void {
 	if (!step.id) errors.push(`${scope} step is missing id`);
