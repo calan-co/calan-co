@@ -47,6 +47,7 @@ import { registerWorkCommands } from "./work-source.mjs";
 import { buildDefaultConfigText, configToYaml, packsToConfig } from "./pipeline-packs.mjs";
 import { renderWorkBrief } from "./work-brief.mjs";
 import { loadExecutionRuntimePack, listRuntimeAgents, listRuntimePipelines } from "./execution-runtime.ts";
+import { executeGraphWorkflow, type CompositeResult, type GraphNodeExecutionContext, type GraphWorkflowNode, type NodeResult } from "./graph-executor.ts";
 import {
 	runWorkProcess,
 	validateExecutablePlanArtifact,
@@ -3277,6 +3278,17 @@ interface PipelineRunStepRecord {
 	error?: string;
 }
 
+interface PipelineRunNodeRecord {
+	nodePath: string;
+	kind: string;
+	status: "completed" | "failed";
+	resultType?: string;
+	branch?: string;
+	commits?: string[];
+	logPath?: string;
+	effects?: string[];
+}
+
 interface PipelineRunRecord {
 	id: string;
 	kind?: "pipeline";
@@ -3284,6 +3296,7 @@ interface PipelineRunRecord {
 	prompt: string;
 	status: "running" | "completed" | "failed";
 	branchStrategy: PipelineBranchStrategy;
+	executor?: "legacy-steps" | "graph";
 	branch?: string;
 	worktreePath?: string;
 	logDir: string;
@@ -3291,6 +3304,8 @@ interface PipelineRunRecord {
 	startedAt: string;
 	completedAt?: string;
 	steps: PipelineRunStepRecord[];
+	nodes?: PipelineRunNodeRecord[];
+	result?: Record<string, unknown>;
 	error?: string;
 }
 
@@ -3303,6 +3318,7 @@ interface PipelineExecutionDeps {
 	onStepStreamEvent?: (step: PipelineRunStepRecord, event: unknown, record: PipelineRunRecord) => void;
 	image?: SandboxImageDeps;
 	now?: () => number;
+	forceLegacy?: boolean;
 }
 
 function sanitizePathSegment(value: string): string {
@@ -3369,6 +3385,64 @@ async function writePipelineRunRecord(record: PipelineRunRecord): Promise<void> 
 	writeFileSync(record.recordPath, JSON.stringify(record, null, 2));
 }
 
+function pipelineHasGraphNodes(pipeline: PipelineDef): boolean {
+	return pipeline.kind === "composite" && Boolean(pipeline.nodes && Object.keys(pipeline.nodes).length > 0);
+}
+
+function nodeResultStringArray(result: NodeResult, key: "commits" | "effects"): string[] {
+	const value = (result as any)[key];
+	return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0) : [];
+}
+
+function nodeResultLogPath(result: NodeResult): string | undefined {
+	const logPath = (result as any).logPath;
+	return typeof logPath === "string" && logPath.length ? logPath : undefined;
+}
+
+function nodeResultBranch(result: NodeResult): string | undefined {
+	const branch = (result as any).branch;
+	return typeof branch === "string" && branch.length ? branch : undefined;
+}
+
+function graphResultHasEffects(result: NodeResult): boolean {
+	if (nodeResultStringArray(result, "commits").length || nodeResultStringArray(result, "effects").length) return true;
+	if (result.type === "CompositeResult" || result.type === "WorkspaceResult") return Object.values((result as any).children || {}).some((child) => graphResultHasEffects(child as NodeResult));
+	if (result.type === "LoopResult") return ((result as any).iterations || []).some((child: NodeResult) => graphResultHasEffects(child));
+	return false;
+}
+
+function graphResultSummary(result: NodeResult): Record<string, unknown> {
+	return {
+		type: result.type,
+		status: result.status,
+		nodeId: result.nodeId,
+		kind: result.kind,
+		effects: nodeResultStringArray(result, "effects"),
+		commits: nodeResultStringArray(result, "commits"),
+	};
+}
+
+function collectGraphNodeRecords(result: NodeResult, path = "root"): PipelineRunNodeRecord[] {
+	const record: PipelineRunNodeRecord = {
+		nodePath: path,
+		kind: result.kind,
+		status: result.status === "succeeded" ? "completed" : "failed",
+		resultType: result.type,
+		...(nodeResultBranch(result) ? { branch: nodeResultBranch(result) } : {}),
+		...(nodeResultStringArray(result, "commits").length ? { commits: nodeResultStringArray(result, "commits") } : {}),
+		...(nodeResultLogPath(result) ? { logPath: nodeResultLogPath(result) } : {}),
+		...(nodeResultStringArray(result, "effects").length ? { effects: nodeResultStringArray(result, "effects") } : {}),
+	};
+	const children: PipelineRunNodeRecord[] = [];
+	if (result.type === "CompositeResult" || result.type === "WorkspaceResult") {
+		for (const [id, child] of Object.entries((result as any).children || {})) children.push(...collectGraphNodeRecords(child as NodeResult, `${path}.nodes.${id}`));
+	}
+	if (result.type === "LoopResult") {
+		for (const [index, child] of ((result as any).iterations || []).entries()) children.push(...collectGraphNodeRecords(child as NodeResult, `${path}.iterations.${index}`));
+	}
+	return [record, ...children];
+}
+
 export async function executePipeline(
 	cwd: string,
 	pipelineName: string,
@@ -3391,6 +3465,7 @@ export async function executePipeline(
 	const recordPath = join(runDir, "record.json");
 	const logDir = join(runDir, "logs");
 	const branchStrategy = resolvePipelineBranchStrategy(pipelineName, pipeline);
+	const useGraphExecutor = !deps.forceLegacy && pipelineHasGraphNodes(pipeline);
 	const createWorktreeImpl = deps.createWorktree || createWorktree;
 	const makePipelineAgent = deps.makeAgent;
 	const loadSandboxProvider = deps.loadSandboxProvider || loadPipelineSandboxProvider;
@@ -3401,6 +3476,7 @@ export async function executePipeline(
 		prompt,
 		status: "running",
 		branchStrategy,
+		executor: useGraphExecutor ? "graph" : "legacy-steps",
 		logDir,
 		recordPath,
 		startedAt: new Date(startedAtMs).toISOString(),
@@ -3417,6 +3493,100 @@ export async function executePipeline(
 		record.branch = worktree.branch;
 		record.worktreePath = worktree.worktreePath;
 		await writePipelineRunRecord(record);
+
+		if (useGraphExecutor) {
+			const runAgentNode = async (context: GraphNodeExecutionContext) => {
+				const node = context.node as PipelineNodeDef;
+				const roleName = node.role;
+				if (!roleName) throw new Error(`${context.path} agent node must reference a role`);
+				const role = cfg.agents[roleName];
+				if (!role) throw new Error(`${context.path} references unknown role '${roleName}'`);
+				const stepRecord: PipelineRunStepRecord = {
+					index: record.steps.length,
+					role: roleName,
+					status: "running",
+					maxIterations: Number.isInteger((node as any).maxIterations) ? Number((node as any).maxIterations) : cfg.maxIterations || 10,
+					commits: [],
+					logPath: buildPipelineStepLogPath(logDir, record.steps.length, roleName),
+				};
+				record.steps.push(stepRecord);
+				await writePipelineRunRecord(record);
+				deps.onStepUpdate?.(stepRecord, record);
+
+				const sandboxKind = (node as any).sandbox || role.sandbox || pipeline.sandbox || cfg.defaultSandbox || DEFAULT_SANDBOX;
+				await ensureSandboxImage(cwd, sandboxKind, deps.image, undefined, cfg);
+				const provider = role.provider || cfg.defaultAgent || "pi";
+				const model = resolvePipelineModelForProvider((node as any).model || role.model || pipeline.model || cfg.defaultModel, provider);
+				const hostPiRuntime = provider === "pi" ? createHostPiAgentRuntime() : undefined;
+				try {
+					const sandbox = await loadSandboxProvider(sandboxKind, hostPiRuntime ? hostPiSandboxOptions(cwd, cfg, hostPiRuntime) : { imageName: defaultSandcastleImageName(cwd, cfg.imageNamePattern) });
+					const template = node.promptOverride || resolvePromptText(cfg, node.prompt || "$INPUT");
+					const stepPromptBody = resolvePipelineStepPrompt(template, prompt, prompt);
+					const stepPrompt = role.systemPrompt ? `${role.systemPrompt}\n\n## Delegated task\n\n${stepPromptBody}` : stepPromptBody;
+					const result = await worktree!.run({
+						agent: makePipelineAgent ? makePipelineAgent(model, provider) : createAgentProviderForRuntime(model, provider, { hostPiRuntime, sandbox: sandboxKind, claudeCodeFactory: deps.claudeCode }),
+						sandbox,
+						prompt: stepPrompt,
+						maxIterations: stepRecord.maxIterations,
+						logging: {
+							type: "file",
+							path: stepRecord.logPath,
+							verbose: true,
+							onAgentStreamEvent: (event: unknown) => deps.onStepStreamEvent?.(stepRecord, event, record),
+						},
+					});
+
+					const commitShas = getPipelineCommitShas(result.commits);
+					stepRecord.status = "completed";
+					stepRecord.branch = result.branch;
+					stepRecord.commits = commitShas;
+					record.branch = result.branch || record.branch;
+					stepRecord.logPath = result.logFilePath || stepRecord.logPath;
+					await writePipelineRunRecord(record);
+					deps.onStepUpdate?.(stepRecord, record);
+					return {
+						branch: result.branch,
+						commits: commitShas,
+						logPath: result.logFilePath,
+						stdout: result.stdout,
+					};
+				} catch (error) {
+					stepRecord.status = "failed";
+					stepRecord.error = error instanceof Error ? error.message : String(error);
+					await writePipelineRunRecord(record);
+					deps.onStepUpdate?.(stepRecord, record);
+					throw error;
+				} finally {
+					if (hostPiRuntime?.dir) rmSync(hostPiRuntime.dir, { recursive: true, force: true });
+				}
+			};
+			const graphResult = await executeGraphWorkflow({ kind: "composite", nodes: pipeline.nodes } as GraphWorkflowNode, {
+				input: prompt,
+				handlers: {
+					agent: runAgentNode,
+					"agent.pi": runAgentNode,
+					script: async ({ node }) => ({ output: (node as any).run || (node as any).command || (node as any).with?.run }),
+					"git.worktree": async ({ children }) => {
+						const childResults = Object.values(children || {}) as NodeResult[];
+						const commits = childResults.flatMap((child) => nodeResultStringArray(child, "commits"));
+						const childEffects = childResults.flatMap((child) => nodeResultStringArray(child, "effects"));
+						return {
+							branch: record.branch,
+							worktreePath: record.worktreePath,
+							commits,
+							effects: [...commits.map((commit) => `commit:${commit}`), ...childEffects],
+						};
+					},
+				},
+			}) as CompositeResult;
+			record.nodes = collectGraphNodeRecords(graphResult);
+			record.result = graphResultSummary(graphResult);
+			if (!graphResultHasEffects(graphResult)) throw new Error("Graph pipeline completed without effects");
+			record.status = "completed";
+			record.completedAt = new Date(now()).toISOString();
+			await writePipelineRunRecord(record);
+			return record;
+		}
 
 		let input = prompt;
 		for (const [index, step] of pipeline.steps.entries()) {
@@ -4625,6 +4795,7 @@ Work views and processing:
 		try {
 			const pipelineRun = await executePipeline(cwd, input.pipeline, runtimePrompt, {
 				...deps.pipeline,
+				forceLegacy: true,
 				image: deps.pipeline?.image || deps.image,
 				onStepUpdate: (step, record) => {
 					updateWorkerStatus(step);
