@@ -109,6 +109,7 @@ function validateNeeds(path: string, node: Record<string, unknown>, siblingIds: 
 		addError(ctx, path, "needs must be a string or array of strings");
 		return [];
 	}
+	node.needs = needs;
 	for (const need of needs) {
 		if (!siblingIds?.has(need)) addError(ctx, path, `needs unknown sibling '${need}'`);
 	}
@@ -157,7 +158,10 @@ function validateNode(
 	}
 
 	if (kind && NODE_KINDS_WITH_CHILDREN.has(kind)) {
-		if ((kind === "composite" || kind === "loop" || kind === "git.worktree") && node.nodes === undefined) addError(ctx, path, "must define child nodes");
+		if (kind === "composite" || kind === "loop" || kind === "git.worktree") {
+			if (node.nodes === undefined) addError(ctx, path, "must define child nodes");
+			else if (isRecord(node.nodes) && Object.keys(node.nodes).length === 0) addError(ctx, path, "must define at least one child node");
+		}
 	} else if (node.nodes !== undefined) {
 		addError(ctx, path, "must not define child nodes");
 	}

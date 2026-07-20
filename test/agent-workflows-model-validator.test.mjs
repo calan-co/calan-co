@@ -50,6 +50,34 @@ test('rejects non-composite top-level workflows and non-map child nodes', () => 
   assert.match(result.errors.join('\n'), /root.nodes must be a map keyed by node id/);
 });
 
+test('requires child-owning nodes to define at least one child node', () => {
+  const result = validateWorkflowModel({
+    kind: 'composite',
+    nodes: {
+      emptyComposite: { kind: 'composite', nodes: {} },
+      emptyLoop: { kind: 'loop', each: '${items}', nodes: {} },
+      emptyWorkspace: { kind: 'git.worktree', nodes: {} },
+    },
+  });
+
+  assert.equal(result.valid, false);
+  assert.match(result.errors.join('\n'), /root.nodes.emptyComposite must define at least one child node/);
+  assert.match(result.errors.join('\n'), /root.nodes.emptyLoop must define at least one child node/);
+  assert.match(result.errors.join('\n'), /root.nodes.emptyWorkspace must define at least one child node/);
+});
+
+test('normalizes needs string shorthand to arrays in returned models', () => {
+  const workflow = assertValidWorkflowModel({
+    kind: 'composite',
+    nodes: {
+      prepare: { kind: 'script' },
+      implement: { kind: 'agent', needs: 'prepare' },
+    },
+  });
+
+  assert.deepEqual(workflow.nodes.implement.needs, ['prepare']);
+});
+
 test('requires every node to declare a concrete registered kind', () => {
   const result = validateWorkflowModel({
     kind: 'composite',
