@@ -70,6 +70,8 @@ export interface LegacyConfigLike {
 	defaultModel?: string;
 	defaultPipeline?: string;
 	defaultAgent?: string;
+	maxWorkers?: number;
+	maxIterations?: number;
 	workSource?: string;
 	issueTracker?: string;
 	imageNamePattern?: string;
@@ -149,6 +151,8 @@ export function runtimeToSandcastleConfig(pack = loadExecutionRuntimePack(), def
 	const defaultSandbox = normalizeSandbox(String(defaults.defaultSandbox || pack.defaults?.sandboxProvider || "docker"));
 	const defaultModel = String(defaults.defaultModel || pack.defaults?.model || "Agent Default");
 	const defaultAgent = String(defaults.defaultAgent || pack.defaults?.agentProvider || "pi");
+	const maxWorkers = Number(defaults.maxWorkers || pack.defaults?.maxWorkers || 5);
+	const maxIterations = Number(defaults.maxIterations || pack.defaults?.maxIterations || 10);
 	const agents: Record<string, any> = {};
 	const pipelines: Record<string, any> = {};
 	for (const [name, agent] of Object.entries(pack.roles)) {
@@ -156,7 +160,7 @@ export function runtimeToSandcastleConfig(pack = loadExecutionRuntimePack(), def
 			name,
 			description: agent.role ? `${agent.role} role` : `${name} role`,
 			kind: agent.kind,
-			provider: normalizeProvider(normalizeDefault(agent.provider, defaultAgent)),
+			provider: agent.provider && agent.provider !== "default" ? normalizeProvider(String(agent.provider)) : undefined,
 			model: agent.model && agent.model !== "default" ? String(agent.model) : undefined,
 			sandbox: agent.sandbox && agent.sandbox !== "default" ? normalizeSandbox(String(agent.sandbox)) : undefined,
 			systemPrompt: agent.systemPrompt,
@@ -179,6 +183,8 @@ export function runtimeToSandcastleConfig(pack = loadExecutionRuntimePack(), def
 		defaultModel,
 		defaultPipeline: defaults.defaultPipeline || "simple-loop",
 		defaultAgent,
+		maxWorkers,
+		maxIterations,
 		workSource: defaults.workSource || defaults.issueTracker || String(pack.defaults?.workSource || pack.defaults?.issueTracker || "github-issues"),
 		imageNamePattern: defaults.imageNamePattern || "sandcastle:<repo-dir-name>",
 		prompts: pack.prompts,
@@ -200,10 +206,10 @@ export function compileRuntimeSteps(steps: RuntimePipelineStep[], pack = loadExe
 			continue;
 		}
 		if (step.kind === "fanOut" && step.step && (step.step.kind === "runRole" || step.step.kind === "review")) {
-			compiled.push({ ...compileAgentStep(step.step, pack), maxIterations: step.concurrency || compileAgentStep(step.step, pack).maxIterations });
+			compiled.push(compileAgentStep(step.step, pack));
 			continue;
 		}
-		if (step.kind === "merge" && step.role) compiled.push(compileAgentStep(step as RuntimePipelineStep, pack));
+		if (step.kind === "merge") compiled.push(compileAgentStep({ ...step, role: step.role || "merger", prompt: step.prompt || "merge-work" } as RuntimePipelineStep, pack));
 	}
 	return compiled.length ? compiled : [{ role: Object.keys(pack.roles)[0], prompt: "$INPUT", maxIterations: 1 }];
 }
@@ -220,7 +226,7 @@ function compileAgentStep(step: RuntimePipelineStep, pack: ExecutionRuntimePack)
 		role: step.role,
 		description: `${step.role || "Step"} ${step.kind || "runRole"}`,
 		prompt: step.prompt || `$INPUT`,
-		maxIterations: Number(step.overrides?.maxIterations || agent.maxIterations || 1),
+		...(step.overrides?.maxIterations || agent.maxIterations ? { maxIterations: Number(step.overrides?.maxIterations || agent.maxIterations) } : {}),
 		copyToWorktree: agent.copyToWorktree,
 	};
 }

@@ -18,6 +18,100 @@ function makeFakeExtensionAPI() {
   };
 }
 
+test('/work:run honors explicit role provider even when it differs from defaultAgent', async () => {
+  const repoDir = await mkdtemp(join(tmpdir(), 'agent-workflows-sc-run-explicit-provider-'));
+  try {
+    const configDir = join(repoDir, '.pi', 'sandcastle');
+    await mkdir(configDir, { recursive: true });
+    await writeFile(
+      join(configDir, 'config.yaml'),
+      [
+        'defaultAgent: pi',
+        'defaultModel: Agent Default',
+        'roles:',
+        '  planner:',
+        '    kind: planWork',
+        '    provider: claude-code',
+        '    model: Agent Default',
+        '    sandbox: no-sandbox',
+        '',
+      ].join('\n'),
+    );
+
+    const calls = [];
+    const sandcastle = {
+      makeAgent(model, provider) {
+        calls.push({ type: 'makeAgent', model, provider });
+        return { model, provider };
+      },
+      makeSandbox(kind) { return { kind }; },
+      async run() { return { iterations: [], stdout: '', commits: [], branch: 'feature/sc-run' }; },
+    };
+    const fakePi = makeFakeExtensionAPI();
+    agentWorkflows(fakePi, { sandcastle, now: () => 1700000000000, randomId: () => 'run-explicit-provider' });
+
+    await fakePi.commands.get('work:run').handler('planner Create a plan', {
+      cwd: repoDir,
+      ui: { notify() {}, setWidget() {} },
+    });
+
+    assert.deepEqual(calls[0], { type: 'makeAgent', model: 'claude-opus-4-8', provider: 'claude-code' });
+  } finally {
+    await rm(repoDir, { recursive: true, force: true });
+  }
+});
+
+test('/work:run uses host Pi provider defaults when configured for the pi provider', async () => {
+  const repoDir = await mkdtemp(join(tmpdir(), 'agent-workflows-sc-run-pi-provider-'));
+  const hostPiDir = await mkdtemp(join(tmpdir(), 'agent-workflows-sc-run-host-pi-'));
+  const previousHostPiDir = process.env.PI_HOST_AGENT_DIR;
+  try {
+    const configDir = join(repoDir, '.pi', 'sandcastle');
+    await mkdir(configDir, { recursive: true });
+    await writeFile(join(hostPiDir, 'settings.json'), JSON.stringify({ defaultProvider: 'azure-openai-responses', defaultModel: 'host-pi-model' }), 'utf8');
+    process.env.PI_HOST_AGENT_DIR = hostPiDir;
+    await writeFile(
+      join(configDir, 'config.yaml'),
+      [
+        'defaultAgent: pi',
+        'defaultModel: Agent Default',
+        'roles:',
+        '  worker:',
+        '    provider: pi',
+        '    model: Agent Default',
+        '    sandbox: no-sandbox',
+        '',
+      ].join('\n'),
+    );
+
+    const calls = [];
+    const sandcastle = {
+      makeAgent() { throw new Error('pi provider should use shared host Pi agent factory'); },
+      makeSandbox() { throw new Error('pi provider should use shared host Pi sandbox setup'); },
+      async run(options) {
+        calls.push(options.agent.buildPrintCommand({ prompt: options.prompt }).command);
+        return { iterations: [], stdout: '', commits: [], branch: 'feature/sc-run-pi', logFilePath: options.logging.path };
+      },
+    };
+    const fakePi = makeFakeExtensionAPI();
+    agentWorkflows(fakePi, { sandcastle, now: () => 1700000000000, randomId: () => 'run-pi-provider' });
+
+    await fakePi.commands.get('work:run').handler('worker Use host pi', {
+      cwd: repoDir,
+      ui: { notify() {}, setWidget() {} },
+    });
+
+    assert.match(calls[0], /pi -p --mode json --no-session/);
+    assert.match(calls[0], /--provider 'azure-openai-responses'/);
+    assert.match(calls[0], /--model 'host-pi-model'/);
+  } finally {
+    if (previousHostPiDir === undefined) delete process.env.PI_HOST_AGENT_DIR;
+    else process.env.PI_HOST_AGENT_DIR = previousHostPiDir;
+    await rm(repoDir, { recursive: true, force: true });
+    await rm(hostPiDir, { recursive: true, force: true });
+  }
+});
+
 test('issue 00003 registers /work:run and uses the injected Sandcastle capability', async () => {
   const repoDir = await mkdtemp(join(tmpdir(), 'agent-workflows-sc-run-'));
   try {

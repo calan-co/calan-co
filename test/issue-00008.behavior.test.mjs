@@ -223,6 +223,294 @@ Preserve this exact markdown body.
   }
 });
 
+test('work:process reports one worker row per pipeline step in the plan-style completion summary', async () => {
+  const cwd = mkdtempSync(join(os.tmpdir(), 'pi-work-process-worker-status-'));
+  try {
+    mkdirSync(join(cwd, '.pi', 'sandcastle'), { recursive: true });
+    mkdirSync(join(cwd, 'backlog'), { recursive: true });
+    writeFileSync(join(cwd, '.pi', 'sandcastle', 'config.yaml'), [
+      'defaultPipeline: implement',
+      'defaultSandbox: no-sandbox',
+      'defaultModel: test-model',
+      'roles:',
+      '  researcher:',
+      '    provider: claude-code',
+      '    model: test-model',
+      '    sandbox: no-sandbox',
+      '  builder:',
+      '    provider: claude-code',
+      '    model: test-model',
+      '    sandbox: no-sandbox',
+      'pipelines:',
+      '  implement:',
+      '    sandbox: no-sandbox',
+      '    steps:',
+      '      - role: researcher',
+      '        prompt: $INPUT',
+      '      - role: builder',
+      '        prompt: $INPUT',
+    ].join('\n'));
+    writeFileSync(join(cwd, 'backlog', '00008-work.md'), `---\nid: wi-00008\ntitle: Worker Status\ntags:\n  - afk\n---\n\n## Goal\n\nReport workers.`);
+
+    const commands = new Map();
+    const events = new Map();
+    const widgets = [];
+    const notifications = [];
+    agentWorkflows({
+      registerCommand(name, spec) { commands.set(name, spec); },
+      on(name, handler) { events.set(name, handler); },
+      registerTool() {},
+    }, {
+      pipeline: {
+        now: () => 1700000004000,
+        createWorktree: async () => ({
+          branch: 'sandcastle/implement',
+          worktreePath: join(cwd, '.pi/sandcastle/worktrees/implement'),
+          close: async () => ({}),
+          run: async (options) => {
+            options.logging.onAgentStreamEvent?.({ type: 'raw', line: '{"type":"message_update","assistantMessageEvent":{"type":"thinking_start","contentIndex":0,"partial":{"role":"assistant"}}}', iteration: 1, timestamp: new Date() });
+            options.logging.onAgentStreamEvent?.({ type: 'toolCall', name: options.logging.path.includes('researcher') ? 'Search' : 'Bash', formattedArgs: '{}', iteration: 1, timestamp: new Date() });
+            return {
+              iterations: [],
+              commits: [{ sha: options.prompt.includes('Research') ? 'research-sha' : 'build-sha' }],
+              branch: 'sandcastle/implement',
+              stdout: '',
+              logFilePath: options.logging.path,
+            };
+          },
+        }),
+        loadSandboxProvider: async (kind) => ({ kind }),
+      },
+    });
+
+    const ctx = {
+      cwd,
+      ui: {
+        notify(message, type) { notifications.push({ message, type }); },
+        setWidget(id, lines) { widgets.push({ id, lines }); },
+      },
+    };
+    await events.get('session_start')?.({}, ctx);
+    await commands.get('work:process').handler('status', ctx);
+
+    const message = notifications.at(-1).message;
+    assert.match(message, /^Work process done:/);
+    assert.match(message, /Pipeline: implement/);
+    assert.match(message, /Worker 1: researcher completed/);
+    assert.match(message, /Worker 2: builder completed/);
+    assert.ok(widgets.some((entry) => entry.lines.some((line) => /running\s+researcher.*tool: Search/.test(line))));
+    assert.ok(widgets.some((entry) => entry.lines.some((line) => /running\s+builder.*tool: Bash/.test(line))));
+    assert.equal(widgets.some((entry) => entry.lines.some((line) => /running\s+researcher\s+\d+s · running$/.test(line))), false);
+    assert.equal(widgets.some((entry) => entry.lines.some((line) => /\{"type":"message_update"/.test(line))), false);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('work:process does not mark later pipeline workers running before their step starts', async () => {
+  const cwd = mkdtempSync(join(os.tmpdir(), 'pi-work-process-worker-sequential-status-'));
+  try {
+    mkdirSync(join(cwd, '.pi', 'sandcastle'), { recursive: true });
+    mkdirSync(join(cwd, 'backlog'), { recursive: true });
+    writeFileSync(join(cwd, '.pi', 'sandcastle', 'config.yaml'), [
+      'defaultPipeline: implement',
+      'defaultSandbox: no-sandbox',
+      'defaultModel: test-model',
+      'roles:',
+      '  researcher:',
+      '    provider: claude-code',
+      '    model: test-model',
+      '    sandbox: no-sandbox',
+      '  builder:',
+      '    provider: claude-code',
+      '    model: test-model',
+      '    sandbox: no-sandbox',
+      'pipelines:',
+      '  implement:',
+      '    sandbox: no-sandbox',
+      '    steps:',
+      '      - role: researcher',
+      '        prompt: $INPUT',
+      '      - role: builder',
+      '        prompt: $INPUT',
+    ].join('\n'));
+    writeFileSync(join(cwd, 'backlog', '00008-work.md'), `---\nid: wi-00008\ntitle: Worker Status\ntags:\n  - afk\n---\n\n## Goal\n\nReport workers.`);
+
+    const commands = new Map();
+    const events = new Map();
+    const widgets = [];
+    let firstRunStartedWidget;
+    agentWorkflows({
+      registerCommand(name, spec) { commands.set(name, spec); },
+      on(name, handler) { events.set(name, handler); },
+      registerTool() {},
+    }, {
+      pipeline: {
+        now: () => 1700000005000,
+        createWorktree: async () => ({
+          branch: 'sandcastle/implement',
+          worktreePath: join(cwd, '.pi/sandcastle/worktrees/implement'),
+          close: async () => ({}),
+          run: async (options) => {
+            if (!firstRunStartedWidget) firstRunStartedWidget = widgets.at(-1)?.lines || [];
+            return { iterations: [], commits: [], branch: 'sandcastle/implement', stdout: '', logFilePath: options.logging.path };
+          },
+        }),
+        loadSandboxProvider: async (kind) => ({ kind }),
+      },
+    });
+
+    const ctx = {
+      cwd,
+      ui: {
+        notify() {},
+        setWidget(id, lines) { widgets.push({ id, lines }); },
+      },
+    };
+    await events.get('session_start')?.({}, ctx);
+    await commands.get('work:process').handler('status', ctx);
+
+    assert.ok(firstRunStartedWidget.some((line) => /running\s+researcher/.test(line)), 'first worker should be running when the first Sandcastle run starts');
+    assert.ok(firstRunStartedWidget.some((line) => /queued\s+builder/.test(line)), 'later workers should be present as queued to keep the widget layout stable');
+    assert.equal(firstRunStartedWidget.some((line) => /running\s+builder/.test(line)), false, 'later workers must not appear running before their step starts');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('work:process prunes completed worker rows before starting another process', async () => {
+  const cwd = mkdtempSync(join(os.tmpdir(), 'pi-work-process-prune-workers-'));
+  try {
+    mkdirSync(join(cwd, '.pi', 'sandcastle'), { recursive: true });
+    writeFileSync(join(cwd, '.pi', 'sandcastle', 'config.yaml'), [
+      'defaultPipeline: implement',
+      'defaultSandbox: no-sandbox',
+      'roles:',
+      '  planner:',
+      '    provider: claude-code',
+      '    sandbox: no-sandbox',
+      'pipelines:',
+      '  implement:',
+      '    sandbox: no-sandbox',
+      '    steps:',
+      '      - role: planner',
+      '        prompt: $INPUT',
+    ].join('\n'));
+
+    const commands = new Map();
+    const events = new Map();
+    const widgets = [];
+    agentWorkflows({
+      registerCommand(name, spec) { commands.set(name, spec); },
+      on(name, handler) { events.set(name, handler); },
+      registerTool() {},
+    }, {
+      work: {
+        plan: async (_cwd, query) => ({ query, iterations: [{ items: [{ id: query || 'wi', title: query || 'Work', tags: [], sourcePath: `backlog/${query || 'wi'}.md` }] }] }),
+      },
+      pipeline: {
+        now: () => 1700000007000,
+        createWorktree: async () => ({
+          branch: 'sandcastle/implement',
+          worktreePath: join(cwd, '.pi/sandcastle/worktrees/implement'),
+          close: async () => ({}),
+          run: async () => ({ iterations: [], commits: [], branch: 'sandcastle/implement', stdout: '', logFilePath: join(cwd, 'log.txt') }),
+        }),
+        loadSandboxProvider: async (kind) => ({ kind }),
+      },
+    });
+
+    const ctx = { cwd, ui: { notify() {}, setWidget(id, lines) { widgets.push({ id, lines }); } } };
+    const originalNow = Date.now;
+    let now = 1700000007000;
+    Date.now = () => now;
+    try {
+      await events.get('session_start')?.({}, ctx);
+      await commands.get('work:process').handler('first', ctx);
+      const doneLine = widgets.at(-1).lines.find((line) => /done\s+planner/.test(line));
+      now += 60000;
+      await events.get('session_start')?.({}, ctx);
+      const refreshedDoneLine = widgets.at(-1).lines.find((line) => /done\s+planner/.test(line));
+      assert.equal(refreshedDoneLine, doneLine, 'terminal worker row age should not keep ticking');
+      await commands.get('work:process').handler('second', ctx);
+    } finally {
+      Date.now = originalNow;
+    }
+
+    const lastLines = widgets.at(-1).lines;
+    assert.match(lastLines[0], /^Execution workers: 1/);
+    assert.equal(lastLines.filter((line) => /planner/.test(line)).length, 1);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('work:process preallocates max implementer rows for parallel pipeline steps', async () => {
+  const cwd = mkdtempSync(join(os.tmpdir(), 'pi-work-process-parallel-implementers-'));
+  try {
+    mkdirSync(join(cwd, '.pi', 'sandcastle'), { recursive: true });
+    writeFileSync(join(cwd, '.pi', 'sandcastle', 'config.yaml'), [
+      'defaultPipeline: implement',
+      'defaultSandbox: no-sandbox',
+      'maxWorkers: 4',
+      'maxIterations: 100',
+      'roles:',
+      '  implementer:',
+      '    provider: claude-code',
+      '    sandbox: no-sandbox',
+      'pipelines:',
+      '  implement:',
+      '    sandbox: no-sandbox',
+      '    steps:',
+      '      - role: implementer',
+      '        prompt: $INPUT',
+    ].join('\n'));
+
+    const commands = new Map();
+    const events = new Map();
+    const widgets = [];
+    let firstRunStartedWidget;
+    agentWorkflows({
+      registerCommand(name, spec) { commands.set(name, spec); },
+      on(name, handler) { events.set(name, handler); },
+      registerTool() {},
+    }, {
+      work: {
+        plan: async () => ({ query: 'parallel', iterations: [{ supportsParallel: true, items: [
+          { id: 'wi-1', title: 'First', tags: [], sourcePath: 'backlog/wi-1.md' },
+          { id: 'wi-2', title: 'Second', tags: [], sourcePath: 'backlog/wi-2.md' },
+        ] }] }),
+      },
+      pipeline: {
+        now: () => 1700000006000,
+        createWorktree: async () => ({
+          branch: 'sandcastle/implement',
+          worktreePath: join(cwd, '.pi/sandcastle/worktrees/implement'),
+          close: async () => ({}),
+          run: async () => {
+            if (!firstRunStartedWidget) firstRunStartedWidget = widgets.at(-1)?.lines || [];
+            return { iterations: [], commits: [], branch: 'sandcastle/implement', stdout: '', logFilePath: join(cwd, 'log.txt') };
+          },
+        }),
+        loadSandboxProvider: async (kind) => ({ kind }),
+      },
+    });
+
+    const ctx = { cwd, ui: { notify() {}, setWidget(id, lines) { widgets.push({ id, lines }); } } };
+    await events.get('session_start')?.({}, ctx);
+    await commands.get('work:process').handler('parallel', ctx);
+
+    assert.match(firstRunStartedWidget[0], /^Execution workers: 4/);
+    const implementerRows = firstRunStartedWidget.filter((line) => /running\s+implementer/.test(line));
+    assert.equal(implementerRows.length, 4);
+    assert.ok(firstRunStartedWidget.some((line) => /wi-1|started step/.test(line)));
+    assert.ok(firstRunStartedWidget.some((line) => /wi-2|started step/.test(line)));
+    assert.ok(firstRunStartedWidget.some((line) => /iter 0\/100: started step/.test(line)));
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test('work:process selects pipeline deterministically and writes durable run records', () => {
   const { calls, records, notifications } = runBacklogProcessFixture();
   const byQuery = new Map(records.map((record) => [record.query, record]));

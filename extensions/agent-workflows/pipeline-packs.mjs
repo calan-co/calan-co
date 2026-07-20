@@ -8,6 +8,10 @@ function yamlScalar(value) {
   return text;
 }
 
+function yamlModelScalar(value) {
+  return yamlScalar(value ?? 'Agent Default');
+}
+
 function yamlBlock(text, indent = 6) {
   const pad = ' '.repeat(indent);
   return `|\n${String(text || '').split('\n').map((line) => `${pad}${line}`).join('\n')}`;
@@ -32,9 +36,11 @@ export function configToYaml(config) {
     '',
     'runtimeVersion: 1',
     `defaultSandbox: ${yamlScalar(config.defaultSandbox)}`,
-    `defaultModel: ${yamlScalar(config.defaultModel)}`,
+    `defaultModel: ${yamlModelScalar(config.defaultModel)}`,
     `defaultPipeline: ${yamlScalar(config.defaultPipeline)}`,
     `defaultAgent: ${yamlScalar(config.defaultAgent)}`,
+    `maxWorkers: ${yamlScalar(config.maxWorkers || 5)}`,
+    `maxIterations: ${yamlScalar(config.maxIterations || 10)}`,
     `workSource: ${yamlScalar(config.workSource || config.issueTracker)}`,
     ...(config.workSourceSetupCommand || config.issueTrackerSetupCommand ? [`workSourceSetupCommand: ${yamlScalar(config.workSourceSetupCommand || config.issueTrackerSetupCommand)}`] : []),
     `imageNamePattern: ${yamlScalar(config.imageNamePattern || 'sandcastle:<repo-dir-name>')}`,
@@ -89,9 +95,11 @@ export function buildDefaultConfigText(defaults = {}) {
     '',
     'runtimeVersion: 1',
     `defaultSandbox: ${yamlScalar(cfg.defaultSandbox)}`,
-    `defaultModel: ${yamlScalar(cfg.defaultModel)}`,
+    `defaultModel: ${yamlModelScalar(cfg.defaultModel)}`,
     `defaultPipeline: ${yamlScalar(cfg.defaultPipeline)}`,
     `defaultAgent: ${yamlScalar(cfg.defaultAgent)}`,
+    `maxWorkers: ${yamlScalar(cfg.maxWorkers || 5)}`,
+    `maxIterations: ${yamlScalar(cfg.maxIterations || 10)}`,
     `workSource: ${yamlScalar(cfg.workSource || cfg.issueTracker)}`,
     ...(cfg.workSourceSetupCommand || cfg.issueTrackerSetupCommand ? [`workSourceSetupCommand: ${yamlScalar(cfg.workSourceSetupCommand || cfg.issueTrackerSetupCommand)}`] : []),
     `imageNamePattern: ${yamlScalar(cfg.imageNamePattern || 'sandcastle:<repo-dir-name>')}`,

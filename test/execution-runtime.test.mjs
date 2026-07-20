@@ -59,7 +59,9 @@ test('runtime compiler converts deterministic runtime pipelines to legacy execut
   assert.equal(cfg.defaultSandbox, 'podman');
   assert.equal(cfg.defaultPipeline, 'archive');
   assert.equal(cfg.defaultAgent, 'claude-code');
-  assert.equal(cfg.agents.planner.provider, 'claude-code');
+  assert.equal(cfg.maxWorkers, 5);
+  assert.equal(cfg.maxIterations, 10);
+  assert.equal(cfg.agents.planner.provider, undefined);
   assert.equal(cfg.agents.planner.sandbox, undefined);
   assert.equal(cfg.pipelines.archive.sandbox, undefined);
   assert.ok(cfg.agents.planner.systemPrompt.includes('planner'));
@@ -67,6 +69,9 @@ test('runtime compiler converts deterministic runtime pipelines to legacy execut
   assert.equal(cfg.pipelines['parallel-planner'].steps[0].kind, 'planWork');
   assert.equal(cfg.pipelines['parallel-planner'].steps[0].role, 'planner');
   assert.equal(cfg.pipelines['parallel-planner'].steps[1].role, 'implementer');
+  assert.equal(cfg.pipelines['parallel-planner'].steps[1].maxIterations, undefined);
+  assert.equal(cfg.pipelines['parallel-planner'].steps[1].concurrency, undefined);
+  assert.equal(cfg.pipelines['parallel-planner-with-review'].steps.at(-1).role, 'merger');
   assert.equal(compileRuntimeSteps([{ id: 'plan', kind: 'planWork', prompt: 'plan-work' }], pack)[0].role, 'planner');
   assert.equal(compileRuntimeSteps([{ id: 'noop', kind: 'gate' }], pack)[0].prompt, '$INPUT');
 });
@@ -75,7 +80,7 @@ test('configToYaml renders compiled runtime roles and pipelines', () => {
   const yaml = configToYaml(packsToConfig());
   assert.match(yaml, /^roles:/m);
   assert.match(yaml, /^  implementer:/m);
-  assert.match(yaml, /provider: claude-code/);
+  assert.doesNotMatch(yaml, /^    provider:/m);
   assert.match(yaml, /systemPrompt: \|\n      You are the Agent Workflows implementer role/s);
   assert.doesNotMatch(yaml, /^    sandbox: docker/m);
   assert.match(yaml, /^pipelines:/m);
@@ -84,5 +89,10 @@ test('configToYaml renders compiled runtime roles and pipelines', () => {
   assert.match(yaml, /template: \|\n      Inspect the configured Work Source/s);
   assert.doesNotMatch(yaml, /configured issue tracker|next open task|selected work item/);
   assert.match(yaml, /kind: planWork\n        role: planner\n        description: planner planWork\n        prompt: plan-work/);
+  assert.match(yaml, /role: merger\n        description: merger merge\n        prompt: merge-work/);
+  assert.match(yaml, /^maxWorkers: 5/m);
+  assert.match(yaml, /^maxIterations: 10/m);
+  assert.doesNotMatch(yaml, /role: implementer[\s\S]{0,120}maxIterations:/);
+  assert.doesNotMatch(yaml, /concurrency:/);
   assert.doesNotMatch(yaml, /^teams:/m);
 });

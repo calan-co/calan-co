@@ -4,9 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import agentWorkflows, {
-  createPlannerSnapshot,
   normalizeWorkPlanArtifact,
   parseSimpleYaml,
+  validateSandcastleWorkspaceSource,
   selectPlanWorkRoleName,
   validateWorkPlanArtifact,
 } from '../extensions/agent-workflows/index.ts';
@@ -47,8 +47,8 @@ test('/work:plan runs planning phase and caches authoritative plan output', asyn
   agentWorkflows(pi, {
     work: {
       now: () => 123456,
-      async runPlanWorkRole({ cwd: repo, args, role, snapshotCwd }) {
-        calls.push({ repo, args, role, snapshotHasMarker: existsSync(join(snapshotCwd, '.agent-workflows-planner-snapshot')) });
+      async runPlanWorkRole({ cwd: repo, args, role, task }) {
+        calls.push({ repo, args, role, task });
         return { summary: 'Planner classified implementation first.', iterations: [{ items: [{ id: 'wi-001' }], classifications: { risk: 'low' }, rationale: 'Ready to execute.' }] };
       },
     },
@@ -59,7 +59,14 @@ test('/work:plan runs planning phase and caches authoritative plan output', asyn
     ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
   });
 
-  assert.deepEqual(calls, [{ repo: cwd, args: '--iterations=2', role: 'planner', snapshotHasMarker: true }]);
+  assert.equal(calls.length, 1);
+  assert.deepEqual({ repo: calls[0].repo, args: calls[0].args, role: calls[0].role }, { repo: cwd, args: '--iterations=2', role: 'planner' });
+  assert.match(calls[0].task, /isolated planner workspace/);
+  assert.match(calls[0].task, /Max workers available for a single parallel iteration: 5/);
+  assert.match(calls[0].task, /unblocked-ready-AFK work/);
+  assert.match(calls[0].task, /items array of objects/);
+  assert.match(calls[0].task, /rationale must be a string/);
+  assert.doesNotMatch(calls[0].task, /disposable planner snapshot/);
   assert.match(notifications[0].message, /Planner classified implementation first/);
   assert.match(notifications[0].message, /Cached plan: plan-/);
   const planId = notifications[0].message.match(/Cached plan: (\S+)/)[1];
@@ -84,34 +91,54 @@ roles:
   assert.throws(() => selectPlanWorkRoleName(parseSimpleYaml('roles:\n  planner:\n    provider: pi\n')), /kind: planWork/);
 });
 
-test('/work:plan dispatches planner snapshots through the normal sandbox workspace path', async () => {
+test('/work:plan dispatches planWork through the normal sandbox workspace path', async () => {
   const source = readFileSync(new URL('../extensions/agent-workflows/index.ts', import.meta.url), 'utf8');
-  assert.match(source, /dispatch\(ctx\.cwd, agent, task, ctx, \{ executionCwd: snapshotCwd, branchPrefix: "agent-workflows\/planner" \}\)/);
+  assert.match(source, /dispatch\(ctx\.cwd, agent, task, ctx, \{ branchPrefix: "agent-workflows\/planner" \}\)/);
   assert.doesNotMatch(source, /readOnly: true/);
+  assert.doesNotMatch(source, /createPlannerSnapshot/);
+  assert.doesNotMatch(source, /executionCwd: snapshotCwd/);
   assert.match(source, /imageName: defaultSandcastleImageName\(cwd, cfg\.imageNamePattern\)/);
 });
 
-test('createPlannerSnapshot creates a disposable git repo without host-private state', async () => {
+test('Sandcastle workspace source validation rejects unborn git repositories clearly', async () => {
   const cwd = makeRepo();
-  mkdirSync(join(cwd, '.git'), { recursive: true });
-  mkdirSync(join(cwd, '.pi', 'sandcastle'), { recursive: true });
-  await import('node:fs').then(({ writeFileSync }) => {
-    writeFileSync(join(cwd, 'README.md'), '# Test repo\n');
-    writeFileSync(join(cwd, '.pi', 'secret.txt'), 'do not copy\n');
-  });
+  await import('node:child_process').then(({ execFileSync }) => execFileSync('git', ['init', '--quiet'], { cwd }));
 
-  const snapshot = createPlannerSnapshot(cwd);
-  try {
-    assert.equal(existsSync(join(snapshot, 'README.md')), true);
-    assert.equal(existsSync(join(snapshot, '.agent-workflows-planner-snapshot')), true);
-    assert.equal(existsSync(join(snapshot, '.git')), true);
-    assert.equal(existsSync(join(snapshot, '.pi')), false);
-    assert.equal(existsSync(join(snapshot, '.sandcastle')), false);
-    const head = await import('node:child_process').then(({ execFileSync }) => execFileSync('git', ['rev-parse', '--verify', 'HEAD'], { cwd: snapshot, encoding: 'utf8' }).trim());
-    assert.match(head, /^[0-9a-f]{40}$/);
-  } finally {
-    await import('node:fs').then(({ rmSync }) => rmSync(snapshot, { recursive: true, force: true }));
-  }
+  assert.deepEqual(validateSandcastleWorkspaceSource(cwd), [
+    'Repository has no HEAD commit. Sandcastle workspaces require at least one commit before any role can run; create an initial commit, then retry.',
+  ]);
+});
+
+test('pi provider uses writable temp agent dir with readonly host auth and trust mounts', async () => {
+  const source = readFileSync(new URL('../extensions/agent-workflows/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /if \(provider === "pi" && \(!model \|\| model === "Agent Default"\)\) return "Agent Default"/);
+  assert.match(source, /hostPiConfig: runtime\.provider === "pi"/);
+  assert.doesNotMatch(source, /sandboxPath: "\/home\/agent\/.pi\/agent"/);
+  assert.doesNotMatch(source, /copyFileSync\(source, join\(tmp, file\)\)/);
+  assert.match(source, /hostPiFileMounts/);
+  assert.match(source, /HOST_PI_SANDBOX_DIR = "\/home\/agent\/.pi-host-agent"/);
+  assert.match(source, /sandboxPath: `\$\{HOST_PI_SANDBOX_DIR\}\/auth\.json`, readonly: true/);
+  assert.match(source, /sandboxPath: `\$\{HOST_PI_SANDBOX_DIR\}\/trust\.json`, readonly: true/);
+  assert.match(source, /sandboxPath: HOST_PI_SANDBOX_DIR, readonly: false/);
+  assert.match(source, /function readHostPiDefaults\(\)/);
+  assert.match(source, /process\.env\.PI_CODING_AGENT_DIR \|\| process\.env\.PI_HOST_AGENT_DIR/);
+  assert.match(source, /captureSessions: false/);
+  assert.match(source, /sessionStorage: undefined/);
+  assert.match(source, /function summarizePiJsonLine\(line\)/);
+  assert.match(source, /message_start/);
+  assert.match(source, /message_update/);
+  assert.match(source, /return undefined/);
+  assert.match(source, /function extractPlanObject\(assistantTexts, stdout\)/);
+  assert.match(source, /outputKind: agent\.kind === "planWork" \? "work-plan" : undefined/);
+  assert.match(source, /if \(job\.outputKind === "work-plan"\)/);
+  assert.match(source, /writeFileSync\(resultPath, JSON\.stringify\(plan, null, 2\)\)/);
+  assert.match(source, /assistantTexts\.push\(\.\.\.assistantTextsFromPiJsonLine\(text\)\)/);
+  assert.match(source, /summarizePiJsonLine\(text\)/);
+  assert.doesNotMatch(source, /emit\(\{ type: "raw"/);
+  assert.match(source, /"assistant: " \+ summary/);
+  assert.match(source, /--no-session/);
+  assert.match(source, /--provider/);
+  assert.match(source, /return piWithHostDefault\(model, pi\)/);
 });
 
 test('/work:plan fails closed and caches invalid planner output for inspection', async () => {
@@ -172,23 +199,37 @@ test('/work:plan rejects planner-authored pipeline and branch mechanics', async 
   assert.match(notifications[0].message, /must not author execution field 'branch'/);
 });
 
-test('Work Plan artifact schema normalizes canonical ids and rejects nested execution mechanics', () => {
+test('Work Plan artifact schema normalizes canonical ids, scope, and rejects nested execution mechanics', () => {
   const plan = normalizeWorkPlanArtifact({
+    kind: 'workPlan',
+    scope: 'forecast',
     schemaVersion: 1,
     summary: 'Safe plan',
     query: 'ready',
+    actionable: {
+      scope: 'actionable',
+      iterations: [{ items: [' wi-001 '] }],
+    },
     iterations: [{
       id: 'iter-1',
       title: 'First iteration',
+      rationale: { dependency: 'none', classification: 'afk-ready', risk: 'low' },
       parallelizable: true,
       classifications: { risk: 'low' },
-      items: [{ id: ' wi-001 ', title: 'One', sourcePath: 'backlog/001.md', classifications: { area: 'core' } }],
+      items: [' wi-001 ', { id: ' wi-002 ', title: 'Two', sourcePath: 'backlog/002.md', classifications: { area: 'core' } }],
     }],
   });
 
+  assert.equal(plan.kind, 'workPlan');
+  assert.equal(plan.scope, 'forecast');
+  assert.equal(plan.actionable.scope, 'actionable');
+  assert.equal(plan.actionable.iterations[0].items[0].id, 'wi-001');
   assert.equal(plan.schemaVersion, 1);
   assert.equal(plan.iterations[0].items[0].id, 'wi-001');
+  assert.equal(plan.iterations[0].items[1].id, 'wi-002');
+  assert.equal(plan.iterations[0].rationale, 'dependency: none; classification: afk-ready; risk: low');
   assert.equal(plan.iterations[0].parallelizable, true);
+  assert.equal(normalizeWorkPlanArtifact({ iterations: [{ items: [{ id: 'wi-003' }] }] }).scope, 'actionable');
   assert.deepEqual(validateWorkPlanArtifact({ iterations: [{ items: [{ id: 'wi-002', metadata: { branchName: 'feature/from-plan' } }] }] }), [
     "Plan iteration 1 item 1 metadata must not author execution field 'branchName'.",
   ]);
@@ -320,6 +361,155 @@ test('/work:process ignores planner-recommended pipeline and derives pipeline fr
   assert.match(notifications.at(-1).message, /pipeline simple-loop/);
 });
 
+test('/work:process --plan consumes actionable section of cached forecast plans only', async () => {
+  const cwd = makeRepo();
+  const pi = fakePi();
+  const calls = [];
+  const notifications = [];
+  mkdirSync(join(cwd, '.pi', 'sandcastle', 'plans'), { recursive: true });
+  const planId = 'forecast-plan-test';
+  writeFileSync(join(cwd, '.pi', 'sandcastle', 'plans', `${planId}.json`), JSON.stringify({
+    id: planId,
+    kind: 'work-plan',
+    plan: {
+      kind: 'workPlan',
+      scope: 'forecast',
+      actionable: { scope: 'actionable', iterations: [{ parallelizable: false, items: [{ id: 'wi-ready' }] }] },
+      iterations: [
+        { items: [{ id: 'wi-ready' }], rationale: 'currently ready' },
+        { items: [{ id: 'wi-future' }], rationale: 'forecast after dependencies clear' },
+      ],
+    },
+  }, null, 2));
+  agentWorkflows(pi, {
+    work: {
+      now: () => 123456,
+      async plan(repo, query) {
+        return { query, iterations: [{ items: [{ id: 'wi-ready', title: 'Ready now' }] }] };
+      },
+      async execute(repo, input) {
+        calls.push({ repo, input });
+        return { status: 'done' };
+      },
+    },
+  });
+
+  await pi.commands.get('work:process').handler(`--plan ${planId}`, {
+    cwd,
+    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].input.items.map((item) => item.id), ['wi-ready']);
+  assert.equal(calls[0].input.parallel, false);
+  assert.notDeepEqual(calls[0].input.items.map((item) => item.id), ['wi-ready', 'wi-future']);
+  assert.match(notifications.at(-1).message, /forecast/);
+  assert.match(notifications.at(-1).message, /actionable section/);
+});
+
+test('/work:process --plan refuses cached actionable items that are no longer ready', async () => {
+  const cwd = makeRepo();
+  const pi = fakePi();
+  const calls = [];
+  const notifications = [];
+  mkdirSync(join(cwd, '.pi', 'sandcastle', 'plans'), { recursive: true });
+  const planId = 'stale-actionable-plan';
+  writeFileSync(join(cwd, '.pi', 'sandcastle', 'plans', `${planId}.json`), JSON.stringify({
+    id: planId,
+    kind: 'work-plan',
+    plan: { scope: 'actionable', iterations: [{ items: [{ id: 'wi-stale' }] }] },
+  }, null, 2));
+  agentWorkflows(pi, {
+    work: {
+      async plan(repo, query) {
+        return { query, iterations: [{ items: [{ id: 'wi-other' }] }] };
+      },
+      async execute(repo, input) {
+        calls.push({ repo, input });
+        return { status: 'done' };
+      },
+    },
+  });
+
+  await pi.commands.get('work:process').handler(`--plan ${planId}`, {
+    cwd,
+    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  });
+
+  assert.equal(calls.length, 0);
+  assert.equal(notifications[0].type, 'error');
+  assert.match(notifications[0].message, /no currently ready planned Work Items/);
+  assert.match(notifications[0].message, /wi-stale/);
+});
+
+test('/work:process --plan executes only currently ready planned items and reports stale omissions', async () => {
+  const cwd = makeRepo();
+  const pi = fakePi();
+  const calls = [];
+  const notifications = [];
+  mkdirSync(join(cwd, '.pi', 'sandcastle', 'plans'), { recursive: true });
+  const planId = 'mixed-actionable-plan';
+  writeFileSync(join(cwd, '.pi', 'sandcastle', 'plans', `${planId}.json`), JSON.stringify({
+    id: planId,
+    kind: 'work-plan',
+    plan: { scope: 'actionable', iterations: [{ items: [{ id: 'wi-ready' }, { id: 'wi-stale' }] }] },
+  }, null, 2));
+  agentWorkflows(pi, {
+    work: {
+      now: () => 123456,
+      async plan(repo, query) {
+        return { query, iterations: [{ items: [{ id: 'wi-ready', title: 'Current ready item' }] }] };
+      },
+      async execute(repo, input) {
+        calls.push({ repo, input });
+        return { status: 'done' };
+      },
+    },
+  });
+
+  await pi.commands.get('work:process').handler(`--plan ${planId}`, {
+    cwd,
+    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].input.items.map((item) => item.id), ['wi-ready']);
+  assert.equal(calls[0].input.items[0].title, 'Current ready item');
+  assert.match(notifications.at(-1).message, /omitted no-longer-ready Work Items: wi-stale/);
+});
+
+test('/work:process --plan refuses forecast plans without actionable content', async () => {
+  const cwd = makeRepo();
+  const pi = fakePi();
+  const calls = [];
+  const notifications = [];
+  mkdirSync(join(cwd, '.pi', 'sandcastle', 'plans'), { recursive: true });
+  const planId = 'forecast-without-actionable';
+  writeFileSync(join(cwd, '.pi', 'sandcastle', 'plans', `${planId}.json`), JSON.stringify({
+    id: planId,
+    kind: 'work-plan',
+    plan: { scope: 'forecast', iterations: [{ items: [{ id: 'wi-future' }] }] },
+  }, null, 2));
+  agentWorkflows(pi, {
+    work: {
+      async execute(repo, input) {
+        calls.push({ repo, input });
+        return { status: 'done' };
+      },
+    },
+  });
+
+  await pi.commands.get('work:process').handler(`--plan ${planId}`, {
+    cwd,
+    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  });
+
+  assert.equal(calls.length, 0);
+  assert.equal(notifications[0].type, 'error');
+  assert.match(notifications[0].message, /forecast/);
+  assert.match(notifications[0].message, /does not contain an actionable Work Plan/);
+});
+
 test('/work:process --plan derives pipeline from config and preserves explicit parallelizable classification', async () => {
   const cwd = makeRepo();
   const pi = fakePi();
@@ -336,6 +526,9 @@ test('/work:process --plan derives pipeline from config and preserves explicit p
   agentWorkflows(pi, {
     work: {
       now: () => 123456,
+      async plan(repo, query) {
+        return { query, iterations: [{ items: [{ id: 'wi-001', title: 'Current One' }, { id: 'wi-002', title: 'Current Two' }] }] };
+      },
       async execute(repo, input) {
         calls.push({ repo, input });
         return { status: 'done', branches: ['branch'], logs: ['log'] };

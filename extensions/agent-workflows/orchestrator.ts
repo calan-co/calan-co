@@ -26,7 +26,10 @@ export interface WorkPlanIteration {
 }
 
 export interface WorkPlanResult {
+	kind?: "workPlan" | "work-plan";
+	scope?: "forecast" | "actionable";
 	query?: string;
+	actionable?: WorkPlanResult;
 	iterations: WorkPlanIteration[];
 }
 
@@ -46,6 +49,16 @@ export interface WorkExecutionGroup {
 	contexts: WorkExecutionContext[];
 }
 
+export interface WorkProcessWorkerStatus {
+	index: number;
+	role: string;
+	status: "running" | "completed" | "failed";
+	branch?: string;
+	commits?: string[];
+	logPath?: string;
+	error?: string;
+}
+
 export interface WorkProcessRunRecord {
 	id: string;
 	kind?: "work-process";
@@ -56,6 +69,7 @@ export interface WorkProcessRunRecord {
 	status: WorkProcessStatus;
 	branches: string[];
 	logs: string[];
+	workerStatuses?: WorkProcessWorkerStatus[];
 	executionContexts: WorkExecutionContext[];
 	executionGroups: WorkExecutionGroup[];
 	startedAt: number;
@@ -77,6 +91,7 @@ export interface WorkProcessExecutionInput {
 export interface WorkProcessExecutionResult {
 	branches?: string[];
 	logs?: string[];
+	workerStatuses?: WorkProcessWorkerStatus[];
 	status?: WorkProcessStatus;
 }
 
@@ -100,6 +115,7 @@ export interface RunWorkProcessDeps {
 export interface RunWorkProcessResult {
 	record: WorkProcessRunRecord;
 	recordPath: string;
+	advisoryNotes?: string[];
 }
 
 export function sanitizeBranchSegment(value: unknown): string {
@@ -165,6 +181,27 @@ function validateForbiddenWorkPlanFields(scope: string, value: unknown, errors: 
 	}
 }
 
+function formatWorkPlanObject(value: Record<string, unknown>): string {
+	return Object.entries(value)
+		.map(([key, entry]) => `${key}: ${Array.isArray(entry) ? entry.join(", ") : isRecord(entry) ? formatWorkPlanObject(entry as Record<string, unknown>) : String(entry)}`)
+		.join("; ");
+}
+
+function normalizeWorkPlanShape(value: unknown): unknown {
+	if (!isRecord(value)) return value;
+	const plan = JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+	if (Array.isArray(plan.iterations)) {
+		plan.iterations = plan.iterations.map((iteration) => {
+			if (!isRecord(iteration)) return iteration;
+			const next: Record<string, unknown> = { ...iteration };
+			if (isRecord(next.rationale)) next.rationale = formatWorkPlanObject(next.rationale as Record<string, unknown>);
+			if (Array.isArray(next.items)) next.items = next.items.map((item) => typeof item === "string" ? { id: item } : item);
+			return next;
+		});
+	}
+	return plan;
+}
+
 export function validateExecutablePlanArtifact(plan: any): string[] {
 	const errors: string[] = [];
 	if (!isRecord(plan)) return ["Planner output must be a JSON object."];
@@ -172,11 +209,19 @@ export function validateExecutablePlanArtifact(plan: any): string[] {
 		if (FORBIDDEN_WORK_PLAN_EXECUTION_FIELDS.has(field)) errors.push(`Plan must not author execution field '${field}'.`);
 		else if (field !== "iterations") validateForbiddenWorkPlanFields(`Plan ${field}`, child, errors);
 	}
-	if (plan.schemaVersion !== undefined && plan.schemaVersion !== 1) errors.push("Plan schemaVersion must be 1 when provided.");
-	validateOptionalString("Plan", plan, "summary", errors);
-	validateOptionalString("Plan", plan, "query", errors);
-	if (!Array.isArray(plan.iterations)) return [...errors, "Planner output must contain an iterations array."];
-	for (const [iterationIndex, iteration] of plan.iterations.entries()) {
+	const normalizedPlan = normalizeWorkPlanShape(plan);
+	if (!isRecord(normalizedPlan)) return ["Planner output must be a JSON object."];
+	if (normalizedPlan.kind !== undefined && normalizedPlan.kind !== "workPlan" && normalizedPlan.kind !== "work-plan") errors.push("Plan kind must be workPlan when provided.");
+	if (normalizedPlan.scope !== undefined && normalizedPlan.scope !== "forecast" && normalizedPlan.scope !== "actionable") errors.push("Plan scope must be forecast or actionable when provided.");
+	if (normalizedPlan.schemaVersion !== undefined && normalizedPlan.schemaVersion !== 1) errors.push("Plan schemaVersion must be 1 when provided.");
+	validateOptionalString("Plan", normalizedPlan, "summary", errors);
+	validateOptionalString("Plan", normalizedPlan, "query", errors);
+	if (normalizedPlan.actionable !== undefined) {
+		if (!isRecord(normalizedPlan.actionable)) errors.push("Plan actionable must be a Work Plan object.");
+		else errors.push(...validateExecutablePlanArtifact(normalizedPlan.actionable).map((error) => `Plan actionable ${error.replace(/^Plan(?:ner output)?\s*/, "")}`));
+	}
+	if (!Array.isArray(normalizedPlan.iterations)) return [...errors, "Planner output must contain an iterations array."];
+	for (const [iterationIndex, iteration] of normalizedPlan.iterations.entries()) {
 		const iterationScope = `Plan iteration ${iterationIndex + 1}`;
 		if (!isRecord(iteration)) {
 			errors.push(`${iterationScope} must be an object.`);
@@ -223,7 +268,9 @@ export function validateExecutablePlanArtifact(plan: any): string[] {
 export function normalizeExecutablePlanArtifact(plan: any): WorkPlanResult {
 	const errors = validateExecutablePlanArtifact(plan);
 	if (errors.length) throw new Error(`Work Plan artifact is not executable:\n- ${errors.join("\n- ")}`);
-	const normalized = JSON.parse(JSON.stringify(plan)) as WorkPlanResult;
+	const normalized = normalizeWorkPlanShape(plan) as WorkPlanResult;
+	normalized.scope = normalized.scope || "actionable";
+	if (normalized.actionable) normalized.actionable = normalizeExecutablePlanArtifact(normalized.actionable);
 	normalized.iterations = normalized.iterations.map((iteration) => ({
 		...iteration,
 		items: (iteration.items || []).map((item) => ({ ...item, id: item.id.trim() })),
@@ -273,6 +320,36 @@ export function writeWorkProcessRunRecord(cwd: string, record: WorkProcessRunRec
 	return recordPath;
 }
 
+function collectPlanItems(plan: WorkPlanResult): WorkItem[] {
+	return (plan.iterations || []).flatMap((iteration) => Array.isArray(iteration.items) ? iteration.items : []);
+}
+
+function revalidateCachedPlanIteration(input: {
+	planId: string;
+	plannedIteration: WorkPlanIteration;
+	currentPlan: WorkPlanResult;
+	advisoryNotes: string[];
+}): WorkPlanIteration {
+	const plannedItems = Array.isArray(input.plannedIteration.items) ? input.plannedIteration.items : [];
+	const currentReadyItems = collectPlanItems(input.currentPlan);
+	const currentReadyById = new Map(currentReadyItems.map((item) => [item.id, item]));
+	const executableItems: WorkItem[] = [];
+	const omittedIds: string[] = [];
+	for (const plannedItem of plannedItems) {
+		const currentItem = currentReadyById.get(plannedItem.id);
+		if (currentItem) executableItems.push(currentItem);
+		else omittedIds.push(plannedItem.id);
+	}
+	if (!executableItems.length) {
+		const suffix = omittedIds.length ? ` Omitted no-longer-ready Work Items: ${omittedIds.join(", ")}.` : "";
+		throw new Error(`Cached Work Plan '${input.planId}' has no currently ready planned Work Items after revalidation.${suffix}`);
+	}
+	if (omittedIds.length) {
+		input.advisoryNotes.push(`Cached Work Plan '${input.planId}' was revalidated against current readiness; omitted no-longer-ready Work Items: ${omittedIds.join(", ")}.`);
+	}
+	return { ...input.plannedIteration, items: executableItems };
+}
+
 export function createWorkProcessRecord(input: {
 	runId: string;
 	query: string;
@@ -307,6 +384,7 @@ export function applyWorkProcessResult(record: WorkProcessRunRecord, execution: 
 		status: execution.status || "done",
 		branches: execution.branches || record.branches,
 		logs: execution.logs || [],
+		workerStatuses: execution.workerStatuses || record.workerStatuses,
 		updatedAt: endedAt,
 		endedAt,
 	};
@@ -319,6 +397,7 @@ function createDefaultRunId(startedAt: number): string {
 export async function runWorkProcess(input: RunWorkProcessInput, deps: RunWorkProcessDeps): Promise<RunWorkProcessResult> {
 	const now = input.now || Date.now;
 	let planResult: WorkPlanResult;
+	const advisoryNotes: string[] = [];
 	if (input.planId) {
 		if (!deps.readPlanRecord) throw new Error("Cached Work Plan reading is not configured.");
 		const cachedPlanRecord = deps.readPlanRecord(input.cwd, input.planId);
@@ -326,13 +405,24 @@ export async function runWorkProcess(input: RunWorkProcessInput, deps: RunWorkPr
 		const validationErrors = validateExecutablePlanArtifact(cachedPlan);
 		if (validationErrors.length) throw new Error(`Cached Work Plan '${input.planId}' is not executable:\n- ${validationErrors.join("\n- ")}`);
 		const normalizedPlan = normalizeExecutablePlanArtifact(cachedPlan);
-		planResult = { query: normalizedPlan.query, iterations: normalizedPlan.iterations };
+		if (normalizedPlan.scope === "forecast") {
+			if (!normalizedPlan.actionable) throw new Error(`Cached Work Plan '${input.planId}' is a forecast and does not contain an actionable Work Plan. Re-run /work:plan or process without --plan so current readiness can be derived.`);
+			planResult = normalizedPlan.actionable;
+			advisoryNotes.push(`Cached Work Plan '${input.planId}' is a forecast; /work:process executed only its actionable section and left forecast iterations advisory.`);
+		} else {
+			planResult = normalizedPlan;
+		}
+		planResult = { ...planResult, query: planResult.query || normalizedPlan.query };
 	} else {
 		planResult = await deps.plan(input.cwd, input.query);
 	}
 
-	const iteration = planResult.iterations[0];
+	let iteration = planResult.iterations[0];
 	if (!iteration) throw new Error("No Work Items were selected for processing.");
+	if (input.planId) {
+		const currentPlan = await deps.plan(input.cwd, planResult.query || input.query);
+		iteration = revalidateCachedPlanIteration({ planId: input.planId, plannedIteration: iteration, currentPlan, advisoryNotes });
+	}
 
 	const pipeline = selectWorkProcessPipeline({ explicitPipeline: input.explicitPipeline, defaultPipeline: input.defaultPipeline });
 	const startedAt = now();
@@ -360,7 +450,7 @@ export async function runWorkProcess(input: RunWorkProcessInput, deps: RunWorkPr
 		});
 		const finalRecord = applyWorkProcessResult(baseRecord, execution, now());
 		writeRecord(input.cwd, finalRecord);
-		return { record: finalRecord, recordPath };
+		return { record: finalRecord, recordPath, advisoryNotes };
 	} catch (error) {
 		const endedAt = now();
 		const errorRecord: WorkProcessRunRecord = {

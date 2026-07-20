@@ -28,6 +28,16 @@
       "type": "string",
       "enum": ["claude-code", "pi", "codex", "cursor", "opencode", "copilot"]
     },
+    "maxWorkers": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 5
+    },
+    "maxIterations": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 10
+    },
     "workSource": {
       "type": "string",
       "enum": ["github-issues", "custom", "beads"]

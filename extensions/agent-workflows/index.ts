@@ -25,7 +25,7 @@ import { noSandbox } from "@ai-hero/sandcastle/sandboxes/no-sandbox";
 import { podman } from "@ai-hero/sandcastle/sandboxes/podman";
 import { vercel } from "@ai-hero/sandcastle/sandboxes/vercel";
 import { spawn, spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
@@ -42,6 +42,7 @@ import {
 	type WorkExecutionContext,
 	type WorkExecutionGroup,
 	type WorkItem,
+	type WorkProcessRunRecord,
 } from "./orchestrator.ts";
 import {
 	formatStatusSelection,
@@ -122,6 +123,8 @@ interface SandcastleConfig {
 	defaultModel?: string;
 	defaultPipeline?: string;
 	defaultAgent?: string;
+	maxWorkers?: number;
+	maxIterations?: number;
 	workSource?: string;
 	workSourceSetupCommand?: string;
 	issueTracker?: string;
@@ -176,9 +179,12 @@ interface BacklogPlanResult {
 }
 
 export interface WorkPlanArtifact {
+	kind?: "workPlan" | "work-plan";
+	scope?: "forecast" | "actionable";
 	schemaVersion?: 1;
 	summary?: string;
 	query?: string;
+	actionable?: WorkPlanArtifact;
 	iterations: WorkPlanIteration[];
 }
 
@@ -238,6 +244,29 @@ function validateForbiddenWorkPlanFields(scope: string, value: unknown, errors: 
 	}
 }
 
+function formatWorkPlanObject(value: Record<string, unknown>): string {
+	return Object.entries(value)
+		.map(([key, entry]) => `${key}: ${Array.isArray(entry) ? entry.join(", ") : isRecord(entry) ? formatWorkPlanObject(entry) : String(entry)}`)
+		.join("; ");
+}
+
+function normalizeWorkPlanShape(value: unknown): unknown {
+	if (!isRecord(value)) return value;
+	const plan = JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+	if (Array.isArray(plan.iterations)) {
+		plan.iterations = plan.iterations.map((iteration) => {
+			if (!isRecord(iteration)) return iteration;
+			const next: Record<string, unknown> = { ...iteration };
+			if (isRecord(next.rationale)) next.rationale = formatWorkPlanObject(next.rationale);
+			if (Array.isArray(next.items)) {
+				next.items = next.items.map((item) => typeof item === "string" ? { id: item } : item);
+			}
+			return next;
+		});
+	}
+	return plan;
+}
+
 export function validateWorkPlanArtifact(value: unknown): string[] {
 	const errors: string[] = [];
 	if (!isRecord(value)) return ["Planner output must be a JSON object."];
@@ -245,11 +274,19 @@ export function validateWorkPlanArtifact(value: unknown): string[] {
 		if (FORBIDDEN_WORK_PLAN_EXECUTION_FIELDS.has(field)) errors.push(`Plan must not author execution field '${field}'.`);
 		else if (field !== "iterations") validateForbiddenWorkPlanFields(`Plan ${field}`, child, errors);
 	}
-	if (value.schemaVersion !== undefined && value.schemaVersion !== 1) errors.push("Plan schemaVersion must be 1 when provided.");
-	validateOptionalString("Plan", value, "summary", errors);
-	validateOptionalString("Plan", value, "query", errors);
-	if (!Array.isArray(value.iterations)) return [...errors, "Planner output must contain an iterations array."];
-	for (const [iterationIndex, iteration] of value.iterations.entries()) {
+	const normalizedValue = normalizeWorkPlanShape(value);
+	if (!isRecord(normalizedValue)) return ["Planner output must be a JSON object."];
+	if (normalizedValue.kind !== undefined && normalizedValue.kind !== "workPlan" && normalizedValue.kind !== "work-plan") errors.push("Plan kind must be workPlan when provided.");
+	if (normalizedValue.scope !== undefined && normalizedValue.scope !== "forecast" && normalizedValue.scope !== "actionable") errors.push("Plan scope must be forecast or actionable when provided.");
+	if (normalizedValue.schemaVersion !== undefined && normalizedValue.schemaVersion !== 1) errors.push("Plan schemaVersion must be 1 when provided.");
+	validateOptionalString("Plan", normalizedValue, "summary", errors);
+	validateOptionalString("Plan", normalizedValue, "query", errors);
+	if (normalizedValue.actionable !== undefined) {
+		if (!isRecord(normalizedValue.actionable)) errors.push("Plan actionable must be a Work Plan object.");
+		else errors.push(...validateWorkPlanArtifact(normalizedValue.actionable).map((error) => `Plan actionable ${error.replace(/^Plan(?:ner output)?\s*/, "")}`));
+	}
+	if (!Array.isArray(normalizedValue.iterations)) return [...errors, "Planner output must contain an iterations array."];
+	for (const [iterationIndex, iteration] of normalizedValue.iterations.entries()) {
 		const iterationScope = `Plan iteration ${iterationIndex + 1}`;
 		if (!isRecord(iteration)) {
 			errors.push(`${iterationScope} must be an object.`);
@@ -296,7 +333,9 @@ export function validateWorkPlanArtifact(value: unknown): string[] {
 export function normalizeWorkPlanArtifact(value: unknown): WorkPlanArtifact {
 	const errors = validateWorkPlanArtifact(value);
 	if (errors.length) throw new Error(`Work Plan artifact is not executable:\n- ${errors.join("\n- ")}`);
-	const plan = JSON.parse(JSON.stringify(value)) as WorkPlanArtifact;
+	const plan = normalizeWorkPlanShape(value) as WorkPlanArtifact;
+	plan.scope = plan.scope || "actionable";
+	if (plan.actionable) plan.actionable = normalizeWorkPlanArtifact(plan.actionable);
 	plan.iterations = plan.iterations.map((iteration) => ({
 		...iteration,
 		items: iteration.items.map((item) => ({ ...item, id: item.id.trim() })),
@@ -344,7 +383,6 @@ interface RunPlanWorkRoleInput {
 	args: string;
 	role: string;
 	task: string;
-	snapshotCwd: string;
 	ctx?: any;
 }
 
@@ -364,7 +402,7 @@ interface BacklogProcessPlanDeps {
 			executionGroups: WorkExecutionGroup[];
 			recordPath: string;
 		},
-	) => Promise<{ branches?: string[]; logs?: string[]; status?: BacklogProcessRecord["status"] }>;
+	) => Promise<{ branches?: string[]; logs?: string[]; workerStatuses?: Array<{ index: number; role: string; status: "running" | "completed" | "failed"; branch?: string; commits?: string[]; logPath?: string; error?: string }>; status?: BacklogProcessRecord["status"] }>;
 	now?: () => number;
 }
 
@@ -387,8 +425,9 @@ interface RunState {
 	id: string;
 	agent: string;
 	task: string;
-	status: "running" | "done" | "error" | "cancelled";
+	status: "queued" | "running" | "done" | "error" | "cancelled";
 	startedAt: number;
+	endedAt?: number;
 	lastLine: string;
 	logPath?: string;
 	resultPath?: string;
@@ -397,7 +436,7 @@ interface RunState {
 	proc?: SandcastleProcess;
 }
 
-type RootConfigKey = "defaultSandbox" | "defaultModel" | "defaultPipeline" | "defaultAgent" | "workSource" | "workSourceSetupCommand" | "issueTracker" | "issueTrackerSetupCommand" | "imageNamePattern";
+type RootConfigKey = "defaultSandbox" | "defaultModel" | "defaultPipeline" | "defaultAgent" | "maxWorkers" | "maxIterations" | "workSource" | "workSourceSetupCommand" | "issueTracker" | "issueTrackerSetupCommand" | "imageNamePattern";
 type EditableAgentField = "description" | "kind" | "model" | "sandbox" | "maxIterations" | "branch";
 
 const CONFIG_DIR = ".pi/sandcastle";
@@ -409,7 +448,7 @@ const RESULTS_DIR = `${CONFIG_DIR}/results`;
 const SUPPORTED_SANDBOXES = new Set(["docker", "podman", "vercel", "no-sandbox"]);
 const DEFAULT_SANDBOX: NonNullable<AgentDef["sandbox"]> = "docker";
 const DEFAULT_MODEL = "Agent Default";
-const ROOT_CONFIG_KEYS: RootConfigKey[] = ["defaultSandbox", "defaultModel", "defaultPipeline", "defaultAgent", "workSource", "workSourceSetupCommand", "imageNamePattern"];
+const ROOT_CONFIG_KEYS: RootConfigKey[] = ["defaultSandbox", "defaultModel", "defaultPipeline", "defaultAgent", "maxWorkers", "maxIterations", "workSource", "workSourceSetupCommand", "imageNamePattern"];
 const EDITABLE_AGENT_FIELDS: EditableAgentField[] = ["description", "kind", "model", "sandbox", "maxIterations", "branch"];
 const RUNS_DIR = `${CONFIG_DIR}/runs`;
 const PLANS_DIR = `${CONFIG_DIR}/plans`;
@@ -424,10 +463,10 @@ const CONFIG_SCHEMA_PATH = new URL("./schema/config.schema.json", import.meta.ur
 const inFlightImageBuilds = new Map<string, Promise<void>>();
 
 
-const RUNNER_VERSION = "agent-workflows-runner-v2";
+const RUNNER_VERSION = "agent-workflows-runner-v10";
 const RUNNER = String.raw`#!/usr/bin/env node
-// agent-workflows-runner-v2
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+// agent-workflows-runner-v10
+import { readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
 
 const jobPath = process.argv[2];
@@ -438,23 +477,219 @@ function emit(event) {
   console.log(JSON.stringify({ source: "agent-workflows", ...event }));
 }
 
-async function loadSandbox(kind, imageName) {
-  if (kind === "podman") return (await import("@ai-hero/sandcastle/sandboxes/podman")).podman(imageName ? { imageName } : undefined);
+function shellEscape(value) {
+  return "'" + String(value).replace(/'/g, "'\\''") + "'";
+}
+
+function sandboxOptions(imageName, hostPiAgentDir, hostPiFileMounts) {
+  const options = imageName ? { imageName } : {};
+  if (hostPiAgentDir) {
+    options.mounts = [
+      { hostPath: hostPiAgentDir, sandboxPath: "/home/agent/.pi-host-agent", readonly: false },
+      ...(hostPiFileMounts || []),
+    ];
+    options.env = {
+      PI_CODING_AGENT_DIR: "/home/agent/.pi-host-agent",
+      PI_CODING_AGENT_SESSION_DIR: "/home/agent/.pi-host-agent/sessions",
+    };
+  }
+  return Object.keys(options).length ? options : undefined;
+}
+
+function readHostPiDefaults() {
+  const root = process.env.PI_CODING_AGENT_DIR || process.env.PI_HOST_AGENT_DIR || (process.env.HOME ? process.env.HOME + "/.pi/agent" : "");
+  if (!root) return {};
+  try {
+    const settings = JSON.parse(readFileSync(root + "/settings.json", "utf8"));
+    return {
+      provider: typeof settings.defaultProvider === "string" ? settings.defaultProvider : undefined,
+      model: typeof settings.defaultModel === "string" ? settings.defaultModel : undefined,
+      thinking: typeof settings.defaultThinkingLevel === "string" ? settings.defaultThinkingLevel : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function piWithHostDefault(model, piFactory) {
+  const host = readHostPiDefaults();
+  const explicitModel = model && model !== "Agent Default";
+  const effectiveModel = explicitModel ? model : host.model;
+  const base = piFactory(effectiveModel || "Agent Default", { captureSessions: false });
+  const nonCapturing = { ...base, captureSessions: false, sessionStorage: undefined };
+  if (explicitModel) return nonCapturing;
+  return {
+    ...nonCapturing,
+    buildPrintCommand({ prompt, resumeSession }) {
+      const sessionFlag = resumeSession ? " --session " + shellEscape(resumeSession) : "";
+      const providerFlag = host.provider ? " --provider " + shellEscape(host.provider) : "";
+      const modelFlag = effectiveModel ? " --model " + shellEscape(effectiveModel) : "";
+      const thinkingFlag = host.thinking ? " --thinking " + shellEscape(host.thinking) : "";
+      return { command: "pi -p --mode json --no-session" + providerFlag + modelFlag + thinkingFlag + sessionFlag, stdin: prompt };
+    },
+    buildInteractiveArgs({ prompt }) {
+      const args = ["pi", "--no-session"];
+      if (host.provider) args.push("--provider", host.provider);
+      if (effectiveModel) args.push("--model", effectiveModel);
+      if (host.thinking) args.push("--thinking", host.thinking);
+      if (prompt) args.push(prompt);
+      return args;
+    },
+  };
+}
+
+function stripPromiseComplete(text) {
+  return String(text || "").replace(/<promise>COMPLETE<\/promise>/g, "").trim();
+}
+
+function compactText(text, max = 240) {
+  const compact = stripPromiseComplete(text).replace(/\s+/g, " ").trim();
+  return compact.length > max ? compact.slice(0, max - 1) + "…" : compact;
+}
+
+function summarizePiContent(content) {
+  if (!Array.isArray(content)) return undefined;
+  const parts = [];
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue;
+    if (block.type === "thinking") {
+      const summaries = Array.isArray(block.thinkingSignature?.summary)
+        ? block.thinkingSignature.summary.map((entry) => entry?.text).filter(Boolean)
+        : [];
+      parts.push(compactText(summaries.join("; ") || block.thinking, 180));
+    } else if (block.type === "text") {
+      parts.push(compactText(block.text, 320));
+    } else if (block.type === "toolCall") {
+      parts.push("tool: " + (block.name || block.toolName || "tool"));
+    } else if (block.type === "toolResult") {
+      parts.push("tool result: " + (block.toolName || block.name || "tool"));
+    }
+  }
+  return parts.filter(Boolean).join(" | ");
+}
+
+function assistantTextFromContent(content) {
+  if (!Array.isArray(content)) return [];
+  return content
+    .filter((block) => block && typeof block === "object" && block.type === "text" && typeof block.text === "string")
+    .map((block) => stripPromiseComplete(block.text))
+    .filter(Boolean);
+}
+
+function assistantTextsFromPiJsonLine(line) {
+  const text = String(line || "").trim();
+  if (!text.startsWith("{")) return [];
+  try {
+    const event = JSON.parse(text);
+    if ((event.type === "message" || event.type === "turn_end") && event.message?.role === "assistant") return assistantTextFromContent(event.message.content);
+    if (event.type === "agent_end" && Array.isArray(event.messages)) return event.messages.flatMap((message) => message?.role === "assistant" ? assistantTextFromContent(message.content) : []);
+  } catch {}
+  return [];
+}
+
+function summarizePiJsonLine(line) {
+  const text = String(line || "").trim();
+  if (!text.startsWith("{")) return compactText(text);
+  try {
+    const event = JSON.parse(text);
+    if (event.type === "session") return "pi session started: " + (event.id || "unknown");
+    if (event.type === "error") return "pi error: " + compactText(event.error || event.message || text);
+    if ((event.type === "message_start" || event.type === "message_started") && !event.message && !event.role && !event.messageId && !event.id) return undefined;
+    if (event.type === "message_start" || event.type === "message_started") {
+      const role = event.message?.role || event.role || "message";
+      const id = event.message?.id || event.messageId || event.id;
+      return id ? role + " message started: " + id : role + " message started";
+    }
+    if (event.type === "message_update" || event.type === "message_updated") {
+      const role = event.message?.role || event.role || "message";
+      const summary = summarizePiContent(event.message?.content)
+        || summarizePiContent(event.delta?.content)
+        || compactText(event.text || event.delta?.text || event.content || event.message?.text || "", 320);
+      return summary ? role + " update: " + summary : undefined;
+    }
+    if (event.type === "message" && event.message) {
+      const summary = summarizePiContent(event.message.content);
+      return summary ? (event.message.role || "message") + ": " + summary : "pi message: " + (event.message.role || "unknown");
+    }
+    if (event.type === "turn_end" && event.message) {
+      const summary = summarizePiContent(event.message.content);
+      return summary ? "assistant: " + summary : "pi turn complete";
+    }
+    if (event.type === "agent_end") return "pi agent finished" + (Array.isArray(event.messages) ? " (" + event.messages.length + " messages)" : "");
+    if (event.type === "tool_call") return "tool: " + (event.name || event.toolName || "tool");
+    if (event.type === "tool_result") return "tool result: " + (event.toolName || event.name || "tool");
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseJsonObjectFromText(text) {
+  const cleaned = stripPromiseComplete(text);
+  const fenceMarker = String.fromCharCode(96, 96, 96);
+  const fenceStart = cleaned.indexOf(fenceMarker);
+  const fenceEnd = fenceStart >= 0 ? cleaned.indexOf(fenceMarker, fenceStart + fenceMarker.length) : -1;
+  const fenced = fenceStart >= 0 && fenceEnd > fenceStart ? cleaned.slice(fenceStart + fenceMarker.length, fenceEnd).replace(/^json\s*/i, "") : "";
+  const candidates = fenced ? [fenced, cleaned] : [cleaned];
+  for (const candidate of candidates) {
+    const start = candidate.indexOf("{");
+    if (start < 0) continue;
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    for (let index = start; index < candidate.length; index += 1) {
+      const char = candidate[index];
+      if (inString) {
+        if (escape) escape = false;
+        else if (char === "\\") escape = true;
+        else if (char === '"') inString = false;
+        continue;
+      }
+      if (char === '"') inString = true;
+      else if (char === "{") depth += 1;
+      else if (char === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          const jsonText = candidate.slice(start, index + 1);
+          try { return JSON.parse(jsonText); } catch { break; }
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
+function extractPlanObject(assistantTexts, stdout) {
+  const sources = [...assistantTexts].reverse();
+  if (stdout) {
+    const stdoutAssistantTexts = String(stdout).split("\n").flatMap((line) => assistantTextsFromPiJsonLine(line));
+    sources.push(...stdoutAssistantTexts.reverse());
+    sources.push(stdout);
+  }
+  for (const source of sources) {
+    const parsed = parseJsonObjectFromText(source);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+async function loadSandbox(kind, imageName, _hostPiConfig, hostPiAgentDir, hostPiFileMounts) {
+  if (kind === "podman") return (await import("@ai-hero/sandcastle/sandboxes/podman")).podman(sandboxOptions(imageName, hostPiAgentDir, hostPiFileMounts));
   if (kind === "vercel") return (await import("@ai-hero/sandcastle/sandboxes/vercel")).vercel();
   if (kind === "no-sandbox") return (await import("@ai-hero/sandcastle/sandboxes/no-sandbox")).noSandbox();
-  return (await import("@ai-hero/sandcastle/sandboxes/docker")).docker(imageName ? { imageName } : undefined);
+  return (await import("@ai-hero/sandcastle/sandboxes/docker")).docker(sandboxOptions(imageName, hostPiAgentDir, hostPiFileMounts));
 }
 
 try {
   const { run, claudeCode, codex, cursor, opencode, copilot, pi } = await import("@ai-hero/sandcastle");
-  const sandbox = await loadSandbox(job.sandbox || "docker", job.imageName);
+  const sandbox = await loadSandbox(job.sandbox || "docker", job.imageName, job.hostPiConfig, job.hostPiAgentDir, job.hostPiFileMounts);
   const makeAgent = (provider, model) => {
     if (provider === "claude") return claudeCode(model);
     if (provider === "codex") return codex(model);
     if (provider === "cursor") return cursor(model);
     if (provider === "opencode") return opencode(model);
     if (provider === "copilot") return copilot(model);
-    return pi(model);
+    return piWithHostDefault(model, pi);
   };
   const prompt = (job.systemPrompt ? job.systemPrompt + "\n\n" : "") + "## Delegated task\n\n" + job.prompt;
   const logPath = job.logPath;
@@ -462,6 +697,7 @@ try {
   mkdirSync(dirname(logPath), { recursive: true });
   mkdirSync(dirname(resultPath), { recursive: true });
 
+  const assistantTexts = [];
   emit({ type: "start", id: job.id, agent: job.agent, sandbox: job.sandbox, model: job.model });
   const result = await run({
     name: job.name || job.id,
@@ -477,28 +713,53 @@ try {
       path: logPath,
       verbose: true,
       onAgentStreamEvent: (event) => {
-        if (event.type === "text") emit({ type: "text", id: job.id, text: event.text || event.chunk || "" });
+        if (event.type === "text") {
+          const text = event.text || event.chunk || "";
+          assistantTexts.push(...assistantTextsFromPiJsonLine(text));
+          const summary = summarizePiJsonLine(text);
+          if (summary) emit({ type: "text", id: job.id, text: summary });
+        }
         else if (event.type === "toolCall") emit({ type: "tool", id: job.id, tool: event.name || event.toolName || "tool" });
-        else if (event.type === "raw") emit({ type: "raw", id: job.id, text: event.text || event.line || "" });
+        else if (event.type === "raw") {
+          const text = event.text || event.line || "";
+          assistantTexts.push(...assistantTextsFromPiJsonLine(text));
+          const summary = summarizePiJsonLine(text);
+          if (summary) emit({ type: "text", id: job.id, text: summary });
+        }
       },
     },
   });
 
-  const payload = {
-    id: job.id,
-    agent: job.agent,
-    branch: result.branch,
-    commits: (result.commits || []).map((c) => c.sha || c),
-    iterations: result.iterations || [],
-    logPath,
-  };
-  writeFileSync(resultPath, JSON.stringify(payload, null, 2));
-  emit({ type: "done", id: job.id, branch: payload.branch, commits: payload.commits, resultPath });
+  if (job.outputKind === "work-plan") {
+    const plan = extractPlanObject(assistantTexts, result.stdout);
+    if (!plan) {
+      const message = "Planner completed but no authoritative Work Plan JSON object could be extracted from assistant output.";
+      writeFileSync(resultPath, JSON.stringify({ id: job.id, agent: job.agent, error: message, logPath }, null, 2));
+      emit({ type: "error", id: job.id, error: message });
+      process.exitCode = 1;
+    } else {
+      writeFileSync(resultPath, JSON.stringify(plan, null, 2));
+      emit({ type: "done", id: job.id, branch: result.branch, commits: (result.commits || []).map((c) => c.sha || c), resultPath });
+    }
+  } else {
+    const payload = {
+      id: job.id,
+      agent: job.agent,
+      branch: result.branch,
+      commits: (result.commits || []).map((c) => c.sha || c),
+      iterations: result.iterations || [],
+      logPath,
+    };
+    writeFileSync(resultPath, JSON.stringify(payload, null, 2));
+    emit({ type: "done", id: job.id, branch: payload.branch, commits: payload.commits, resultPath });
+  }
 } catch (error) {
   const message = error && error.stack ? error.stack : String(error);
   if (job?.resultPath) writeFileSync(job.resultPath, JSON.stringify({ id: job.id, agent: job.agent, error: message }, null, 2));
   emit({ type: "error", id: job?.id, error: message });
   process.exitCode = 1;
+} finally {
+  if (job?.hostPiAgentDir) rmSync(job.hostPiAgentDir, { recursive: true, force: true });
 }
 `;
 
@@ -511,6 +772,8 @@ defaultSandbox: docker
 defaultModel: Agent Default
 defaultPipeline: simple-loop
 defaultAgent: claude-code
+maxWorkers: 5
+maxIterations: 10
 workSource: github-issues
 # Optional command to configure a custom Work Source after Sandcastle init.
 # workSourceSetupCommand: pi "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"
@@ -1210,31 +1473,17 @@ function createBacklogPlanId(createdAt: number): string {
 	return `plan-${createdAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function gitQuiet(cwd: string, args: string[]): void {
-	const result = spawnSync("git", args, { cwd, encoding: "utf8" });
-	if (result.status !== 0) throw new Error((result.stderr || result.stdout || `git ${args.join(" ")} failed`).trim());
+export function validateSandcastleWorkspaceSource(cwd: string): string[] {
+	const repo = spawnSync("git", ["rev-parse", "--git-dir"], { cwd, encoding: "utf8" });
+	if (repo.status !== 0) return ["Repository is not a git repository. Sandcastle workspaces require a git repository before any role can run."];
+	const head = spawnSync("git", ["rev-parse", "--verify", "HEAD"], { cwd, encoding: "utf8" });
+	if (head.status !== 0) return ["Repository has no HEAD commit. Sandcastle workspaces require at least one commit before any role can run; create an initial commit, then retry."];
+	return [];
 }
 
-export function createPlannerSnapshot(cwd: string): string {
-	const snapshot = mkdtempSync(join(tmpdir(), "agent-workflows-planner-"));
-	const root = resolve(cwd);
-	cpSync(root, snapshot, {
-		recursive: true,
-		filter(source) {
-			const rel = resolve(source).slice(root.length).replace(/^\/+/, "");
-			if (!rel) return true;
-			const [top, second] = rel.split(/[\\/]/);
-			if ([".git", "node_modules", ".pi", ".sandcastle", "patches", "coverage", "dist"].includes(top)) return false;
-			return second !== ".git";
-		},
-	});
-	gitQuiet(snapshot, ["init", "--quiet"]);
-	gitQuiet(snapshot, ["config", "user.email", "agent-workflows@example.invalid"]);
-	gitQuiet(snapshot, ["config", "user.name", "Agent Workflows Planner Snapshot"]);
-	writeFileSync(join(snapshot, ".agent-workflows-planner-snapshot"), "This disposable git repository is used only for sandboxed planning.\n");
-	gitQuiet(snapshot, ["add", "-A"]);
-	gitQuiet(snapshot, ["commit", "--quiet", "--message", "planner snapshot"]);
-	return snapshot;
+function assertSandcastleWorkspaceSource(cwd: string): void {
+	const issues = validateSandcastleWorkspaceSource(cwd);
+	if (issues.length) throw new Error(issues.join("\n"));
 }
 
 function createInvalidBacklogPlanId(createdAt: number): string {
@@ -1426,7 +1675,7 @@ async function defaultPlanBacklogProcessing(cwd: string, query: string): Promise
 function hydrateConfigDefaults(raw: string): { text: string; changed: boolean; changes: string[] } {
 	let text = raw;
 	const changes: string[] = [];
-	for (const [key, value] of Object.entries({ defaultPipeline: "simple-loop", defaultAgent: "claude-code", workSource: "github-issues" })) {
+	for (const [key, value] of Object.entries({ defaultPipeline: "simple-loop", defaultAgent: "claude-code", maxWorkers: 5, maxIterations: 10, workSource: "github-issues" })) {
 		if (!new RegExp(`^${key}:`, "m").test(text)) {
 			text = setConfigValueInText(text, key, value);
 			changes.push(`added ${key}`);
@@ -1438,7 +1687,11 @@ function hydrateConfigDefaults(raw: string): { text: string; changed: boolean; c
 function runnerNeedsRefresh(path: string): boolean {
 	if (!existsSync(path)) return false;
 	const text = readFileSync(path, "utf8");
-	return !text.includes(RUNNER_VERSION) || text.includes("importUserPackage") || text.includes("PI_AGENT_NODE_MODULES");
+	return !text.includes(RUNNER_VERSION)
+		|| text.includes("importUserPackage")
+		|| text.includes("PI_AGENT_NODE_MODULES")
+		|| text.includes("function piWithHostDefault(model)")
+		|| text.includes("const base = pi(model && model !== \"Agent Default\"");
 }
 
 function ensureScaffold(cwd: string, options: { overwrite?: boolean; hydrate?: boolean } = {}): { changes: string[]; overwritten: string[] } {
@@ -1580,6 +1833,23 @@ function formatScalarForYaml(value: unknown): string {
 	return text;
 }
 
+function presentModelSetting(value: unknown): unknown {
+	return value === undefined || value === null || value === "" ? DEFAULT_MODEL : value;
+}
+
+function configForPresentation(cfg: SandcastleConfig): SandcastleConfig {
+	return {
+		...cfg,
+		defaultModel: presentModelSetting(cfg.defaultModel) as string,
+		agents: Object.fromEntries(Object.entries(cfg.agents).map(([name, agent]) => [name, { ...agent, model: presentModelSetting(agent.model) }])),
+		pipelines: Object.fromEntries(Object.entries(cfg.pipelines).map(([name, pipeline]) => [name, {
+			...pipeline,
+			model: presentModelSetting(pipeline.model) as string,
+			steps: (pipeline.steps || []).map((step) => ({ ...step, model: presentModelSetting(step.model) as string })),
+		}])) as Record<string, PipelineDef>,
+	};
+}
+
 function formatConfigValue(value: unknown): string {
 	if (typeof value === "string") return value;
 	return JSON.stringify(value, null, 2);
@@ -1609,10 +1879,12 @@ function supportedConfigPath(path: string): boolean {
 function defaultConfigValue(path: string): unknown {
 	const parts = splitConfigPath(path);
 	if (parts.length === 1 && isRootConfigKey(parts[0])) {
-		return DEFAULT_CONFIG[parts[0]];
+		const value = DEFAULT_CONFIG[parts[0]];
+		return parts[0] === "defaultModel" ? presentModelSetting(value) : value;
 	}
 	if (parts[0] === "roles" && parts.length === 3 && isEditableAgentField(parts[2])) {
-		return DEFAULT_CONFIG.agents[parts[1]]?.[parts[2]];
+		const value = DEFAULT_CONFIG.agents[parts[1]]?.[parts[2]];
+		return parts[2] === "model" ? presentModelSetting(value) : value;
 	}
 	return undefined;
 }
@@ -1923,21 +2195,44 @@ function validateConfig(cwd: string, cfg: SandcastleConfig): string[] {
 	return issues;
 }
 
+function normalizeModelSetting(value: unknown): string | undefined {
+	if (value === undefined || value === null || value === "" || value === DEFAULT_MODEL || value === "default") return undefined;
+	return String(value);
+}
+
+function normalizeAgentConfig(agent: AgentDef): AgentDef {
+	return { ...agent, model: normalizeModelSetting(agent.model) };
+}
+
+function normalizePipelineStepConfig(step: PipelineStep): PipelineStep {
+	return { ...step, model: normalizeModelSetting(step.model) };
+}
+
+function normalizePipelineConfig(pipeline: PipelineDef): PipelineDef {
+	return {
+		...pipeline,
+		model: normalizeModelSetting(pipeline.model),
+		steps: (pipeline.steps || []).map(normalizePipelineStepConfig),
+	};
+}
+
 function normalizeConfig(cfg: Partial<SandcastleConfig>): SandcastleConfig {
 	return {
 		defaultSandbox: cfg.defaultSandbox ?? DEFAULT_SANDBOX,
-		defaultModel: cfg.defaultModel ?? DEFAULT_MODEL,
+		defaultModel: normalizeModelSetting(cfg.defaultModel),
 		defaultPipeline: cfg.defaultPipeline ?? "simple-loop",
 		defaultAgent: cfg.defaultAgent ?? "claude-code",
+		maxWorkers: cfg.maxWorkers ?? 5,
+		maxIterations: cfg.maxIterations ?? 10,
 		workSource: cfg.workSource ?? cfg.issueTracker ?? "github-issues",
 		workSourceSetupCommand: cfg.workSourceSetupCommand ?? cfg.issueTrackerSetupCommand,
 		issueTracker: cfg.issueTracker,
 		issueTrackerSetupCommand: cfg.issueTrackerSetupCommand,
 		imageNamePattern: cfg.imageNamePattern ?? "sandcastle:<repo-dir-name>",
 		prompts: cfg.prompts || {},
-		agents: cfg.agents || {},
+		agents: Object.fromEntries(Object.entries(cfg.agents || {}).map(([name, agent]) => [name, normalizeAgentConfig(agent)])),
 		chains: cfg.chains || {},
-		pipelines: cfg.pipelines || {},
+		pipelines: Object.fromEntries(Object.entries(cfg.pipelines || {}).map(([name, pipeline]) => [name, normalizePipelineConfig(pipeline)])),
 	};
 }
 
@@ -2031,7 +2326,7 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 		}
 		const trimmed = line.trim();
 		if (!trimmed || trimmed.startsWith("#")) continue;
-		const top = trimmed.match(/^(defaultSandbox|defaultModel|defaultPipeline|defaultAgent|workSource|workSourceSetupCommand|issueTracker|issueTrackerSetupCommand|imageNamePattern):\s*(.*)$/);
+		const top = trimmed.match(/^(defaultSandbox|defaultModel|defaultPipeline|defaultAgent|maxWorkers|maxIterations|workSource|workSourceSetupCommand|issueTracker|issueTrackerSetupCommand|imageNamePattern):\s*(.*)$/);
 		if (top) {
 			const key = top[1] as RootConfigKey;
 			setField(cfg, key, parseScalar(top[2]) as SandcastleConfig[typeof key]);
@@ -2245,6 +2540,29 @@ function buildRunSummary(record: ScRunRecord): string {
 	return `Run ${record.id} ${record.status}: agent ${record.agent}; branch ${record.branch || "(pending)"}; commits ${commits}; log ${record.logPath || "(pending)"}`;
 }
 
+function formatPipelineWorkerRows(record: Pick<WorkProcessRunRecord, "workerStatuses"> | undefined): string[] {
+	return (record?.workerStatuses || []).map((step) => {
+		const commits = step.commits?.length ? `; commits ${step.commits.join(", ")}` : "";
+		const branch = step.branch ? `; branch ${step.branch}` : "";
+		const log = step.logPath ? `; log ${step.logPath}` : "";
+		return `Worker ${step.index + 1}: ${step.role} ${step.status}${branch}${commits}${log}`;
+	});
+}
+
+function formatWorkProcessSummary(input: { record: WorkProcessRunRecord; recordPath: string; advisoryNotes?: string[] }): string {
+	const lines = [
+		`Work process ${input.record.status}: ${input.record.id} · pipeline ${input.record.pipeline}`,
+		`Pipeline: ${input.record.pipeline}`,
+		`Items: ${input.record.resolvedItems.length}`,
+		...formatPipelineWorkerRows(input.record),
+		`Record: ${input.recordPath}`,
+	];
+	if (input.record.branches.length) lines.push(`Branches: ${input.record.branches.join(", ")}`);
+	if (input.record.logs.length) lines.push(`Logs: ${input.record.logs.join(", ")}`);
+	if (input.advisoryNotes?.length) lines.push(...input.advisoryNotes);
+	return lines.join("\n");
+}
+
 const AGENT_DEFAULT_MODELS: Record<string, string> = {
 	claude: "claude-opus-4-8",
 	"claude-code": "claude-opus-4-8",
@@ -2256,8 +2574,128 @@ const AGENT_DEFAULT_MODELS: Record<string, string> = {
 };
 
 function resolveModelForProvider(model: string | undefined, provider: string | undefined): string {
+	if (provider === "pi" && (!model || model === "Agent Default")) return "Agent Default";
 	if (!model || model === DEFAULT_MODEL) return AGENT_DEFAULT_MODELS[provider || "pi"] || AGENT_DEFAULT_MODELS.pi;
 	return model;
+}
+
+interface HostPiDefaults {
+	provider?: string;
+	model?: string;
+	thinking?: string;
+}
+
+interface HostPiAgentRuntime {
+	dir: string;
+	fileMounts: Array<{ hostPath: string; sandboxPath: string; readonly: true }>;
+}
+
+const HOST_PI_SANDBOX_DIR = "/home/agent/.pi-host-agent";
+
+function readHostPiDefaults(): HostPiDefaults {
+	const settingsPath = join(process.env.PI_CODING_AGENT_DIR || process.env.PI_HOST_AGENT_DIR || join(process.env.HOME || "", ".pi", "agent"), "settings.json");
+	try {
+		const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+		return {
+			provider: typeof settings.defaultProvider === "string" && settings.defaultProvider.trim() ? settings.defaultProvider : undefined,
+			model: typeof settings.defaultModel === "string" && settings.defaultModel.trim() ? settings.defaultModel : undefined,
+			thinking: typeof settings.defaultThinkingLevel === "string" && settings.defaultThinkingLevel.trim() ? settings.defaultThinkingLevel : undefined,
+		};
+	} catch {
+		return {};
+	}
+}
+
+function resolvePipelineModelForProvider(model: string | undefined, provider: string | undefined): string {
+	if (provider === "pi" && (!model || model === DEFAULT_MODEL)) return DEFAULT_MODEL;
+	return resolveModelForProvider(model, provider);
+}
+
+function createHostPiAgentRuntime(): HostPiAgentRuntime {
+	const sourceDir = process.env.PI_HOST_AGENT_DIR || join(process.env.HOME || "", ".pi", "agent");
+	const tmp = mkdtempSync(join(tmpdir(), "agent-workflows-pi-agent-"));
+	mkdirSync(join(tmp, "sessions"), { recursive: true });
+	const settingsPath = join(sourceDir, "settings.json");
+	let settings: any = {};
+	try { settings = JSON.parse(readFileSync(settingsPath, "utf8")); } catch {}
+	writeFileSync(join(tmp, "settings.json"), JSON.stringify({
+		defaultProvider: settings.defaultProvider,
+		defaultModel: settings.defaultModel,
+		defaultThinkingLevel: settings.defaultThinkingLevel,
+		theme: settings.theme,
+	}, null, 2));
+	const fileMounts: Array<{ hostPath: string; sandboxPath: string; readonly: true }> = [];
+	const authPath = join(sourceDir, "auth.json");
+	if (existsSync(authPath)) fileMounts.push({ hostPath: authPath, sandboxPath: `${HOST_PI_SANDBOX_DIR}/auth.json`, readonly: true });
+	const trustPath = join(sourceDir, "trust.json");
+	if (existsSync(trustPath)) fileMounts.push({ hostPath: trustPath, sandboxPath: `${HOST_PI_SANDBOX_DIR}/trust.json`, readonly: true });
+	return { dir: tmp, fileMounts };
+}
+
+function piAgentRuntimeDir(hostPiRuntime: HostPiAgentRuntime | undefined, sandbox: AgentDef["sandbox"] | undefined): string | undefined {
+	if (!hostPiRuntime) return undefined;
+	return sandbox === "no-sandbox" ? hostPiRuntime.dir : HOST_PI_SANDBOX_DIR;
+}
+
+function piAgentEnvironment(hostPiRuntime: HostPiAgentRuntime | undefined, sandbox: AgentDef["sandbox"] | undefined): Record<string, string> | undefined {
+	const dir = piAgentRuntimeDir(hostPiRuntime, sandbox);
+	if (!dir || sandbox === "no-sandbox") return undefined;
+	return {
+		PI_CODING_AGENT_DIR: dir,
+		PI_CODING_AGENT_SESSION_DIR: `${dir}/sessions`,
+	};
+}
+
+function hostPiSandboxOptions(cwd: string, cfg: Partial<SandcastleConfig>, hostPiRuntime: HostPiAgentRuntime | undefined): Record<string, unknown> | undefined {
+	const options: Record<string, unknown> = { imageName: defaultSandcastleImageName(cwd, cfg.imageNamePattern) };
+	if (hostPiRuntime) {
+		options.mounts = [
+			{ hostPath: hostPiRuntime.dir, sandboxPath: HOST_PI_SANDBOX_DIR, readonly: false },
+			...hostPiRuntime.fileMounts,
+		];
+		options.env = piAgentEnvironment(hostPiRuntime, "docker");
+	}
+	return options;
+}
+
+function createPiAgentWithHostDefaults(model: string | undefined, hostPiRuntime: HostPiAgentRuntime | undefined, sandbox: AgentDef["sandbox"] | undefined, piFactory = piAgent): any {
+	const host = readHostPiDefaults();
+	const explicitModel = Boolean(model && model !== DEFAULT_MODEL);
+	const effectiveModel = explicitModel ? model : host.model;
+	const base = piFactory(effectiveModel || DEFAULT_MODEL, { captureSessions: false } as any);
+	const nonCapturing = { ...base, captureSessions: false, sessionStorage: undefined };
+	if (explicitModel) return nonCapturing;
+	return {
+		...nonCapturing,
+		buildPrintCommand({ prompt, resumeSession }: any) {
+			const sessionFlag = resumeSession ? ` --session ${shellEscapeForCommand(resumeSession)}` : "";
+			const providerFlag = host.provider ? ` --provider ${shellEscapeForCommand(host.provider)}` : "";
+			const modelFlag = effectiveModel ? ` --model ${shellEscapeForCommand(effectiveModel)}` : "";
+			const thinkingFlag = host.thinking ? ` --thinking ${shellEscapeForCommand(host.thinking)}` : "";
+			return { command: `pi -p --mode json --no-session${providerFlag}${modelFlag}${thinkingFlag}${sessionFlag}`, stdin: prompt };
+		},
+		buildInteractiveArgs({ prompt }: any) {
+			const args = ["pi", "--no-session"];
+			if (host.provider) args.push("--provider", host.provider);
+			if (effectiveModel) args.push("--model", effectiveModel);
+			if (host.thinking) args.push("--thinking", host.thinking);
+			if (prompt) args.push(prompt);
+			return args;
+		},
+	};
+}
+
+function createAgentProviderForRuntime(model: string, provider: AgentDef["provider"] | undefined, options: { hostPiRuntime?: HostPiAgentRuntime; sandbox?: AgentDef["sandbox"]; claudeCodeFactory?: typeof claudeCode } = {}): any {
+	if (provider === "claude" || provider === "claude-code") return options.claudeCodeFactory ? options.claudeCodeFactory(model) : claudeCode(model);
+	if (provider === "codex") return codex(model);
+	if (provider === "cursor") return cursor(model);
+	if (provider === "opencode") return opencode(model);
+	if (provider === "copilot") return copilot(model);
+	return createPiAgentWithHostDefaults(model, options.hostPiRuntime, options.sandbox);
+}
+
+function shellEscapeForCommand(value: unknown): string {
+	return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
 
 function resolveAgentRuntimeSettings(agent: AgentDef, cfg: SandcastleConfig): AgentRuntimeSettings {
@@ -2269,22 +2707,15 @@ function resolveAgentRuntimeSettings(agent: AgentDef, cfg: SandcastleConfig): Ag
 	};
 }
 
-function resolveSandboxProvider(kind: SandcastleSandbox): SandboxProvider {
-	if (kind === "podman") return podman();
+function resolveSandboxProvider(kind: SandcastleSandbox, options?: Record<string, unknown>): SandboxProvider {
+	if (kind === "podman") return podman(options as any);
 	if (kind === "vercel") return vercel();
 	if (kind === "no-sandbox") return noSandbox();
-	return docker();
+	return docker(options as any);
 }
 
 const createDefaultSandcastleRunCapability = (): SandcastleRunCapability => ({
-	makeAgent: (model, provider = "pi") => {
-		if (provider === "claude" || provider === "claude-code") return claudeCode(model);
-		if (provider === "codex") return codex(model);
-		if (provider === "cursor") return cursor(model);
-		if (provider === "opencode") return opencode(model);
-		if (provider === "copilot") return copilot(model);
-		return piAgent(model);
-	},
+	makeAgent: (model, provider = "pi") => createAgentProviderForRuntime(model, provider),
 	makeSandbox: (kind) => resolveSandboxProvider(kind),
 	run: sandcastleRun,
 });
@@ -2355,6 +2786,8 @@ function scaffoldSetupSignature(cfg: SandcastleConfig): Record<string, unknown> 
 		runtimeVersion: 1,
 		defaultPipeline: cfg.defaultPipeline || "simple-loop",
 		defaultAgent: cfg.defaultAgent || "claude-code",
+		maxWorkers: cfg.maxWorkers || 5,
+		maxIterations: cfg.maxIterations || 10,
 		defaultSandbox: imageProviderForSandbox(cfg.defaultSandbox) || "docker",
 		defaultModel: cfg.defaultModel && cfg.defaultModel !== DEFAULT_MODEL ? cfg.defaultModel : DEFAULT_MODEL,
 		issueTracker: cfg.workSource || cfg.issueTracker || "github-issues",
@@ -2561,13 +2994,15 @@ function registerScRunCommand(
 				logPath: runSettings.logPath,
 			}, now);
 
+			let hostPiRuntime: HostPiAgentRuntime | undefined;
 			try {
+				hostPiRuntime = runSettings.provider === "pi" ? createHostPiAgentRuntime() : undefined;
 				await ensureSandboxImage(ctx.cwd, runSettings.sandbox, deps.image, (reason, imageName) => {
 					ctx.ui.notify(`Execution image ${imageName} is ${reason}; rebuilding before /work:run.`, "info");
 				}, cfg);
 				const result = await sandcastle.run({
-					agent: sandcastle.makeAgent(runSettings.model, runSettings.provider),
-					sandbox: sandcastle.makeSandbox(runSettings.sandbox),
+					agent: hostPiRuntime ? createAgentProviderForRuntime(runSettings.model, runSettings.provider, { hostPiRuntime, sandbox: runSettings.sandbox }) : sandcastle.makeAgent(runSettings.model, runSettings.provider),
+					sandbox: hostPiRuntime ? resolveSandboxProvider(runSettings.sandbox, hostPiSandboxOptions(ctx.cwd, cfg, hostPiRuntime)) : sandcastle.makeSandbox(runSettings.sandbox),
 					cwd: ctx.cwd,
 					prompt,
 					maxIterations: 1,
@@ -2595,6 +3030,8 @@ function registerScRunCommand(
 					error: error instanceof Error ? error.message : String(error),
 				}, now);
 				ctx.ui.notify(buildRunSummary(failedRecord), "error");
+			} finally {
+				if (hostPiRuntime?.dir) rmSync(hostPiRuntime.dir, { recursive: true, force: true });
 			}
 		},
 	});
@@ -2604,6 +3041,7 @@ interface PipelineRunStepRecord {
 	index: number;
 	role: string;
 	status: "running" | "completed" | "failed";
+	maxIterations?: number;
 	branch?: string;
 	commits: string[];
 	logPath: string;
@@ -2630,7 +3068,10 @@ interface PipelineRunRecord {
 interface PipelineExecutionDeps {
 	createWorktree?: typeof createWorktree;
 	claudeCode?: typeof claudeCode;
-	loadSandboxProvider?: (kind: AgentDef["sandbox"] | undefined) => Promise<any>;
+	makeAgent?: (model: string, provider?: AgentDef["provider"]) => any;
+	loadSandboxProvider?: (kind: AgentDef["sandbox"] | undefined, options?: Record<string, unknown>) => Promise<any>;
+	onStepUpdate?: (step: PipelineRunStepRecord, record: PipelineRunRecord) => void;
+	onStepStreamEvent?: (step: PipelineRunStepRecord, event: unknown, record: PipelineRunRecord) => void;
 	image?: SandboxImageDeps;
 	now?: () => number;
 }
@@ -2687,11 +3128,11 @@ function resolvePipelineBranchStrategy(pipelineName: string, pipeline: PipelineD
 	};
 }
 
-async function loadPipelineSandboxProvider(kind: AgentDef["sandbox"] | undefined): Promise<any> {
-	if (kind === "podman") return (await import("../../node_modules/@ai-hero/sandcastle/dist/sandboxes/podman.js")).podman();
+async function loadPipelineSandboxProvider(kind: AgentDef["sandbox"] | undefined, options?: Record<string, unknown>): Promise<any> {
+	if (kind === "podman") return (await import("../../node_modules/@ai-hero/sandcastle/dist/sandboxes/podman.js")).podman(options as any);
 	if (kind === "vercel") return (await import("../../node_modules/@ai-hero/sandcastle/dist/sandboxes/vercel.js")).vercel();
 	if (kind === "no-sandbox") return (await import("../../node_modules/@ai-hero/sandcastle/dist/sandboxes/no-sandbox.js")).noSandbox();
-	return (await import("../../node_modules/@ai-hero/sandcastle/dist/sandboxes/docker.js")).docker();
+	return (await import("../../node_modules/@ai-hero/sandcastle/dist/sandboxes/docker.js")).docker(options as any);
 }
 
 async function writePipelineRunRecord(record: PipelineRunRecord): Promise<void> {
@@ -2722,9 +3163,7 @@ export async function executePipeline(
 	const logDir = join(runDir, "logs");
 	const branchStrategy = resolvePipelineBranchStrategy(pipelineName, pipeline);
 	const createWorktreeImpl = deps.createWorktree || createWorktree;
-	const makePipelineAgent = deps.claudeCode
-		? (model: string) => deps.claudeCode!(model)
-		: (model: string) => piAgent(model);
+	const makePipelineAgent = deps.makeAgent;
 	const loadSandboxProvider = deps.loadSandboxProvider || loadPipelineSandboxProvider;
 	const record: PipelineRunRecord = {
 		id,
@@ -2756,38 +3195,49 @@ export async function executePipeline(
 				index,
 				role: step.role,
 				status: "running",
+				maxIterations: step.maxIterations || cfg.maxIterations || 10,
 				commits: [],
 				logPath: buildPipelineStepLogPath(logDir, index, step.role),
 			};
 			record.steps.push(stepRecord);
 			await writePipelineRunRecord(record);
+			deps.onStepUpdate?.(stepRecord, record);
 
 			const sandboxKind = step.sandbox || pipeline.sandbox || cfg.defaultSandbox || DEFAULT_SANDBOX;
 			await ensureSandboxImage(cwd, sandboxKind, deps.image, undefined, cfg);
-			const sandbox = await loadSandboxProvider(sandboxKind);
 			const role = cfg.agents[step.role];
-			const stepPromptBody = resolvePipelineStepPrompt(step.promptOverride || resolvePromptText(cfg, step.prompt), input, prompt);
-			const stepPrompt = role?.systemPrompt ? `${role.systemPrompt}\n\n## Delegated task\n\n${stepPromptBody}` : stepPromptBody;
-			const result = await worktree.run({
-				agent: makePipelineAgent(step.model || role?.model || pipeline.model || cfg.defaultModel || DEFAULT_MODEL),
-				sandbox,
+			const provider = role?.provider || cfg.defaultAgent || "pi";
+			const model = resolvePipelineModelForProvider(step.model || role?.model || pipeline.model || cfg.defaultModel, provider);
+			const hostPiRuntime = provider === "pi" ? createHostPiAgentRuntime() : undefined;
+			try {
+				const sandbox = await loadSandboxProvider(sandboxKind, hostPiRuntime ? hostPiSandboxOptions(cwd, cfg, hostPiRuntime) : { imageName: defaultSandcastleImageName(cwd, cfg.imageNamePattern) });
+				const stepPromptBody = resolvePipelineStepPrompt(step.promptOverride || resolvePromptText(cfg, step.prompt), input, prompt);
+				const stepPrompt = role?.systemPrompt ? `${role.systemPrompt}\n\n## Delegated task\n\n${stepPromptBody}` : stepPromptBody;
+				const result = await worktree.run({
+					agent: makePipelineAgent ? makePipelineAgent(model, provider) : createAgentProviderForRuntime(model, provider, { hostPiRuntime, sandbox: sandboxKind, claudeCodeFactory: deps.claudeCode }),
+					sandbox,
 				prompt: stepPrompt,
-				maxIterations: step.maxIterations || 1,
+				maxIterations: step.maxIterations || cfg.maxIterations || 10,
 				logging: {
 					type: "file",
 					path: stepRecord.logPath,
 					verbose: true,
+					onAgentStreamEvent: (event: unknown) => deps.onStepStreamEvent?.(stepRecord, event, record),
 				},
-			});
+				});
 
-			const commitShas = getPipelineCommitShas(result.commits);
-			stepRecord.status = "completed";
-			stepRecord.branch = result.branch;
-			stepRecord.commits = commitShas;
-			record.branch = result.branch || record.branch;
-			stepRecord.logPath = result.logFilePath || stepRecord.logPath;
-			input = summarizePipelineStepResult(pipelineName, step.role, result.branch, commitShas, stepRecord.logPath);
-			await writePipelineRunRecord(record);
+				const commitShas = getPipelineCommitShas(result.commits);
+				stepRecord.status = "completed";
+				stepRecord.branch = result.branch;
+				stepRecord.commits = commitShas;
+				record.branch = result.branch || record.branch;
+				stepRecord.logPath = result.logFilePath || stepRecord.logPath;
+				input = summarizePipelineStepResult(pipelineName, step.role, result.branch, commitShas, stepRecord.logPath);
+				await writePipelineRunRecord(record);
+				deps.onStepUpdate?.(stepRecord, record);
+			} finally {
+				if (hostPiRuntime?.dir) rmSync(hostPiRuntime.dir, { recursive: true, force: true });
+			}
 		}
 		record.status = "completed";
 		record.completedAt = new Date(now()).toISOString();
@@ -2801,6 +3251,7 @@ export async function executePipeline(
 		if (lastStep && lastStep.status === "running") {
 			lastStep.status = "failed";
 			lastStep.error = record.error;
+			deps.onStepUpdate?.(lastStep, record);
 		}
 		await writePipelineRunRecord(record);
 		throw error;
@@ -2811,13 +3262,43 @@ export async function executePipeline(
 
 function renderWidget(runs: Map<string, RunState>): string[] {
 	const active = [...runs.values()].sort((a, b) => b.startedAt - a.startedAt).slice(0, 8);
-	const lines = [`Execution runs: ${runs.size}`];
+	const lines = [`Execution workers: ${runs.size}`];
 	for (const run of active) {
-		const age = Math.round((Date.now() - run.startedAt) / 1000);
+		const ageSource = run.endedAt || Date.now();
+		const age = Math.max(0, Math.round((ageSource - run.startedAt) / 1000));
 		const commits = run.commits?.length ? ` · ${run.commits.length} commit(s)` : "";
 		lines.push(`${run.status.padEnd(9)} ${run.agent.padEnd(12)} ${age}s · ${run.lastLine || run.task.slice(0, 48)}${commits}`);
 	}
 	return lines;
+}
+
+function compactStatusText(text: unknown, max = 120): string {
+	const compact = String(text || "").replace(/\s+/g, " ").trim();
+	return compact.length > max ? `${compact.slice(0, max - 1)}…` : compact;
+}
+
+function formatAgentStreamStatus(event: any, maxIterations?: number): string | undefined {
+	if (!event || typeof event !== "object") return undefined;
+	const iteration = Number.isFinite(event.iteration) ? Number(event.iteration) : undefined;
+	const iterationPrefix = iteration ? `iter ${iteration}${maxIterations ? `/${maxIterations}` : ""}: ` : "";
+	if (event.type === "toolCall") return `${iterationPrefix}tool: ${event.name || "tool"}`;
+	if (event.type === "text") return `${iterationPrefix}${compactStatusText(event.message || event.text || "", 120)}`;
+	if (event.type === "raw") {
+		const raw = String(event.line || event.text || "").trim();
+		if (raw.startsWith("{")) {
+			try {
+				const parsed = JSON.parse(raw);
+				const nestedType = parsed.assistantMessageEvent?.type || parsed.type;
+				if (["thinking_start", "message_start", "message_update"].includes(nestedType)) return undefined;
+				const text = parsed.text || parsed.message || parsed.assistantMessageEvent?.text || parsed.delta?.text;
+				return text ? `${iterationPrefix}${compactStatusText(text, 120)}` : undefined;
+			} catch {
+				return undefined;
+			}
+		}
+		return `${iterationPrefix}${compactStatusText(raw, 120)}`;
+	}
+	return undefined;
 }
 
 function completionItems(values: Array<string | SelectItem>, prefix: string): SelectItem[] | null {
@@ -2937,7 +3418,7 @@ function allowsCustomValueForPath(path: string): boolean {
 function coerceConfigValue(path: string, rawValue: string): unknown {
 	const field = splitConfigPath(path).at(-1);
 	if (rawValue === "default" && isDefaultableConfigPath(path)) return rawValue;
-	if (field === "maxIterations") {
+	if (field === "maxIterations" || field === "maxWorkers") {
 		const value = Number(rawValue);
 		if (!Number.isInteger(value) || value < 1) throw new Error(`${path} must be a positive integer.`);
 		return value;
@@ -2974,6 +3455,8 @@ function friendlyConfigLabel(pathOrField: string): string {
 		defaultModel: "Model",
 		defaultPipeline: "Default Pipeline",
 		defaultAgent: "Default Agent",
+		maxWorkers: "Max Workers",
+		maxIterations: "Max Iterations",
 		workSource: "Work Source",
 		workSourceSetupCommand: "Work Source Setup Command",
 		issueTracker: "Issue Tracker (legacy)",
@@ -3079,7 +3562,7 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 		const defaultsScreen = (): Screen => ({
 			title: "RUNTIME DEFAULTS",
 			subtitle: "User-configurable fallback settings; local environment details live under Actions",
-			items: [field("defaultSandbox"), field("defaultModel"), field("defaultPipeline"), field("defaultAgent"), field("workSource"), field("workSourceSetupCommand"), field("imageNamePattern")],
+			items: [field("defaultSandbox"), field("defaultModel"), field("defaultPipeline"), field("defaultAgent"), field("maxWorkers"), field("maxIterations"), field("workSource"), field("workSourceSetupCommand"), field("imageNamePattern")],
 		});
 
 		const agentsScreen = (): Screen => ({
@@ -3480,6 +3963,7 @@ export default function agentWorkflows(
 	let configImageRebuild: Promise<void> | undefined;
 	const sandcastle = deps.sandcastle ?? createDefaultSandcastleRunCapability();
 	const backlogDeps = deps.work || deps.backlog || {};
+	let widgetRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 	const isConfigImageRebuildInProgress = () => !!configImageRebuild;
 	const startConfigImageRebuild = (ctx: any, cfg: SandcastleConfig) => {
 		const provider = imageProviderForSandbox(cfg.defaultSandbox) || "docker";
@@ -3499,6 +3983,13 @@ export default function agentWorkflows(
 
 	function refreshWidget() {
 		widgetCtx?.ui.setWidget("agent-workflows", renderWidget(runs));
+		if ([...runs.values()].some((run) => run.status === "running") && !widgetRefreshTimer) {
+			widgetRefreshTimer = setTimeout(() => {
+				widgetRefreshTimer = undefined;
+				refreshWidget();
+			}, 1000);
+			widgetRefreshTimer.unref?.();
+		}
 	}
 
 	function helpText(): string {
@@ -3561,17 +4052,12 @@ Work views and processing:
 		const readyOutput = backlogDeps.ready
 			? await backlogDeps.ready(ctx.cwd, args)
 			: (await runProcess(ctx.cwd, "dv", ["work", "ready"])).stdout.trim();
-		const snapshotCwd = createPlannerSnapshot(ctx.cwd);
-		try {
-			const task = `Run the Work planning phase for this repository.\n\nGuardrails: you are running inside a disposable planner snapshot. Do not attempt to update the source repository, create branches for execution, or perform Work Source mutations. Any filesystem changes you make are discarded after planning.\n\nRequested plan arguments: ${args || "(none)"}\n\nReady Work input from the configured Work Source:\n${readyOutput}\n\nReturn an authoritative Work Plan JSON object with an iterations array, item ids, dependency/classification/risk rationale, and any HITL constraints. Do not author execution mechanics such as pipeline names or branch names. End with <promise>COMPLETE</promise>.`;
-			if (backlogDeps.runPlanWorkRole) return backlogDeps.runPlanWorkRole({ cwd: ctx.cwd, args, role: agent, task, snapshotCwd, ctx });
-			const run = await dispatch(ctx.cwd, agent, task, ctx, { executionCwd: snapshotCwd, branchPrefix: "agent-workflows/planner" });
-			await new Promise<void>((resolve) => run.proc?.on("close", () => resolve()));
-			if (run.status !== "done") throw new Error(`Planner role failed: ${run.lastLine}`);
-			return JSON.parse(readFileSync(run.resultPath!, "utf8"));
-		} finally {
-			rmSync(snapshotCwd, { recursive: true, force: true });
-		}
+		const task = `Run the Work planning phase for this repository.\n\nGuardrails: you are running inside an isolated planner workspace created through the normal execution engine. Do not attempt to update the source repository, create branches for execution, or perform Work Source mutations. Any filesystem changes you make are discarded after planning.\n\nRequested plan arguments: ${args || "(none)"}\n\nMax workers available for a single parallel iteration: ${cfg.maxWorkers || 5}. When selecting unblocked-ready-AFK work, plan no more than this many independently executable items in one actionable iteration.\n\nReady Work input from the configured Work Source:\n${readyOutput}\n\nReturn one authoritative Work Plan JSON object using kind \"workPlan\" and scope \"forecast\". Include an actionable Work Plan at field actionable with scope \"actionable\" containing only currently executable work from the Ready Work input. The top-level forecast iterations may map future waves that could become unblocked after earlier iterations complete, but forecast waves are advisory only. Each iteration must contain an items array of objects such as {\"id\": \"wi-001\"}; do not return bare string item ids. Each iteration rationale must be a string; if you have dependency/classification/risk rationale, combine it into one readable rationale string or put details in classifications. Include any HITL constraints and blocked/deferred work summaries when relevant. Do not author execution mechanics such as pipeline names or branch names. End with <promise>COMPLETE</promise>.`;
+		if (backlogDeps.runPlanWorkRole) return backlogDeps.runPlanWorkRole({ cwd: ctx.cwd, args, role: agent, task, ctx });
+		const run = await dispatch(ctx.cwd, agent, task, ctx, { branchPrefix: "agent-workflows/planner" });
+		await new Promise<void>((resolve) => run.proc?.on("close", () => resolve()));
+		if (run.status !== "done") throw new Error(`Planner role failed: ${run.lastLine}`);
+		return JSON.parse(readFileSync(run.resultPath!, "utf8"));
 	}
 
 	async function notifyBacklogPlan(args: string, ctx: any, overrides?: { iterations?: number }): Promise<void> {
@@ -3606,7 +4092,8 @@ Work views and processing:
 		}
 	}
 
-	async function dispatch(cwd: string, agentName: string, task: string, ctx?: any, options: { executionCwd?: string; branchPrefix?: string } = {}): Promise<RunState> {
+	async function dispatch(cwd: string, agentName: string, task: string, ctx?: any, options: { branchPrefix?: string } = {}): Promise<RunState> {
+		assertSandcastleWorkspaceSource(cwd);
 		ensureScaffold(cwd, { hydrate: false });
 		const cfg = await loadConfig(cwd);
 		const agent = cfg.agents[agentName];
@@ -3617,18 +4104,23 @@ Work views and processing:
 		const branch = agent.branch || `${options.branchPrefix || "sandcastle"}/${agentName}/${id}`;
 		const jobPath = join(cwd, JOBS_DIR, `${id}.json`);
 		const runtime = resolveAgentRuntimeSettings(agent, cfg);
+		const hostPiRuntime = runtime.provider === "pi" ? createHostPiAgentRuntime() : undefined;
 		const job = {
 			id,
 			name: `${agentName}:${id}`,
 			agent: agentName,
-			cwd: options.executionCwd || cwd,
+			cwd,
 			model: runtime.model,
 			provider: runtime.provider,
 			sandbox: runtime.sandbox,
 			imageName: defaultSandcastleImageName(cwd, cfg.imageNamePattern),
+			hostPiConfig: runtime.provider === "pi",
+			hostPiAgentDir: hostPiRuntime?.dir,
+			hostPiFileMounts: hostPiRuntime?.fileMounts,
 			systemPrompt: agent.systemPrompt || "",
 			prompt: task,
-			maxIterations: agent.maxIterations || 1,
+			maxIterations: agent.maxIterations || cfg.maxIterations || 10,
+			outputKind: agent.kind === "planWork" ? "work-plan" : undefined,
 			branch,
 			copyToWorktree: agent.copyToWorktree,
 			logPath,
@@ -3647,6 +4139,7 @@ Work views and processing:
 				refreshWidget();
 			}, cfg);
 		} catch (error) {
+			if (hostPiRuntime?.dir) rmSync(hostPiRuntime.dir, { recursive: true, force: true });
 			state.status = "error";
 			state.lastLine = error instanceof Error ? error.message.slice(0, 120) : String(error).slice(0, 120);
 			refreshWidget();
@@ -3807,6 +4300,17 @@ Work views and processing:
 		return results;
 	}
 
+	function pruneTerminalWidgetRows(): void {
+		let changed = false;
+		for (const [id, run] of runs.entries()) {
+			if (run.status === "done" || run.status === "error" || run.status === "cancelled") {
+				runs.delete(id);
+				changed = true;
+			}
+		}
+		if (changed) refreshWidget();
+	}
+
 	async function executeBacklogProcessing(
 		cwd: string,
 		input: {
@@ -3823,6 +4327,7 @@ Work views and processing:
 	): Promise<BacklogExecutionResult> {
 		if (backlogDeps.execute) return backlogDeps.execute(cwd, input);
 
+		pruneTerminalWidgetRows();
 		const contextByItemId = new Map(input.executionContexts.map((context) => [context.itemId, context]));
 		const runtimePrompt = [
 			`Work process ${input.runId}`,
@@ -3839,12 +4344,93 @@ Work views and processing:
 				return `- ${item.id} ${item.title} (${item.sourcePath})${item.summary ? ` — ${item.summary}` : ""}${context ? ` [context ${context.contextId}]` : ""}`;
 			}),
 		].join("\n");
-		const pipelineRun = await executePipeline(cwd, input.pipeline, runtimePrompt, { ...deps.pipeline, image: deps.pipeline?.image || deps.image });
-		return {
-			branches: [pipelineRun.branch].filter((branch): branch is string => !!branch),
-			logs: [pipelineRun.logDir].filter((logPath): logPath is string => !!logPath),
-			status: pipelineRun.status === "completed" ? "done" : "error",
+		const statusRows = new Map<number, RunState[]>();
+		const cfg = await loadConfig(cwd);
+		for (const [index, step] of (cfg.pipelines[input.pipeline]?.steps || []).entries()) {
+			const parallelSlots = input.parallel && step.role === "implementer" ? Math.max(1, Number(cfg.maxWorkers || 5)) : 1;
+			const rows = Array.from({ length: parallelSlots }, (_, fanoutIndex) => {
+				const item = input.parallel && step.role === "implementer" ? input.items[fanoutIndex] : undefined;
+				const suffix = item ? `-${sanitizePathSegment(item.id)}` : parallelSlots > 1 ? `-slot-${fanoutIndex + 1}` : "";
+				const row: RunState = {
+					id: `${input.runId}-worker-${index + 1}${suffix}`,
+					agent: step.role,
+					task: `Work process ${input.runId} · pipeline ${input.pipeline} · worker ${index + 1}`,
+					status: "queued",
+					startedAt: Date.now(),
+					lastLine: item ? `waiting for ${item.id}` : parallelSlots > 1 ? `waiting for parallel slot ${fanoutIndex + 1}` : `waiting for step ${index + 1}`,
+				};
+				runs.set(row.id, row);
+				return row;
+			});
+			statusRows.set(index, rows);
+		}
+		if (statusRows.size) refreshWidget();
+		const updateWorkerStatus = (step: PipelineRunStepRecord) => {
+			let rows = statusRows.get(step.index);
+			if (!rows?.length) {
+				const row: RunState = {
+					id: `${input.runId}-worker-${step.index + 1}`,
+					agent: step.role,
+					task: `Work process ${input.runId} · pipeline ${input.pipeline} · worker ${step.index + 1}`,
+					status: "queued",
+					startedAt: Date.now(),
+					lastLine: `waiting for step ${step.index + 1}`,
+				};
+				rows = [row];
+				statusRows.set(step.index, rows);
+				runs.set(row.id, row);
+			}
+			for (const row of rows) {
+				const nextStatus = step.status === "completed" ? "done" : step.status === "failed" ? "error" : "running";
+				row.status = nextStatus;
+				if ((nextStatus === "done" || nextStatus === "error") && row.endedAt === undefined) row.endedAt = Date.now();
+				if (nextStatus === "running") row.endedAt = undefined;
+				row.branch = step.branch;
+				row.commits = step.commits;
+				row.logPath = step.logPath;
+				if (step.status === "running" && row.lastLine.startsWith("waiting")) row.lastLine = `iter 0${step.maxIterations ? `/${step.maxIterations}` : ""}: started step ${step.index + 1}`;
+				if (step.status === "completed" || step.status === "failed") row.lastLine = `${step.status}${step.branch ? ` on ${step.branch}` : ""}`;
+			}
+			refreshWidget();
 		};
+		try {
+			const pipelineRun = await executePipeline(cwd, input.pipeline, runtimePrompt, {
+				...deps.pipeline,
+				image: deps.pipeline?.image || deps.image,
+				onStepUpdate: (step, record) => {
+					updateWorkerStatus(step);
+					deps.pipeline?.onStepUpdate?.(step, record);
+				},
+				onStepStreamEvent: (step, event, record) => {
+					updateWorkerStatus(step);
+					const rows = statusRows.get(step.index) || [];
+					const status = formatAgentStreamStatus(event, step.maxIterations);
+					if (status) {
+						for (const row of rows) row.lastLine = status;
+						refreshWidget();
+					}
+					deps.pipeline?.onStepStreamEvent?.(step, event, record);
+				},
+			});
+			return {
+				branches: [pipelineRun.branch].filter((branch): branch is string => !!branch),
+				logs: pipelineRun.steps.map((step) => step.logPath).filter((logPath): logPath is string => !!logPath),
+				workerStatuses: pipelineRun.steps.map((step) => ({ index: step.index, role: step.role, status: step.status, branch: step.branch, commits: step.commits, logPath: step.logPath, error: step.error })),
+				status: pipelineRun.status === "completed" ? "done" : "error",
+			};
+		} catch (error) {
+			for (const rows of statusRows.values()) {
+				for (const row of rows) {
+					if (row.status === "running") {
+						row.status = "error";
+						row.endedAt = Date.now();
+						row.lastLine = error instanceof Error ? error.message.slice(0, 120) : String(error).slice(0, 120);
+					}
+				}
+			}
+			if (statusRows.size) refreshWidget();
+			throw error;
+		}
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -4004,7 +4590,7 @@ Work views and processing:
 				switch (subcommand) {
 					case "show": {
 						const cfg = await loadConfig(ctx.cwd);
-						ctx.ui.notify(JSON.stringify(cfg, null, 2), "info");
+						ctx.ui.notify(JSON.stringify(configForPresentation(cfg), null, 2), "info");
 						break;
 					}
 					case "init": {
@@ -4055,7 +4641,7 @@ Work views and processing:
 							ctx.ui.notify("Usage: /work:config get <path>", "error");
 							break;
 						}
-						const cfg = await loadConfig(ctx.cwd);
+						const cfg = configForPresentation(await loadConfig(ctx.cwd));
 						const value = readConfigValue(cfg, path);
 						if (value === undefined) {
 							ctx.ui.notify(`Unknown or unset config path '${path}'.`, "error");
@@ -4160,7 +4746,7 @@ Work views and processing:
 			try {
 				const { query, pipeline: explicitPipeline, planId } = parseBacklogProcessArgs(args);
 				const cfg = await loadConfig(ctx.cwd);
-				const { record: finalRecord, recordPath } = await runWorkProcess(
+				const { record: finalRecord, recordPath, advisoryNotes = [] } = await runWorkProcess(
 					{
 						cwd: ctx.cwd,
 						query,
@@ -4178,7 +4764,7 @@ Work views and processing:
 					},
 				);
 				ctx.ui.notify(
-					`Work process ${finalRecord.status}: ${finalRecord.id} · pipeline ${finalRecord.pipeline} · items ${finalRecord.resolvedItems.length} · record ${recordPath}${finalRecord.branches.length ? ` · branches ${finalRecord.branches.join(", ")}` : ""}${finalRecord.logs.length ? ` · logs ${finalRecord.logs.join(", ")}` : ""}`,
+					formatWorkProcessSummary({ record: finalRecord, recordPath, advisoryNotes }),
 					finalRecord.status === "done" ? "success" : "error",
 				);
 			} catch (error) {

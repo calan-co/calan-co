@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import agentWorkflows, { parseSimpleYaml } from '../extensions/agent-workflows/index.ts';
+import agentWorkflows, { executePipeline, parseSimpleYaml } from '../extensions/agent-workflows/index.ts';
 
 function createFakePi() {
   const commands = new Map();
@@ -223,6 +223,132 @@ test('/work:pipeline registers and parses prompt text deterministically', async 
   assert.equal(record.steps[1].status, 'completed');
   assert.equal(record.steps[0].commits[0], 'commit-1');
   assert.equal(record.steps[1].commits[0], 'commit-2');
+});
+
+test('executePipeline propagates host pi provider defaults when pipeline config inherits Agent Default', async () => {
+  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-pi-default-model-'));
+  const hostPiDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-host-pi-'));
+  const previousHostPiDir = process.env.PI_HOST_AGENT_DIR;
+  try {
+    await fs.mkdir(path.join(repoRoot, '.pi/sandcastle'), { recursive: true });
+    await fs.writeFile(path.join(hostPiDir, 'settings.json'), JSON.stringify({ defaultProvider: 'openai-codex', defaultModel: 'host-pi-model' }), 'utf8');
+    process.env.PI_HOST_AGENT_DIR = hostPiDir;
+    await fs.writeFile(path.join(repoRoot, '.pi/sandcastle/config.yaml'), [
+      'defaultAgent: pi',
+      'defaultSandbox: no-sandbox',
+      'defaultModel: Agent Default',
+      'roles:',
+      '  worker:',
+      '    model: Agent Default',
+      'pipelines:',
+      '  simple-loop:',
+      '    sandbox: no-sandbox',
+      '    model: Agent Default',
+      '    steps:',
+      '      - role: worker',
+      '        prompt: $INPUT',
+    ].join('\n'), 'utf8');
+
+    const commands = [];
+    await executePipeline(repoRoot, 'simple-loop', 'do work', {
+      now: () => 1700000002000,
+      createWorktree: async () => ({
+        branch: 'sandcastle/simple-loop',
+        worktreePath: path.join(repoRoot, '.pi/sandcastle/worktrees/simple-loop'),
+        close: async () => ({}),
+        run: async (options) => {
+          commands.push(options.agent.buildPrintCommand({ prompt: options.prompt }).command);
+          return {
+            iterations: [],
+            commits: [],
+            branch: 'sandcastle/simple-loop',
+            stdout: '',
+            logFilePath: options.logging.path,
+          };
+        },
+      }),
+      loadSandboxProvider: async (kind) => ({ kind }),
+    });
+
+    assert.match(commands[0], /--provider 'openai-codex'/);
+    assert.match(commands[0], /--model 'host-pi-model'/);
+  } finally {
+    if (previousHostPiDir === undefined) delete process.env.PI_HOST_AGENT_DIR;
+    else process.env.PI_HOST_AGENT_DIR = previousHostPiDir;
+    await fs.rm(repoRoot, { recursive: true, force: true });
+    await fs.rm(hostPiDir, { recursive: true, force: true });
+  }
+});
+
+test('executePipeline gives pi pipeline steps the same host agent directory mounts used by /work:plan', async () => {
+  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-pi-host-mounts-'));
+  const hostPiDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-host-pi-mounts-'));
+  const previousHostPiDir = process.env.PI_HOST_AGENT_DIR;
+  try {
+    await fs.mkdir(path.join(repoRoot, '.pi/sandcastle'), { recursive: true });
+    await fs.writeFile(path.join(hostPiDir, 'settings.json'), JSON.stringify({ defaultProvider: 'azure-openai-responses', defaultModel: 'host-pi-model' }), 'utf8');
+    await fs.writeFile(path.join(hostPiDir, 'auth.json'), JSON.stringify({ provider: 'secret' }), 'utf8');
+    await fs.writeFile(path.join(hostPiDir, 'trust.json'), JSON.stringify({ trusted: true }), 'utf8');
+    process.env.PI_HOST_AGENT_DIR = hostPiDir;
+    await fs.writeFile(path.join(repoRoot, '.pi/sandcastle/config.yaml'), [
+      'defaultAgent: pi',
+      'defaultSandbox: docker',
+      'defaultModel: Agent Default',
+      'roles:',
+      '  worker:',
+      '    provider: pi',
+      '    model: Agent Default',
+      'pipelines:',
+      '  simple-loop:',
+      '    sandbox: docker',
+      '    model: Agent Default',
+      '    steps:',
+      '      - role: worker',
+      '        prompt: $INPUT',
+    ].join('\n'), 'utf8');
+
+    const sandboxCalls = [];
+    const runCalls = [];
+    await executePipeline(repoRoot, 'simple-loop', 'do work', {
+      now: () => 1700000003000,
+      createWorktree: async () => ({
+        branch: 'sandcastle/simple-loop',
+        worktreePath: path.join(repoRoot, '.pi/sandcastle/worktrees/simple-loop'),
+        close: async () => ({}),
+        run: async (options) => {
+          runCalls.push(options);
+          return { iterations: [], commits: [], branch: 'sandcastle/simple-loop', stdout: '' };
+        },
+      }),
+      loadSandboxProvider: async (kind, options) => {
+        sandboxCalls.push({ kind, options });
+        return { kind, options };
+      },
+      image: {
+        inspectImageCreated: async () => new Date(1700000000000),
+      },
+    });
+
+    assert.equal(sandboxCalls[0].kind, 'docker');
+    assert.match(sandboxCalls[0].options.env.PI_CODING_AGENT_DIR, /\/home\/agent\/\.pi-host-agent/);
+    assert.deepEqual(
+      sandboxCalls[0].options.mounts.map((mount) => ({ sandboxPath: mount.sandboxPath, readonly: mount.readonly })),
+      [
+        { sandboxPath: '/home/agent/.pi-host-agent', readonly: false },
+        { sandboxPath: '/home/agent/.pi-host-agent/auth.json', readonly: true },
+        { sandboxPath: '/home/agent/.pi-host-agent/trust.json', readonly: true },
+      ],
+    );
+    assert.deepEqual(runCalls[0].agent.env, {}, 'sandboxed Pi runs must not duplicate PI_CODING_AGENT_* env on the agent provider');
+    const command = runCalls[0].agent.buildPrintCommand({ prompt: 'prompt' }).command;
+    assert.match(command, /--provider 'azure-openai-responses'/);
+    assert.match(command, /--model 'host-pi-model'/);
+  } finally {
+    if (previousHostPiDir === undefined) delete process.env.PI_HOST_AGENT_DIR;
+    else process.env.PI_HOST_AGENT_DIR = previousHostPiDir;
+    await fs.rm(repoRoot, { recursive: true, force: true });
+    await fs.rm(hostPiDir, { recursive: true, force: true });
+  }
 });
 
 test('/work:pipeline rejects unknown pipelines with available options', async () => {

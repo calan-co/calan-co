@@ -16,10 +16,12 @@
     "agentProvider": "claude-code",
     "sandboxProvider": "docker",
     "model": "Agent Default",
+    "maxWorkers": 5,
     "imagePolicy": "repo-default",
     "branchPolicy": "branch-per-run",
     "completionPolicy": "promise-complete",
-    "workSource": "github-issues"
+    "workSource": "github-issues",
+    "maxIterations": 10
   },
   "providers": {
     "agentProviders": {
@@ -96,7 +98,6 @@
       "provider": "default",
       "model": "default",
       "sandbox": "default",
-      "maxIterations": 1,
       "systemPrompt": "You are the Agent Workflows planner role. Analyze dependencies, select safe Work, and produce deterministic plans."
     },
     "worker": {
@@ -104,7 +105,6 @@
       "provider": "default",
       "model": "default",
       "sandbox": "default",
-      "maxIterations": 3,
       "systemPrompt": "You are the Agent Workflows worker role. Pick one open Work Item, complete it, validate it, and report results."
     },
     "implementer": {
@@ -112,7 +112,6 @@
       "provider": "default",
       "model": "default",
       "sandbox": "default",
-      "maxIterations": 100,
       "systemPrompt": "You are the Agent Workflows implementer role. Implement the selected Work Item on an isolated branch and validate your work."
     },
     "reviewer": {
@@ -120,7 +119,6 @@
       "provider": "default",
       "model": "default",
       "sandbox": "default",
-      "maxIterations": 1,
       "systemPrompt": "You are the Agent Workflows reviewer role. Review branch diffs for correctness, regressions, and missing tests."
     },
     "merger": {
@@ -128,7 +126,6 @@
       "provider": "default",
       "model": "default",
       "sandbox": "default",
-      "maxIterations": 1,
       "systemPrompt": "You are the Agent Workflows merger role. Merge accepted branches, resolve conflicts conservatively, and summarize the result."
     }
   },
@@ -257,7 +254,10 @@
         {
           "id": "plan",
           "kind": "planWork",
-          "prompt": "plan-work"
+          "prompt": "plan-work",
+          "overrides": {
+            "maxIterations": 1
+          }
         },
         {
           "id": "implement",
@@ -266,7 +266,6 @@
             "plan"
           ],
           "over": "$.steps.plan.outputs.items",
-          "concurrency": 4,
           "step": {
             "id": "implement-one",
             "kind": "runRole",
@@ -280,7 +279,10 @@
           "needs": [
             "implement"
           ],
-          "strategy": "accepted-only"
+          "strategy": "accepted-only",
+          "overrides": {
+            "maxIterations": 1
+          }
         }
       ]
     },
@@ -293,7 +295,10 @@
         {
           "id": "plan",
           "kind": "planWork",
-          "prompt": "plan-work"
+          "prompt": "plan-work",
+          "overrides": {
+            "maxIterations": 1
+          }
         },
         {
           "id": "implement",
@@ -302,7 +307,6 @@
             "plan"
           ],
           "over": "$.steps.plan.outputs.items",
-          "concurrency": 4,
           "step": {
             "id": "implement-one",
             "kind": "runRole",
@@ -317,7 +321,6 @@
             "implement"
           ],
           "over": "$.steps.implement.outputs.branches",
-          "concurrency": 4,
           "step": {
             "id": "review-one",
             "kind": "review",
@@ -331,7 +334,10 @@
           "needs": [
             "review"
           ],
-          "strategy": "accepted-only"
+          "strategy": "accepted-only",
+          "overrides": {
+            "maxIterations": 1
+          }
         }
       ]
     },
