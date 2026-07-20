@@ -43,7 +43,7 @@ The default runtime pack lives at `extensions/agent-workflows/runtime-packs/sand
 - policies
 - adapter metadata
 
-The schema is `extensions/agent-workflows/schema/execution-runtime.schema.json`.
+The schema is `extensions/agent-workflows/schema/execution-runtime.schema.json`. The current architecture is documented in `docs/architecture/pi-sandcastle-execution-runtime.md` and ADR `docs/adr/0003-graph-native-workflow-runtime.md`.
 
 ## LLM tool
 

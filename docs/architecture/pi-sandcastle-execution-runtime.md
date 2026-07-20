@@ -2,287 +2,398 @@
 
 ## Decision
 
-Agent Workflows defines a host-portable, deterministic workflow model and uses Sandcastle as an execution-runtime adapter, not as the source of product-level workflow semantics.
+Agent Workflows defines a host-portable, deterministic graph workflow model and uses Sandcastle as a runtime adapter for concrete workspace, sandbox, and provider execution. Sandcastle is not the source of product-level workflow semantics.
 
 In this split:
 
-- **Pi extension layer** owns slash commands, completions, TUI config editing, schema validation, state freshness, and user-facing formatting.
-- **Agent Workflows runtime model** owns typed definitions for roles, prompts, pipelines, Work Sources, branch policy, image policy, completion policy, and execution records.
-- **Sandcastle adapter** owns the low-level primitive: run this agent provider with this prompt in this sandbox/worktree and return branch, commits, logs, and errors.
+- **Pi extension layer** owns `/work:*` commands, completions, TUI config editing, schema validation, freshness checks, and user-facing formatting.
+- **Agent Workflows runtime model** owns roles, prompts, graph pipelines, Work Sources, branch policy, image policy, completion policy, and durable execution records.
+- **Orchestrator** owns deterministic workflow control around Work Items: pipeline selection, plan validation, execution contexts, branch naming, fan-out/fan-in inputs, status rows, and run-record writes.
+- **Graph executor** owns concrete-node execution order, sibling `needs`, loop semantics, typed result coercion, and fail-closed mergeability/effect checks.
+- **Sandcastle adapter** owns the low-level runtime primitive: create this git worktree, run this agent provider with this prompt in this sandbox/worktree, close the worktree, and return branch, commits, logs, and errors.
 
-This preserves the strengths observed from Sandcastle AFK use—robust sandboxed execution, extensibility, tailored prompts, and resilient post-processing—while removing the recurring init/post-processing friction from the user-facing model.
+This preserves Sandcastle's execution strengths while removing Sandcastle template shape from the user-facing workflow model.
+
+## Current architectural state
+
+Agent Workflows is now **graph-native by default**:
+
+- Default runtime packs define `kind: composite` pipelines with map-form `nodes`.
+- Generated default config rendered via `configToYaml(packsToConfig())` emits graph-native pipeline definitions.
+- Legacy `steps[]` remain compatibility metadata/fallback for older repo configs.
+- New friendly-config TUI pipelines are graph-native `git.worktree` pipelines.
+- Graph-node role/prompt config paths are supported for deterministic raw config edits.
 
 ## Run records
 
 All durable execution state is a unified Run Record under `.pi/sandcastle/runs/`. Records carry a `kind` discriminator:
 
 - `direct-role` for `/work:run` ad hoc role execution.
-- `pipeline` for `/work:pipeline` executions, including per-step records.
-- `work-process` for `/work:process` records with query, resolved Work Items, selected pipeline, branches, logs, and resume metadata.
+- `pipeline` for `/work:pipeline` executions, including step and graph node records.
+- `work-process` for `/work:process` records with query, resolved Work Items, selected pipeline, execution contexts, branches, logs, node/lane statuses, and resume metadata.
 
 Command-specific views filter these Run Records instead of maintaining separate lifecycle stores. Legacy `.pi/sandcastle/backlog-runs/` and `.pi/sandcastle/results/` records may be read for migration, but new Work Process writes target the unified runs directory.
+
+## Runtime objects
+
+The stable, reusable, overrideable objects are:
+
+1. `runtimeVersion`
+   - Version of the Agent Workflows runtime contract.
+
+2. `metadata`
+   - Human-readable pack identity, provenance, and compatibility notes.
+
+3. `defaults`
+   - Global fallbacks for sandbox provider, agent provider, model, Work Source, image policy, branch policy, worker cap, iteration cap, and completion policy.
+
+4. `providers`
+   - Named adapters that Agent Workflows can resolve.
+   - Includes `agentProviders` and `sandboxProviders`.
+   - Provider entries describe capabilities/defaults; they do not execute workflows themselves.
+
+5. `workSources`
+   - Typed Work Source adapters such as `github-issues`, `beads`, `doc-vader`, or `custom`.
+
+6. `roles`
+   - Reusable named execution identities.
+   - Roles are globally scoped because they are reused across pipelines and surfaced in `/work:run`.
+   - Pipeline nodes reference roles by name.
+
+7. `prompts`
+   - Named prompt modules with inline text, file references, or generated templates.
+   - Prompt modules are top-level because they are reviewable product behavior and independently reusable.
+
+8. `pipelines`
+   - User-facing workflows composed from deterministic concrete graph nodes.
+   - Pipelines are command targets for `/work:pipeline` and `/work:process`.
+
+9. `policies`
+   - Reusable named policies for branches, images, completion, and future checks.
+
+10. `adapters`
+    - Runtime adapter bindings, initially including `sandcastle`.
+
+## Role and setting resolution
+
+Use a hybrid model:
+
+- Top-level `roles` define reusable execution identities and defaults.
+- Pipeline agent nodes reference a top-level role by name.
+- Node/pipeline overrides may provide `model`, `sandbox`, `maxIterations`, prompt selection, or prompt override without mutating the shared role.
+
+Resolution order:
+
+```text
+node override > pipeline default > referenced role > global defaults > provider defaults
+```
+
+Runtime pack and config files use `role:` for role references. `agent:` is not part of persisted runtime language; agent providers are selected via provider/model settings.
+
+`Agent Default` is presentation-only. Internally, inherited model settings normalize to undefined so host/provider defaults can propagate naturally.
+
+## Graph workflow model
+
+### Top-level shape
+
+Top-level workflows are `kind: composite`:
+
+```yaml
+pipelines:
+  example:
+    kind: composite
+    nodes:
+      workspace:
+        kind: git.worktree
+        nodes:
+          run:
+            kind: agent.pi
+            role: worker
+            prompt: blank
+```
+
+Rules:
+
+- Node ids are map keys.
+- `kind` is the only globally reserved concrete-node discriminator.
+- `needs` is scoped to sibling nodes in the current `nodes` map.
+- If the runtime cannot instantiate a concept directly, it should not be a `kind`.
+- Concrete provider-backed kinds are provider-first namespaced, e.g. `agent.pi`, `git.worktree`, `git.merge`, `docker.container`, `podman.container`.
+- Abstract concepts such as `WorkspaceResult`, `AgentResult`, and `GitMergeResult` are typed results, not node kinds.
+
+### Built-in concrete node kinds
+
+- `composite`
+  - Executes a child `nodes` map by sibling `needs`.
+- `loop`
+  - Executes `node` or `nodes` repeatedly.
+  - `mode` defaults to `sequential`; `parallel` respects `max` as concurrency.
+  - `each` resolves the input collection for per-item lanes.
+- `agent.pi`
+  - Runs a configured role/prompt through the Pi provider via the runtime adapter.
+  - Produces an `AgentResult` and may report branch, commits, log path, stdout, item/lane metadata.
+- `git.worktree`
+  - Opens an isolated workspace branch/worktree, runs child nodes inside it, closes it, and returns `WorkspaceResult`.
+- `git.merge`
+  - Consumes mergeable/effectful `WorkspaceResult` inputs and merges branches into the target worktree.
+- `docker.container` / `podman.container`
+  - Reserved concrete container nodes for future direct container execution.
+
+Legacy step kinds (`planWork`, `runRole`, `review`, `merge`, `fanOut`) remain compatibility metadata/fallback, not the preferred persisted pipeline representation.
+
+## Typed results and effect rules
+
+Every graph node produces a strongly typed result:
+
+- `AgentResult` is role/agent output. It is not mergeable by itself.
+- `WorkspaceResult` is produced by `git.worktree`. It is mergeable only when trusted by the graph executor and backed by commits or non-log repository effects.
+- `GitMergeResult` is produced by `git.merge` after deterministic git merge commands.
+- `LoopResult` aggregates iteration results and mergeable workspace children.
+- `CompositeResult` aggregates child node results.
+
+Effect rules:
+
+- Commits count as repository effects.
+- Non-log repository effects count as effects.
+- `logPath` and log artifacts do **not** count as effects.
+- Logs and log paths remain observable artifacts, but they do not count as repository effects.
+- Non-empty graph pipeline/process execution fails closed when no repository effect is produced.
+- `git.merge` fails closed on no mergeable inputs, no effects, log-only inputs, missing branch, and merge conflict.
+
+## Declarative → imperative → runtime → reasoning
+
+The system intentionally separates declarative workflow data, deterministic imperative orchestration, runtime adapter execution, and LLM reasoning.
+
+### Declarative layer
+
+Source: runtime pack plus `.pi/sandcastle/config.yaml`.
+
+Responsibilities:
+
+- Define roles, prompts, defaults, providers, Work Sources, and graph pipelines.
+- Describe desired topology with `kind`, `nodes`, `needs`, `loop`, `git.worktree`, and `git.merge`.
+- Remain reviewable and deterministic.
+
+### Imperative orchestration layer
+
+Source: `/work:*` commands and Orchestrator.
+
+Responsibilities:
+
+- Parse user command intent.
+- Load/merge/validate config.
+- Select pipeline.
+- Resolve Work Items or Plan Artifacts.
+- Build execution contexts with `itemId`, `laneId`, `contextId`, branch, and group metadata.
+- Pass graph input to `executeGraphWorkflow`.
+- Persist Run Records and render status rows from graph node/lane updates.
+
+### Runtime adapter layer
+
+Source: graph executor plus Sandcastle-backed handlers.
+
+Responsibilities:
+
+- Execute graph nodes by `needs`.
+- Create/close per-lane worktrees.
+- Run role providers in selected sandboxes.
+- Merge workspace branches.
+- Normalize low-level execution output into typed graph results.
+
+### Reasoning layer
+
+Source: LLM roles invoked by `agent.pi` nodes.
+
+Responsibilities:
+
+- Reason about the assigned prompt, Work Brief, branch/worktree context, and repository.
+- Produce code/review/planning output.
+- Leave durable code effects in git commits when implementation succeeds.
+
+The reasoning layer does not own branch names, merge policy, effect classification, stale-plan checks, or durable run state.
+
+## End-to-end examples
+
+### Example 1: direct graph pipeline (`/work:pipeline simple-loop`)
+
+Declarative config:
+
+```yaml
+pipelines:
+  simple-loop:
+    kind: composite
+    nodes:
+      workspace:
+        kind: git.worktree
+        nodes:
+          run:
+            kind: agent.pi
+            role: worker
+            prompt: simple-loop
+```
+
+Imperative flow:
+
+1. `/work:pipeline simple-loop "fix auth bug"` loads the repo config merged with runtime defaults.
+2. `executePipeline` detects a graph-shaped pipeline and selects the graph executor.
+3. `root.nodes.workspace` opens a Sandcastle worktree.
+4. `root.nodes.workspace.nodes.run` resolves the `worker` role and `simple-loop` prompt.
+5. The selected provider runs through Sandcastle inside the worktree.
+6. The agent returns commits/logs; the `git.worktree` node aggregates commits/effects into `WorkspaceResult`.
+7. The pipeline succeeds only if the graph produced repository effects.
+
+Runtime effects:
+
+- One workspace branch/worktree is created and closed.
+- Run Record includes graph node records and step/agent log metadata.
+
+Reasoning boundary:
+
+- The worker reasons about the task.
+- The Orchestrator decides success from typed effects, not prose or logs.
+
+### Example 2: durable process fan-out with review and merge
+
+Declarative config excerpt:
+
+```yaml
+pipelines:
+  parallel-planner-with-review:
+    kind: composite
+    nodes:
+      implement:
+        kind: loop
+        mode: parallel
+        each: $.executionContexts
+        node:
+          kind: git.worktree
+          nodes:
+            implement:
+              kind: agent.pi
+              role: implementer
+              prompt: implement-work
+      review:
+        kind: loop
+        mode: parallel
+        needs: [implement]
+        each: $.executionContexts
+        node:
+          kind: git.worktree
+          nodes:
+            review:
+              kind: agent.pi
+              role: reviewer
+              prompt: review-work
+      merge:
+        kind: git.merge
+        needs: [review]
+```
+
+Imperative flow:
+
+1. `/work:process ready-items --pipeline parallel-planner-with-review` resolves and validates Work Items.
+2. The Orchestrator derives execution groups and `WorkExecutionContext` records.
+3. Each context owns a deterministic branch such as `agent-workflows/<pipeline>/<run>/<item>`.
+4. Graph input includes `prompt`, `items`, `executionContexts`, and `executionGroups`.
+5. Parallel loop lanes create per-item `git.worktree` worktrees using orchestrator-owned branches.
+6. Implementer/reviewer roles run in their lane worktrees.
+7. Parallel loop execution waits for all started lanes to settle before surfacing a failure, so cleanup runs.
+8. `git.merge` merges effectful workspace branches into the target branch.
+9. `/work:process` rows and summaries come from real graph node/lane metadata: item id, node path, lane id, branch, commits, and log path.
+
+Runtime effects:
+
+- Each lane gets an isolated worktree/branch.
+- Merge commits/effects are recorded on the merge node.
+- Conflicts fail closed with best-effort abort and no conflict heroics.
+
+Reasoning boundary:
+
+- Roles reason within delegated prompts and lane context.
+- Branch selection, merge selection, status, and stale-plan handling are deterministic.
+
+### Example 3: graph config editing from root-only defaults
+
+Starting config:
+
+```yaml
+runtimeVersion: 1
+defaultPipeline: simple-loop
+defaultAgent: claude-code
+```
+
+Command:
+
+```text
+/work:config-raw set pipelines.simple-loop.nodes.workspace.nodes.run.role reviewer
+```
+
+Imperative flow:
+
+1. The config command sees a graph-node path.
+2. It merges runtime-pack defaults into the root-only config before editing.
+3. `ConfigShadowModel` updates only the nested role field.
+4. `configToYaml` writes a complete graph pipeline with required `kind` fields preserved.
+5. Validation succeeds.
+
+Reasoning boundary:
+
+- Config mutation is deterministic; no role/LLM participates.
+
+### Example 4: legacy `steps[]` fallback
+
+Legacy config:
+
+```yaml
+pipelines:
+  old-pipeline:
+    steps:
+      - role: worker
+        prompt: $INPUT
+```
+
+Imperative flow:
+
+1. The loader detects a user-defined step-only pipeline.
+2. It preserves that pipeline as legacy instead of overlaying graph default nodes onto it.
+3. `executePipeline` uses the legacy steps path.
+4. A single top-level Sandcastle worktree runs steps sequentially.
+
+Compatibility boundary:
+
+- Existing repo configs continue working.
+- Generated defaults and new TUI-created pipelines are graph-native.
+
+## Config and TUI behavior
+
+- `/work:config` is graph-aware.
+- New TUI-created pipelines use `kind: composite` + `git.worktree` + `agent.pi`.
+- Graph pipeline role/prompt fields can be edited by deterministic config paths.
+- Legacy step add/delete/edit is blocked for graph-native pipelines and preserved for legacy pipelines.
+- Root-only config edits to graph-node paths merge runtime defaults first to avoid partial/corrupt graphs.
 
 ## Non-goals
 
 - Do not infer deterministic workflow semantics from upstream Sandcastle template folders at runtime.
 - Do not copy generated `.sandcastle/main.ts` as the authoritative pipeline model.
 - Do not make PR lifecycle commands part of this runtime; future PR workflow belongs under `/pr:*`.
-- Do not expose Step Provider implementation modules as repo-local Runtime Config.
-
-## Top-level runtime objects
-
-The stable, reusable, overrideable objects are:
-
-1. `runtimeVersion`
-   - Version of the Agent Workflows runtime contract.
-   - Enables migration independent of the extension package version.
-
-2. `metadata`
-   - Human-readable pack identity, provenance, and compatibility notes.
-
-3. `defaults`
-   - Global fallbacks for sandbox, agent provider, model, Work Source, image policy, branch policy, and completion policy.
-
-4. `providers`
-   - Named adapters that Agent Workflows can resolve.
-   - Includes `agentProviders` and `sandboxProviders`.
-   - Provider entries describe capabilities and defaults; they do not execute workflows themselves.
-
-5. `workSources`
-   - Typed Work Source adapters such as `github-issues`, `beads`, `doc-vader`, or `custom`.
-   - Replaces template placeholder substitution with an explicit contract.
-
-6. `roles`
-   - Reusable named execution identities.
-   - Roles are globally scoped by default because they are reused across pipelines and surfaced in `/work:run`.
-   - Pipelines may override agent settings per step without mutating the shared agent.
-
-7. `prompts`
-   - Named prompt modules with inline text, file references, or generated templates.
-   - Prompt modules are top-level because they are reviewable product behavior and should be independently reusable.
-
-8. `pipelines`
-   - User-facing workflows composed from prompt+agent execution steps and deterministic control steps.
-   - Pipelines are the primary command targets for `/work:pipeline` and `/work:process`.
-
-9. `policies`
-   - Reusable named policies for branches, images, concurrency, retry, completion, and post-processing.
-   - Policies can be referenced by defaults, pipelines, and steps.
-
-10. `adapters`
-    - Runtime adapter bindings, initially including `sandcastle`.
-    - This is the explicit seam that lets Agent Workflows keep Sandcastle now and replace or supplement it later.
-
-## Role scoping
-
-Use a **hybrid** model:
-
-- Top-level `roles` define reusable execution identities and defaults.
-- Pipeline steps reference a top-level role by name.
-- Role-reference-local overrides are allowed for `model`, `sandbox`, `maxIterations`, `systemPrompt`, `copyToWorktree`, and `branchPolicy`.
-- Pipeline-local anonymous roles are allowed only for pack authors, not for the initial user-facing config editor.
-
-Resolution order:
-
-```text
-step override > pipeline default > referenced role > global defaults > provider defaults
-```
-
-Runtime pack and config files use `role:` for pipeline-step references. `agent:` is not part of the new persisted runtime language.
-
-This keeps the TUI simple while preserving enough flexibility for specialized review, merge, and planner roles.
-
-## Execution node kinds
-
-Pipelines should support a small closed set of node kinds before adding generic workflow features:
-
-- `runRole`: invoke a role through the selected execution adapter.
-- `selectWork`: resolve Work input into Work Items.
-- `fanOut`: dispatch independent work items with a concurrency limit.
-- `fanIn`: collect child results and normalize statuses.
-- `review`: run reviewer semantics over branch diffs or artifacts.
-- `merge`: merge accepted child branches through a controlled strategy.
-- `postProcess`: summarize logs, classify failures, and write durable results.
-- `gate`: evaluate deterministic predicates such as required checks or unresolved blockers.
-
-Built-in step kinds are unqualified. Custom Step Providers may register provider-qualified kinds such as `acme.deploy`; unknown unqualified kinds are invalid.
-
-## YAML sketch
-
-```yaml
-runtimeVersion: 1
-metadata:
-  id: agent-workflows.default
-  label: Agent Workflows Default Runtime
-  inspiredBy:
-    - sandcastle@0.12.0 templates/simple-loop
-    - sandcastle@0.12.0 templates/parallel-planner-with-review
-
-defaults:
-  agentProvider: pi
-  sandboxProvider: podman
-  model: Agent Default
-  workSource: doc-vader
-  imagePolicy: repo-default
-  branchPolicy: branch-per-run
-  completionPolicy: promise-complete
-
-providers:
-  agentProviders:
-    pi:
-      adapter: sandcastle
-      defaultModel: Agent Default
-      capabilities: [streaming, tools]
-    codex:
-      adapter: sandcastle
-      defaultModel: gpt-5.5
-      capabilities: [streaming, tools]
-  sandboxProviders:
-    podman:
-      adapter: sandcastle
-      imagePolicy: repo-default
-    no-sandbox:
-      adapter: sandcastle
-
-workSources:
-  doc-vader:
-    kind: filesystem-work-source
-    listCommand: /work:list
-    inspectCommand: /work:inspect
-
-roles:
-  planner:
-    role: planner
-    provider: default
-    model: default
-    maxIterations: 1
-    systemPrompt: You are the planning role. Produce dependency-aware work selection.
-  implementer:
-    role: implementer
-    provider: default
-    model: default
-    maxIterations: 100
-  reviewer:
-    role: reviewer
-    provider: default
-    model: default
-    maxIterations: 1
-
-prompts:
-  implement-work-item:
-    format: markdown
-    template: |
-      Implement the selected Work Item.
-
-      Item:
-      {{ inputs.item.markdown }}
-  review-branch:
-    format: markdown
-    template: |
-      Review the branch for correctness, tests, regressions, and merge blockers.
-
-policies:
-  branch:
-    branch-per-run:
-      type: branch
-      pattern: sandcastle/{{ pipeline.id }}/{{ run.id }}
-    merge-to-head:
-      type: merge-to-head
-  image:
-    repo-default:
-      providerFrom: defaults.sandboxProvider
-      namePattern: sandcastle:<repo-dir-name>
-      build: if-missing-or-stale
-  completion:
-    promise-complete:
-      promise: COMPLETE
-
-pipelines:
-  simple-loop:
-    description: Pick and close one open task at a time.
-    defaults:
-      branchPolicy: merge-to-head
-    inputs:
-      query:
-        type: string
-    steps:
-      - id: select
-        kind: selectWork
-        workSource: default
-        limit: 1
-      - id: implement
-        kind: runRole
-        needs: [select]
-        role: implementer
-        prompt: implement-work-item
-      - id: post-process
-        kind: postProcess
-        needs: [implement]
-
-  parallel-planner-with-review:
-    description: Plan, fan out implementation, review child branches, then merge accepted work.
-    defaults:
-      branchPolicy: branch-per-run
-    steps:
-      - id: plan
-        kind: runRole
-        role: planner
-        prompt: plan-work-iterations
-      - id: implement
-        kind: fanOut
-        needs: [plan]
-        over: $.steps.plan.outputs.items
-        concurrency: 4
-        step:
-          kind: runRole
-          role: implementer
-          prompt: implement-work-item
-      - id: review
-        kind: fanOut
-        needs: [implement]
-        over: $.steps.implement.outputs.branches
-        step:
-          kind: review
-          role: reviewer
-          prompt: review-branch
-      - id: merge
-        kind: merge
-        needs: [review]
-        strategy: accepted-only
-      - id: post-process
-        kind: postProcess
-        needs: [merge]
-```
-
-## Sandcastle adapter contract
-
-The first adapter should be thin and explicit:
-
-```ts
-interface ExecutionAdapter {
-  id: string;
-  runRole(input: RunRoleInput): Promise<RunRoleResult>;
-  buildImage?(input: BuildImageInput): Promise<BuildImageResult>;
-  cancel?(runId: string): Promise<void>;
-  resume?(runId: string): Promise<RunRoleResult>;
-}
-```
-
-The Sandcastle implementation maps `runRole` onto `@ai-hero/sandcastle.run()` with provider and sandbox constructors. It must not know about `/work:*`, TUI state, config editing, or pipeline planning.
+- Do not let LLM roles own branch names, merge policy, or durable Run Record state.
+- Do not count logs as repository effects.
 
 ## Migration path
 
-1. Freeze current config and command surface at `v0.1.0`.
-2. Add `execution-runtime.schema.json` as the new contract for packs.
-3. Convert current Sandcastle-inspired packs into explicit Agent Workflows runtime YAML fixtures.
-4. Compile runtime pipelines into the existing `executePipeline` path.
-5. Move prompt and policy editing into `/work:config` once shadow-model editing can operate on runtime objects.
-6. Keep the Sandcastle CLI scaffold path as compatibility-only until no command requires it.
+Completed:
 
-## Open questions
+1. Rename command/domain language to `/work:*` and Agent Workflows.
+2. Add runtime pack/schema support for graph-native concrete nodes.
+3. Execute graph-shaped `/work:pipeline` and `/work:process` through the graph executor.
+4. Add true per-lane `git.worktree` lifecycle.
+5. Add real minimal local `git.merge` behavior.
+6. Make default runtime config generation graph-native.
+7. Make config TUI/shadow model graph-safe for graph pipeline preservation and basic role/prompt edits.
 
-- Should `prompts` remain top-level for all users, or should simple users only see prompt references inside pipelines?
-- Should `fanOut` be a first-class pipeline step or compiled from a higher-level `matrix` field?
-- Should `workSources` include command strings, TypeScript adapter IDs, or both?
-- Should branch policies be globally reusable or mostly pipeline-owned?
-- What is the minimum runtime fixture set needed before replacing template-pack derivation?
+Still optional/future:
+
+- Rich graph node create/delete/reorder editing in the friendly TUI.
+- Explicit one-shot migration command from arbitrary legacy `steps[]` to graph nodes.
+- Additional runtime adapters beyond Sandcastle.
