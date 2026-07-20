@@ -129,7 +129,7 @@
     "concreteNode": {
       "type": "object",
       "required": ["kind"],
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "kind": {
           "type": "string",
@@ -204,6 +204,7 @@
           ]
         },
         "role": { "type": "string" },
+        "description": { "type": "string" },
         "prompt": { "type": "string" },
         "promptOverride": { "type": "string" },
         "with": { "type": "object", "additionalProperties": true },
@@ -217,12 +218,35 @@
       },
       "required": ["role", "prompt"]
     },
+    "pipelineNode": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "kind": { "type": "string", "minLength": 1 },
+        "needs": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "role": { "type": "string" },
+        "prompt": { "type": "string" },
+        "promptOverride": { "type": "string" },
+        "with": { "type": "object", "additionalProperties": true },
+        "nodes": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/pipelineNode" }
+        }
+      }
+    },
     "pipeline": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "kind": { "type": "string", "const": "composite" },
         "description": { "type": "string" },
+        "needs": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
         "branchStrategy": { "$ref": "#/$defs/branchStrategy" },
         "sandbox": { "$ref": "#/$defs/sandbox" },
         "model": { "type": "string", "minLength": 1 },

@@ -106,6 +106,17 @@ interface PipelineStep {
 	model?: string;
 	maxIterations?: number;
 	copyToWorktree?: string[];
+	[key: string]: unknown;
+}
+
+interface PipelineNodeDef {
+	kind?: string;
+	needs?: string[];
+	role?: string;
+	prompt?: string;
+	promptOverride?: string;
+	nodes?: Record<string, PipelineNodeDef>;
+	[key: string]: unknown;
 }
 
 interface PipelineBranchStrategyConfig {
@@ -116,11 +127,15 @@ interface PipelineBranchStrategyConfig {
 
 interface PipelineDef {
 	description?: string;
+	kind?: string;
+	needs?: string[];
 	branchStrategy?: PipelineBranchStrategyConfig;
 	sandbox?: AgentDef["sandbox"];
 	model?: string;
 	copyToWorktree?: string[];
+	nodes?: Record<string, PipelineNodeDef>;
 	steps: PipelineStep[];
+	[key: string]: unknown;
 }
 
 type PipelineBranchStrategy = WorktreeBranchStrategy;
@@ -2165,7 +2180,13 @@ function configForSchemaValidation(cfg: SandcastleConfig): Record<string, unknow
 	delete value.agents;
 	delete value.issueTracker;
 	delete value.issueTrackerSetupCommand;
-	return stripUndefinedAndInternalKeys(value) as Record<string, unknown>;
+	const stripped = stripUndefinedAndInternalKeys(value) as Record<string, unknown>;
+	if (isRecord(stripped.pipelines)) {
+		for (const pipeline of Object.values(stripped.pipelines)) {
+			if (isRecord(pipeline) && (pipeline.kind !== undefined || pipeline.nodes !== undefined) && Array.isArray(pipeline.steps) && pipeline.steps.length === 0) delete pipeline.steps;
+		}
+	}
+	return stripped;
 }
 
 function validateConfig(cwd: string, cfg: SandcastleConfig): string[] {
@@ -2308,6 +2329,201 @@ function assignBlockOrScalar(
 
 function setField<T extends object, K extends keyof T>(target: T, key: K, value: T[K]): void {
 	target[key] = value;
+}
+
+function lineIndent(line: string): number {
+	return line.match(/^\s*/)?.[0].length ?? 0;
+}
+
+function nextYamlContentLine(lines: string[], start: number): number {
+	let index = start;
+	while (index < lines.length) {
+		const trimmed = lines[index].trim();
+		if (trimmed && !trimmed.startsWith("#")) break;
+		index++;
+	}
+	return index;
+}
+
+function parseYamlBlockScalar(lines: string[], start: number, parentIndent: number): { value: string; next: number } {
+	const text: string[] = [];
+	let index = start;
+	while (index < lines.length) {
+		const line = lines[index];
+		const trimmed = line.trim();
+		const indent = lineIndent(line);
+		if (trimmed && indent <= parentIndent) break;
+		if (!trimmed) text.push("");
+		else text.push(line.slice(Math.min(indent, parentIndent + 2)));
+		index++;
+	}
+	return { value: text.join("\n").trimEnd(), next: index };
+}
+
+function parseYamlKeyValue(text: string): { key: string; value: string } | null {
+	const match = text.match(/^(.+?):(?:\s*(.*))?$/);
+	if (!match) return null;
+	return { key: parseYamlMapKey(match[1]), value: match[2] ?? "" };
+}
+
+function parseYamlMapBlock(lines: string[], start: number, indent: number): { value: Record<string, unknown>; next: number } {
+	const value: Record<string, unknown> = {};
+	let index = start;
+	while (index < lines.length) {
+		index = nextYamlContentLine(lines, index);
+		if (index >= lines.length) break;
+		const line = lines[index];
+		const currentIndent = lineIndent(line);
+		const trimmed = line.trim();
+		if (currentIndent < indent || trimmed.startsWith("- ")) break;
+		if (currentIndent > indent) {
+			index++;
+			continue;
+		}
+		const pair = parseYamlKeyValue(trimmed);
+		if (!pair) {
+			index++;
+			continue;
+		}
+		if (pair.value === "|") {
+			const block = parseYamlBlockScalar(lines, index + 1, currentIndent);
+			value[pair.key] = block.value;
+			index = block.next;
+			continue;
+		}
+		if (pair.value === "") {
+			const childIndex = nextYamlContentLine(lines, index + 1);
+			if (childIndex < lines.length && lineIndent(lines[childIndex]) > currentIndent) {
+				const block = parseYamlBlock(lines, childIndex, lineIndent(lines[childIndex]));
+				value[pair.key] = block.value;
+				index = block.next;
+				continue;
+			}
+			value[pair.key] = {};
+			index++;
+			continue;
+		}
+		value[pair.key] = parseScalar(pair.value);
+		index++;
+	}
+	return { value, next: index };
+}
+
+function parseYamlSequenceBlock(lines: string[], start: number, indent: number): { value: unknown[]; next: number } {
+	const value: unknown[] = [];
+	let index = start;
+	while (index < lines.length) {
+		index = nextYamlContentLine(lines, index);
+		if (index >= lines.length) break;
+		const line = lines[index];
+		const currentIndent = lineIndent(line);
+		const trimmed = line.trim();
+		if (currentIndent < indent || !trimmed.startsWith("- ")) break;
+		if (currentIndent > indent) {
+			index++;
+			continue;
+		}
+		const rest = trimmed.slice(2).trim();
+		if (!rest) {
+			const childIndex = nextYamlContentLine(lines, index + 1);
+			if (childIndex < lines.length && lineIndent(lines[childIndex]) > currentIndent) {
+				const block = parseYamlBlock(lines, childIndex, lineIndent(lines[childIndex]));
+				value.push(block.value);
+				index = block.next;
+				continue;
+			}
+			value.push(null);
+			index++;
+			continue;
+		}
+		const pair = parseYamlKeyValue(rest);
+		if (pair) {
+			const entry: Record<string, unknown> = {};
+			if (pair.value === "|") {
+				const block = parseYamlBlockScalar(lines, index + 1, currentIndent);
+				entry[pair.key] = block.value;
+				index = block.next;
+			} else if (pair.value === "") {
+				const childIndex = nextYamlContentLine(lines, index + 1);
+				if (childIndex < lines.length && lineIndent(lines[childIndex]) > currentIndent) {
+					const block = parseYamlBlock(lines, childIndex, lineIndent(lines[childIndex]));
+					entry[pair.key] = block.value;
+					index = block.next;
+				} else {
+					entry[pair.key] = {};
+					index++;
+				}
+			} else {
+				entry[pair.key] = parseScalar(pair.value);
+				index++;
+			}
+			const childIndex = nextYamlContentLine(lines, index);
+			if (childIndex < lines.length && lineIndent(lines[childIndex]) > currentIndent) {
+				const block = parseYamlMapBlock(lines, childIndex, currentIndent + 2);
+				Object.assign(entry, block.value);
+				index = block.next;
+			}
+			value.push(entry);
+			continue;
+		}
+		value.push(parseScalar(rest));
+		index++;
+	}
+	return { value, next: index };
+}
+
+function parseYamlBlock(lines: string[], start: number, indent: number): { value: unknown; next: number } {
+	const index = nextYamlContentLine(lines, start);
+	if (index >= lines.length) return { value: {}, next: index };
+	const trimmed = lines[index].trim();
+	if (lineIndent(lines[index]) === indent && trimmed.startsWith("- ")) return parseYamlSequenceBlock(lines, index, indent);
+	return parseYamlMapBlock(lines, index, indent);
+}
+
+function parseYamlDocument(raw: string): Record<string, unknown> {
+	const lines = raw.replace(/\r/g, "").split("\n");
+	const parsed = parseYamlBlock(lines, 0, 0).value;
+	return isRecord(parsed) ? parsed : {};
+}
+
+function cloneYamlValue(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(cloneYamlValue);
+	if (!isRecord(value)) return value;
+	return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, cloneYamlValue(entry)]));
+}
+
+function normalizeParsedPipelineNodes(value: Record<string, unknown>): Record<string, PipelineNodeDef> {
+	return Object.fromEntries(Object.entries(value).map(([id, node]) => [id, normalizeParsedPipelineNode(isRecord(node) ? node : { kind: node })]));
+}
+
+function normalizeParsedPipelineNode(value: Record<string, unknown>): PipelineNodeDef {
+	const node: PipelineNodeDef = {};
+	for (const [key, entry] of Object.entries(value)) {
+		if (key === "nodes" && isRecord(entry)) node.nodes = normalizeParsedPipelineNodes(entry);
+		else (node as Record<string, unknown>)[key] = cloneYamlValue(entry);
+	}
+	return node;
+}
+
+function normalizeParsedMapPipeline(value: Record<string, unknown>, fallback?: PipelineDef): PipelineDef {
+	const pipeline: PipelineDef = { ...(fallback || { steps: [] }), steps: fallback?.steps || [] };
+	for (const [key, entry] of Object.entries(value)) {
+		if (key === "nodes" && isRecord(entry)) pipeline.nodes = normalizeParsedPipelineNodes(entry);
+		else if (key === "steps" && Array.isArray(entry)) pipeline.steps = entry as PipelineStep[];
+		else (pipeline as Record<string, unknown>)[key] = cloneYamlValue(entry);
+	}
+	return pipeline;
+}
+
+function mergeMapFormPipelines(raw: string, pipelines: Record<string, PipelineDef>): Record<string, PipelineDef> {
+	const parsedPipelines = parseYamlDocument(raw).pipelines;
+	if (!isRecord(parsedPipelines)) return pipelines;
+	const merged = { ...pipelines };
+	for (const [name, value] of Object.entries(parsedPipelines)) {
+		if (!isRecord(value)) continue;
+		if (value.kind !== undefined || value.nodes !== undefined) merged[name] = normalizeParsedMapPipeline(value, merged[name]);
+	}
+	return merged;
 }
 
 export function parseSimpleYaml(raw: string): SandcastleConfig {
@@ -2470,6 +2686,7 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 		}
 	}
 	if (blockTarget) blockTarget.set(blockTarget.text.join("\n").trimEnd());
+	cfg.pipelines = mergeMapFormPipelines(raw, cfg.pipelines);
 	return cfg;
 }
 
