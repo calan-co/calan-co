@@ -72,6 +72,17 @@ export interface LoopExecutionContext {
 	item?: unknown;
 }
 
+export interface GraphChildExecutionOptions {
+	input?: unknown;
+	handlers?: Record<string, GraphNodeHandler>;
+	workspace?: Record<string, unknown>;
+}
+
+export interface GraphNodeMapExecutionResult {
+	children: Record<string, NodeResult>;
+	order: string[];
+}
+
 export interface GraphNodeExecutionContext {
 	id: string;
 	path: string;
@@ -79,7 +90,9 @@ export interface GraphNodeExecutionContext {
 	input: unknown;
 	needs: Record<string, NodeResult>;
 	loop?: LoopExecutionContext;
+	workspace?: Record<string, unknown>;
 	children?: Record<string, NodeResult>;
+	executeChildren?: (options?: GraphChildExecutionOptions) => Promise<GraphNodeMapExecutionResult>;
 }
 
 export type GraphNodeHandler = (context: GraphNodeExecutionContext) => unknown | Promise<unknown>;
@@ -93,11 +106,7 @@ interface ExecutionScope {
 	input: unknown;
 	handlers: Record<string, GraphNodeHandler>;
 	loop?: LoopExecutionContext;
-}
-
-interface NodeMapExecutionResult {
-	children: Record<string, NodeResult>;
-	order: string[];
+	workspace?: Record<string, unknown>;
 }
 
 const LEAF_RESULT_TYPES: Record<string, string> = Object.freeze({
@@ -154,23 +163,34 @@ async function executeWorkspaceNode(
 	scope: ExecutionScope,
 	needs: Record<string, NodeResult>,
 ): Promise<WorkspaceResult> {
-	const { children, order } = await executeNodeMap(node.nodes, `${path}.nodes`, scope);
+	let childRun: GraphNodeMapExecutionResult | undefined;
+	const executeChildren = async (options: GraphChildExecutionOptions = {}): Promise<GraphNodeMapExecutionResult> => {
+		if (childRun) throw new Error(`${path} children already executed`);
+		childRun = await executeNodeMap(node.nodes, `${path}.nodes`, {
+			...scope,
+			input: options.input === undefined ? scope.input : options.input,
+			handlers: options.handlers || scope.handlers,
+			workspace: options.workspace === undefined ? scope.workspace : options.workspace,
+		});
+		return childRun;
+	};
 	const handlerOutput = scope.handlers["git.worktree"]
-		? await scope.handlers["git.worktree"](makeHandlerContext(id, path, node, scope, needs, children))
+		? await scope.handlers["git.worktree"](makeHandlerContext(id, path, node, scope, needs, undefined, executeChildren))
 		: undefined;
+	if (!childRun) childRun = await executeChildren();
 	const base = coerceResult(handlerOutput, "WorkspaceResult", id, node.kind) as Partial<WorkspaceResult>;
 	return {
 		type: "WorkspaceResult",
 		status: "succeeded",
 		nodeId: id,
 		kind: node.kind,
-		children,
-		order,
+		children: childRun.children,
+		order: childRun.order,
 		mergeable: true,
 		effects: [],
 		...base,
-		children: base.children || children,
-		order: base.order || order,
+		children: base.children || childRun.children,
+		order: base.order || childRun.order,
 		mergeable: true,
 		effects: Array.isArray(base.effects) ? base.effects : [],
 	};
@@ -265,7 +285,7 @@ async function executeLoopNode(id: string, path: string, node: GraphWorkflowNode
 	};
 }
 
-async function executeNodeMap(nodes: unknown, path: string, scope: ExecutionScope): Promise<NodeMapExecutionResult> {
+async function executeNodeMap(nodes: unknown, path: string, scope: ExecutionScope): Promise<GraphNodeMapExecutionResult> {
 	if (!isRecord(nodes)) throw new Error(`${path} must be a map keyed by node id`);
 	const entries = Object.entries(nodes as Record<string, GraphWorkflowNode>);
 	if (entries.length === 0) throw new Error(`${path} must define at least one child node`);
@@ -357,6 +377,7 @@ function makeHandlerContext(
 	scope: ExecutionScope,
 	needs: Record<string, NodeResult>,
 	children?: Record<string, NodeResult>,
+	executeChildren?: (options?: GraphChildExecutionOptions) => Promise<GraphNodeMapExecutionResult>,
 ): GraphNodeExecutionContext {
 	return {
 		id,
@@ -365,7 +386,9 @@ function makeHandlerContext(
 		input: scope.input,
 		needs,
 		...(scope.loop ? { loop: scope.loop } : {}),
+		...(scope.workspace ? { workspace: scope.workspace } : {}),
 		...(children ? { children } : {}),
+		...(executeChildren ? { executeChildren } : {}),
 	};
 }
 

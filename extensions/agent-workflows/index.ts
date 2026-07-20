@@ -3285,6 +3285,7 @@ interface PipelineRunNodeRecord {
 	resultType?: string;
 	role?: string;
 	branch?: string;
+	worktreePath?: string;
 	commits?: string[];
 	logPath?: string;
 	effects?: string[];
@@ -3424,9 +3425,31 @@ function graphLoopItem(context: GraphNodeExecutionContext): Record<string, unkno
 	return isRecord(context.loop?.item) ? context.loop?.item as Record<string, unknown> : undefined;
 }
 
+function graphExecutionContextItem(context: GraphNodeExecutionContext): Record<string, unknown> | undefined {
+	const item = graphLoopItem(context);
+	if (typeof item?.branch === "string" && item.branch.length) return item;
+	const itemId = typeof item?.itemId === "string" && item.itemId.length ? item.itemId : typeof item?.id === "string" && item.id.length ? item.id : undefined;
+	if (!itemId) return undefined;
+	const input = isRecord(context.input) ? context.input as Record<string, unknown> : undefined;
+	const executionContexts = Array.isArray(input?.executionContexts) ? input.executionContexts : [];
+	return executionContexts.find((entry): entry is Record<string, unknown> => isRecord(entry) && entry.itemId === itemId);
+}
+
 function graphContextString(context: GraphNodeExecutionContext, key: string): string | undefined {
-	const value = graphLoopItem(context)?.[key];
+	const value = graphExecutionContextItem(context)?.[key] ?? graphLoopItem(context)?.[key];
 	return typeof value === "string" && value.length ? value : undefined;
+}
+
+function graphWorkspaceString(context: GraphNodeExecutionContext, key: string): string | undefined {
+	const value = isRecord(context.workspace) ? context.workspace[key] : undefined;
+	return typeof value === "string" && value.length ? value : undefined;
+}
+
+function collectGraphResultStringArray(result: NodeResult, key: "commits" | "effects"): string[] {
+	const own = nodeResultStringArray(result, key);
+	if (result.type === "CompositeResult" || result.type === "WorkspaceResult") return [...own, ...Object.values((result as any).children || {}).flatMap((child) => collectGraphResultStringArray(child as NodeResult, key))];
+	if (result.type === "LoopResult") return [...own, ...((result as any).iterations || []).flatMap((child: NodeResult) => collectGraphResultStringArray(child, key))];
+	return own;
 }
 
 function graphResultSummary(result: NodeResult): Record<string, unknown> {
@@ -3448,6 +3471,7 @@ function collectGraphNodeRecords(result: NodeResult, path = "root"): PipelineRun
 		resultType: result.type,
 		...(nodeResultString(result, "role") ? { role: nodeResultString(result, "role") } : {}),
 		...(nodeResultBranch(result) ? { branch: nodeResultBranch(result) } : {}),
+		...(nodeResultString(result, "worktreePath") ? { worktreePath: nodeResultString(result, "worktreePath") } : {}),
 		...(nodeResultStringArray(result, "commits").length ? { commits: nodeResultStringArray(result, "commits") } : {}),
 		...(nodeResultLogPath(result) ? { logPath: nodeResultLogPath(result) } : {}),
 		...(nodeResultStringArray(result, "effects").length ? { effects: nodeResultStringArray(result, "effects") } : {}),
@@ -3506,20 +3530,24 @@ export async function executePipeline(
 	let worktree: Awaited<ReturnType<typeof createWorktreeImpl>> | undefined;
 
 	try {
-		worktree = await createWorktreeImpl({
-			cwd,
-			branchStrategy,
-			copyToWorktree: pipeline.copyToWorktree,
-		});
-		record.branch = worktree.branch;
-		record.worktreePath = worktree.worktreePath;
+		if (!useGraphExecutor) {
+			worktree = await createWorktreeImpl({
+				cwd,
+				branchStrategy,
+				copyToWorktree: pipeline.copyToWorktree,
+			});
+			record.branch = worktree.branch;
+			record.worktreePath = worktree.worktreePath;
+		}
 		await writePipelineRunRecord(record);
 
 		if (useGraphExecutor) {
 			const runAgentNode = async (context: GraphNodeExecutionContext) => {
 				const node = context.node as PipelineNodeDef;
 				const roleName = node.role;
-				const contextBranch = graphContextString(context, "branch");
+				const workspaceWorktree = isRecord(context.workspace) ? (context.workspace.worktree as any) : undefined;
+				if (!workspaceWorktree || typeof workspaceWorktree.run !== "function") throw new Error(`${context.path} agent node must execute inside git.worktree`);
+				const contextBranch = graphContextString(context, "branch") || graphWorkspaceString(context, "branch");
 				const itemId = graphContextString(context, "itemId");
 				const laneId = graphContextString(context, "contextId") || (context.loop ? `${context.path}:${context.loop.index}` : undefined);
 				const contextPromptPrefix = graphLoopItem(context) ? `Execution context: ${laneId || "unknown"}${itemId ? `\nWork Item: ${itemId}` : ""}${contextBranch ? `\nBranch: ${contextBranch}` : ""}\n\n` : "";
@@ -3549,7 +3577,7 @@ export async function executePipeline(
 					const template = node.promptOverride || resolvePromptText(cfg, node.prompt || "$INPUT");
 					const stepPromptBody = `${contextPromptPrefix}${resolvePipelineStepPrompt(template, prompt, prompt)}`;
 					const stepPrompt = role.systemPrompt ? `${role.systemPrompt}\n\n## Delegated task\n\n${stepPromptBody}` : stepPromptBody;
-					const result = await worktree!.run({
+					const result = await workspaceWorktree.run({
 						agent: makePipelineAgent ? makePipelineAgent(model, provider) : createAgentProviderForRuntime(model, provider, { hostPiRuntime, sandbox: sandboxKind, claudeCodeFactory: deps.claudeCode }),
 						sandbox,
 						prompt: stepPrompt,
@@ -3597,20 +3625,49 @@ export async function executePipeline(
 					"agent.pi": runAgentNode,
 					script: async ({ node }) => ({ output: (node as any).run || (node as any).command || (node as any).with?.run }),
 					"git.worktree": async (context) => {
-						const childResults = Object.values(context.children || {}) as NodeResult[];
-						const commits = childResults.flatMap((child) => nodeResultStringArray(child, "commits"));
-						const childEffects = childResults.flatMap((child) => nodeResultStringArray(child, "effects"));
-						const branch = graphContextString(context, "branch") || record.branch;
-						const itemId = graphContextString(context, "itemId");
-						const laneId = graphContextString(context, "contextId") || (context.loop ? `${context.path}:${context.loop.index}` : undefined);
-						return {
-							branch,
-							worktreePath: record.worktreePath,
-							commits,
-							effects: [...commits.map((commit) => `commit:${commit}`), ...childEffects],
-							...(itemId ? { itemId } : {}),
-							...(laneId ? { laneId } : {}),
-						};
+						if (!context.executeChildren) throw new Error(`${context.path} cannot execute git.worktree children`);
+						const contextBranch = graphContextString(context, "branch");
+						const workspaceBranchStrategy: PipelineBranchStrategy = contextBranch
+							? {
+								type: "branch",
+								branch: contextBranch,
+								...(branchStrategy.type === "branch" && branchStrategy.baseBranch ? { baseBranch: branchStrategy.baseBranch } : {}),
+							}
+							: branchStrategy;
+						const laneWorktree = await createWorktreeImpl({
+							cwd,
+							branchStrategy: workspaceBranchStrategy,
+							copyToWorktree: pipeline.copyToWorktree,
+						});
+						try {
+							const workspaceBranch = contextBranch || laneWorktree.branch;
+							const childRun = await context.executeChildren({
+								workspace: {
+									branch: workspaceBranch,
+									worktreePath: laneWorktree.worktreePath,
+									worktree: laneWorktree,
+								},
+							});
+							const childResults = Object.values(childRun.children) as NodeResult[];
+							const commits = childResults.flatMap((child) => collectGraphResultStringArray(child, "commits"));
+							const childEffects = childResults.flatMap((child) => collectGraphResultStringArray(child, "effects"));
+							const itemId = graphContextString(context, "itemId");
+							const laneId = graphContextString(context, "contextId") || (context.loop ? `${context.path}:${context.loop.index}` : undefined);
+							record.branch = record.branch || workspaceBranch;
+							record.worktreePath = record.worktreePath || laneWorktree.worktreePath;
+							return {
+								branch: workspaceBranch,
+								worktreePath: laneWorktree.worktreePath,
+								commits,
+								effects: [...commits.map((commit) => `commit:${commit}`), ...childEffects],
+								children: childRun.children,
+								order: childRun.order,
+								...(itemId ? { itemId } : {}),
+								...(laneId ? { laneId } : {}),
+							};
+						} finally {
+							await laneWorktree.close().catch(() => undefined);
+						}
 					},
 				},
 			}) as CompositeResult;

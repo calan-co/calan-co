@@ -216,6 +216,48 @@ test('enforces mergeable inputs and effectful workspace merge defaults', async (
   assert.deepEqual(result.children.merge.effects, []);
 });
 
+test('git.worktree handler can run children inside workspace context before closing', async () => {
+  const events = [];
+  const result = await executeGraphWorkflow({
+    kind: 'composite',
+    nodes: {
+      workspace: {
+        kind: 'git.worktree',
+        nodes: {
+          implement: { kind: 'agent' },
+        },
+      },
+    },
+  }, {
+    handlers: {
+      'git.worktree': async (context) => {
+        events.push('open');
+        const childRun = await context.executeChildren({
+          workspace: { branch: 'agent-workflows/item-1', worktreePath: '/tmp/item-1' },
+        });
+        events.push('close');
+        return {
+          branch: 'agent-workflows/item-1',
+          worktreePath: '/tmp/item-1',
+          commits: ['abc123'],
+          effects: ['commit:abc123'],
+          children: childRun.children,
+          order: childRun.order,
+        };
+      },
+      agent: async (context) => {
+        events.push(`agent:${context.workspace.branch}:${context.workspace.worktreePath}`);
+        return { branch: context.workspace.branch, commits: ['abc123'] };
+      },
+    },
+  });
+
+  assert.deepEqual(events, ['open', 'agent:agent-workflows/item-1:/tmp/item-1', 'close']);
+  assert.equal(result.children.workspace.type, 'WorkspaceResult');
+  assert.deepEqual(result.children.workspace.order, ['implement']);
+  assert.equal(result.children.workspace.children.implement.branch, 'agent-workflows/item-1');
+});
+
 test('rejects spoofed mergeable handler results and ambiguous loop child shape', async () => {
   await assert.rejects(
     executeGraphWorkflow({
