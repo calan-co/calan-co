@@ -10,8 +10,8 @@ test('pipeline packs are discovered from the Agent Workflows execution runtime p
   const runtime = loadExecutionRuntimePack();
   assert.ok(runtime.prompts['implement-work'].template.length > 20);
   assert.equal(runtime.roles.planner.kind, 'planWork');
-  assert.equal(runtime.pipelines['parallel-planner'].steps[0].kind, 'planWork');
-  assert.equal(runtime.pipelines['parallel-planner'].steps[0].role, undefined);
+  assert.equal(runtime.pipelines['parallel-planner'].steps[0].kind, 'fanOut');
+  assert.equal(runtime.pipelines['parallel-planner'].steps[0].step.role, 'implementer');
 });
 
 test('pipeline packs map into agent-workflows agent and pipeline inventory', () => {
@@ -33,8 +33,8 @@ test('pipeline packs map into agent-workflows agent and pipeline inventory', () 
   assert.equal(cfg.pipelines['parallel-planner'].nodes.merge.kind, 'git.merge');
   assert.equal(cfg.pipelines['parallel-planner-with-review'].nodes.review.node.kind, 'git.worktree');
   assert.equal(cfg.pipelines['parallel-planner-with-review'].nodes.merge.kind, 'git.merge');
-  assert.equal(cfg.pipelines['parallel-planner'].steps[0].role, 'planner');
-  assert.equal(cfg.pipelines['parallel-planner-with-review'].steps[2].role, 'reviewer');
+  assert.equal(cfg.pipelines['parallel-planner'].steps[0].role, 'implementer');
+  assert.equal(cfg.pipelines['parallel-planner-with-review'].steps[1].role, 'reviewer');
 });
 
 test('configToYaml renders graph-native default workflow definitions without legacy steps', () => {

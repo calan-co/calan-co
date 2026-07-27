@@ -269,6 +269,7 @@ test('work:process reports one worker row per pipeline step in the plan-style co
           close: async () => ({}),
           run: async (options) => {
             options.logging.onAgentStreamEvent?.({ type: 'raw', line: '{"type":"message_update","assistantMessageEvent":{"type":"thinking_start","contentIndex":0,"partial":{"role":"assistant"}}}', iteration: 1, timestamp: new Date() });
+            options.logging.onAgentStreamEvent?.({ type: 'text', message: { text: options.logging.path.includes('researcher') ? 'Reading plan' : 'Editing file' }, iteration: 1, timestamp: new Date() });
             options.logging.onAgentStreamEvent?.({ type: 'toolCall', name: options.logging.path.includes('researcher') ? 'Search' : 'Bash', formattedArgs: '{}', iteration: 1, timestamp: new Date() });
             return {
               iterations: [],
@@ -303,6 +304,7 @@ test('work:process reports one worker row per pipeline step in the plan-style co
     assert.ok(widgets.some((entry) => entry.lines.some((line) => /running\s+builder.*tool: Bash/.test(line))));
     assert.equal(widgets.some((entry) => entry.lines.some((line) => /running\s+researcher\s+\d+s · running$/.test(line))), false);
     assert.equal(widgets.some((entry) => entry.lines.some((line) => /\{"type":"message_update"/.test(line))), false);
+    assert.equal(widgets.some((entry) => entry.lines.some((line) => /\[object Object\]/.test(line))), false);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

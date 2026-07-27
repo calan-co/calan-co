@@ -271,18 +271,10 @@
       },
       "kind": "composite",
       "nodes": {
-        "plan": {
-          "kind": "agent.pi",
-          "prompt": "plan-work",
-          "role": "planner",
-          "overrides": {
-            "maxIterations": 1
-          }
-        },
         "implement": {
           "kind": "loop",
           "mode": "parallel",
-          "each": "$.nodes.plan.outputs.items",
+          "each": "$.executionContexts",
           "node": {
             "kind": "git.worktree",
             "nodes": {
@@ -292,10 +284,7 @@
                 "role": "implementer"
               }
             }
-          },
-          "needs": [
-            "plan"
-          ]
+          }
         },
         "merge": {
           "kind": "git.merge",
@@ -316,18 +305,10 @@
       },
       "kind": "composite",
       "nodes": {
-        "plan": {
-          "kind": "agent.pi",
-          "prompt": "plan-work",
-          "role": "planner",
-          "overrides": {
-            "maxIterations": 1
-          }
-        },
         "implement": {
           "kind": "loop",
           "mode": "parallel",
-          "each": "$.nodes.plan.outputs.items",
+          "each": "$.executionContexts",
           "node": {
             "kind": "git.worktree",
             "nodes": {
@@ -337,15 +318,12 @@
                 "role": "implementer"
               }
             }
-          },
-          "needs": [
-            "plan"
-          ]
+          }
         },
         "review": {
           "kind": "loop",
           "mode": "parallel",
-          "each": "$.nodes.implement.outputs.branches",
+          "each": "$.executionContexts",
           "node": {
             "kind": "git.worktree",
             "nodes": {
@@ -363,12 +341,16 @@
         "merge": {
           "kind": "git.merge",
           "needs": [
+            "implement",
             "review"
           ],
           "strategy": "accepted-only",
           "overrides": {
             "maxIterations": 1
-          }
+          },
+          "inputs": [
+            "implement"
+          ]
         }
       }
     },

@@ -139,6 +139,12 @@
           ]
         },
         "needs": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "inputs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true,
+          "description": "For git.merge, explicit mergeable input needs when additional needs are ordering gates."
+        },
         "role": { "type": "string" },
         "prompt": { "type": "string" },
         "promptOverride": { "type": "string" },

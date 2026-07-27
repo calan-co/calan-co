@@ -113,6 +113,67 @@ test('executePipeline uses graph executor for generated default runtime config',
   assert.match(calls[0], /Pick the next open Work Item/);
 });
 
+test('executePipeline upgrades stale generated legacy default pipeline config to graph executor', async () => {
+  const repoRoot = await createGraphRepo([
+    'defaultAgent: pi',
+    'defaultSandbox: no-sandbox',
+    'defaultModel: Agent Default',
+    'pipelines:',
+    '  parallel-planner-with-review:',
+    '    branchStrategy:',
+    '      type: branch',
+    '      branch: sandcastle/parallel-planner-with-review',
+    '    steps:',
+    '      - kind: runRole',
+    '        role: planner',
+    '        prompt: plan-work',
+    '        maxIterations: 1',
+    '      - kind: runRole',
+    '        role: implementer',
+    '        prompt: implement-work',
+    '      - kind: review',
+    '        role: reviewer',
+    '        prompt: review-work',
+    '      - kind: merge',
+    '        role: merger',
+    '        prompt: merge-work',
+    '        maxIterations: 1',
+  ]);
+  const contexts = [
+    { contextId: 'run/wi-001/0-0', branch: 'agent-workflows/parallel/run/wi-001', itemId: 'wi-001' },
+    { contextId: 'run/wi-002/0-1', branch: 'agent-workflows/parallel/run/wi-002', itemId: 'wi-002' },
+  ];
+  const runs = [];
+
+  const record = await executePipeline(repoRoot, 'parallel-planner-with-review', 'process stale defaults', {
+    now: () => 1700000003500,
+    graphInput: { prompt: 'process stale defaults', executionContexts: contexts },
+    createWorktree: async (options) => {
+      const branch = options.branchStrategy.branch;
+      return fakeWorktree(repoRoot, async (runOptions) => {
+        const role = /Review/.test(runOptions.prompt) ? 'reviewer' : 'implementer';
+        runs.push({ branch, role, prompt: runOptions.prompt });
+        return {
+          iterations: [],
+          commits: role === 'implementer' ? [{ sha: `commit-${branch.split('/').at(-1)}` }] : [],
+          branch,
+          stdout: '',
+          logFilePath: runOptions.logging.path,
+        };
+      }, { branch, worktreePath: path.join(repoRoot, '.pi/sandcastle/worktrees', branch.replaceAll('/', '-')) });
+    },
+    loadSandboxProvider: async (kind) => ({ kind }),
+    makeAgent: (model, provider) => ({ model, provider }),
+    runGit: fakeSuccessfulGit(),
+  });
+
+  assert.equal(record.executor, 'graph');
+  assert.equal(record.status, 'completed');
+  assert.deepEqual(runs.filter((run) => run.role === 'implementer').map((run) => run.branch).sort(), contexts.map((context) => context.branch).sort());
+  assert.deepEqual(runs.filter((run) => run.role === 'reviewer').map((run) => run.branch).sort(), contexts.map((context) => context.branch).sort());
+  assert.ok(record.nodes.some((node) => node.resultType === 'GitMergeResult' && node.mergedBranches?.length));
+});
+
 test('executePipeline runs composite graph nodes by needs and records graph node summaries', async () => {
   const repoRoot = await createGraphRepo(baseGraphConfig([
     '  graph:',

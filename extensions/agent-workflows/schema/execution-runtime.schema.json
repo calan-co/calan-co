@@ -341,6 +341,12 @@
           "items": { "$ref": "#/$defs/identifier" },
           "uniqueItems": true
         },
+        "inputs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/identifier" },
+          "uniqueItems": true,
+          "description": "For git.merge, explicit mergeable input needs when additional needs are ordering gates."
+        },
         "role": { "$ref": "#/$defs/referenceOrDefault" },
         "prompt": { "$ref": "#/$defs/referenceOrDefault" },
         "promptOverride": { "type": "string", "minLength": 1 },

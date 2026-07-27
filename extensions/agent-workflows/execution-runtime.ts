@@ -57,6 +57,7 @@ export interface RuntimeContainerImage {
 export interface RuntimePipelineNode {
 	kind: string;
 	needs?: string[];
+	inputs?: string[];
 	role?: string;
 	prompt?: string;
 	promptOverride?: string;

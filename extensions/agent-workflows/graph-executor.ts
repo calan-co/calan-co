@@ -209,8 +209,9 @@ async function executeMergeNode(
 ): Promise<GitMergeResult> {
 	const inputs: Record<string, MergeableNodeResult> = {};
 	const needed = normalizeNeeds(node.needs, path);
-	if (needed.length === 0) throw new Error(`${path} requires mergeable needs`);
-	for (const need of needed) {
+	const inputNames = Array.isArray((node as any).inputs) ? normalizeNeeds((node as any).inputs, path) : needed;
+	if (inputNames.length === 0) throw new Error(`${path} requires mergeable needs`);
+	for (const need of inputNames) {
 		const result = needs[need];
 		if (!isMergeableResult(result)) throw new Error(`${path} requires mergeable needs; '${need}' produced ${result?.type || "no result"}`);
 		if (!hasMergeEffects(result)) throw new Error(`${path} requires effectful mergeable needs; '${need}' produced no effects or commits`);
@@ -225,12 +226,12 @@ async function executeMergeNode(
 		status: "succeeded",
 		nodeId: id,
 		kind: node.kind,
-		merged: needed,
+		merged: inputNames,
 		inputs,
 		effects: [],
 		...base,
 		inputs: base.inputs || inputs,
-		merged: Array.isArray(base.merged) ? base.merged : needed,
+		merged: Array.isArray(base.merged) ? base.merged : inputNames,
 		effects: Array.isArray(base.effects) ? base.effects : [],
 	};
 }

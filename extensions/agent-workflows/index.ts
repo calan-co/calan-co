@@ -2327,6 +2327,31 @@ function resolvePromptText(cfg: SandcastleConfig, promptRef: string): string {
 	return cfg.prompts[promptRef]?.template || promptRef;
 }
 
+function stepsMatchRolePromptShape(steps: PipelineStep[], expected: Array<{ role: string; prompt: string }>): boolean {
+	return steps.length === expected.length && steps.every((step, index) => step.role === expected[index]?.role && step.prompt === expected[index]?.prompt);
+}
+
+function pipelineStepsMatchDefaultLegacyShape(name: string, pipeline: PipelineDef, defaultPipeline: PipelineDef): boolean {
+	const steps = pipeline.steps || [];
+	const defaultSteps = defaultPipeline.steps || [];
+	if (!steps.length) return false;
+	if (stepsMatchRolePromptShape(steps, defaultSteps.map((step) => ({ role: step.role, prompt: step.prompt })))) return true;
+	const staleGeneratedShapes: Record<string, Array<{ role: string; prompt: string }>> = {
+		"parallel-planner": [
+			{ role: "planner", prompt: "plan-work" },
+			{ role: "implementer", prompt: "implement-work" },
+			{ role: "merger", prompt: "merge-work" },
+		],
+		"parallel-planner-with-review": [
+			{ role: "planner", prompt: "plan-work" },
+			{ role: "implementer", prompt: "implement-work" },
+			{ role: "reviewer", prompt: "review-work" },
+			{ role: "merger", prompt: "merge-work" },
+		],
+	};
+	return staleGeneratedShapes[name] ? stepsMatchRolePromptShape(steps, staleGeneratedShapes[name]) : false;
+}
+
 function mergeWithPackDefaults(cfg: SandcastleConfig): SandcastleConfig {
 	const agents = { ...DEFAULT_CONFIG.agents } as Record<string, AgentDef>;
 	for (const [name, agent] of Object.entries(cfg.agents || {})) agents[name] = { ...(DEFAULT_CONFIG.agents[name] || { name }), ...agent, name };
@@ -2334,11 +2359,12 @@ function mergeWithPackDefaults(cfg: SandcastleConfig): SandcastleConfig {
 	for (const [name, pipeline] of Object.entries(cfg.pipelines || {})) {
 		const defaultPipeline = DEFAULT_CONFIG.pipelines[name] || { steps: [] };
 		const userDefinesLegacySteps = Array.isArray(pipeline.steps) && pipeline.steps.length > 0 && !pipeline.nodes;
+		const staleGeneratedLegacyDefault = userDefinesLegacySteps && pipelineStepsMatchDefaultLegacyShape(name, pipeline, defaultPipeline);
 		pipelines[name] = {
 			...defaultPipeline,
 			...pipeline,
-			kind: pipeline.kind ?? (userDefinesLegacySteps ? undefined : defaultPipeline.kind),
-			nodes: pipeline.nodes ?? (userDefinesLegacySteps ? undefined : defaultPipeline.nodes),
+			kind: pipeline.kind ?? (userDefinesLegacySteps && !staleGeneratedLegacyDefault ? undefined : defaultPipeline.kind),
+			nodes: pipeline.nodes ?? (userDefinesLegacySteps && !staleGeneratedLegacyDefault ? undefined : defaultPipeline.nodes),
 			steps: pipeline.steps || defaultPipeline.steps || [],
 		};
 	}
@@ -3601,9 +3627,10 @@ async function assertGraphGit(deps: PipelineExecutionDeps, cwd: string, args: st
 	return result.stdout.trim();
 }
 
-function collectWorkspaceMergeCandidates(needs: Record<string, NodeResult>): GraphMergeCandidate[] {
+function collectWorkspaceMergeCandidates(needs: Record<string, NodeResult>, inputNames?: string[]): GraphMergeCandidate[] {
 	const candidates: GraphMergeCandidate[] = [];
-	for (const [need, result] of Object.entries(needs)) collectWorkspaceMergeCandidatesFromResult(need, result, candidates);
+	const entries = inputNames?.length ? inputNames.map((name) => [name, needs[name]] as const) : Object.entries(needs);
+	for (const [need, result] of entries) if (result) collectWorkspaceMergeCandidatesFromResult(need, result, candidates);
 	return candidates;
 }
 
@@ -3627,7 +3654,8 @@ async function mergeGraphWorkspaceBranches(
 	deps: PipelineExecutionDeps,
 	targetCwd: string,
 ): Promise<Partial<GitMergeResult>> {
-	const candidates = collectWorkspaceMergeCandidates(context.needs);
+	const mergeInputs = Array.isArray((context.node as any).inputs) ? (context.node as any).inputs.filter((entry: unknown): entry is string => typeof entry === "string" && entry.length > 0) : undefined;
+	const candidates = collectWorkspaceMergeCandidates(context.needs, mergeInputs);
 	if (!candidates.length) throw new Error(`${context.path} requires effectful mergeable branches`);
 	await assertGraphGit(deps, targetCwd, ["rev-parse", "--show-toplevel"], `${context.path} git repository check`);
 	const targetBranch = await assertGraphGit(deps, targetCwd, ["rev-parse", "--abbrev-ref", "HEAD"], `${context.path} target branch check`);
@@ -3956,8 +3984,23 @@ function renderWidget(runs: Map<string, RunState>): string[] {
 	return lines;
 }
 
+function statusTextValue(value: unknown): string {
+	if (typeof value === "string") return value;
+	if (value === undefined || value === null) return "";
+	if (Array.isArray(value)) return value.map(statusTextValue).filter(Boolean).join(" ");
+	if (typeof value === "object") {
+		const record = value as Record<string, unknown>;
+		for (const key of ["text", "message", "content", "delta", "partial"]) {
+			const nested = statusTextValue(record[key]);
+			if (nested) return nested;
+		}
+		return JSON.stringify(value);
+	}
+	return String(value);
+}
+
 function compactStatusText(text: unknown, max = 120): string {
-	const compact = String(text || "").replace(/\s+/g, " ").trim();
+	const compact = statusTextValue(text).replace(/\s+/g, " ").trim();
 	return compact.length > max ? `${compact.slice(0, max - 1)}…` : compact;
 }
 

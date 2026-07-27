@@ -300,6 +300,38 @@ test('enforces mergeable inputs and effectful workspace merge defaults', async (
   assert.deepEqual(result.children.merge.effects, []);
 });
 
+test('git.merge can wait on gate needs while merging explicit workspace inputs', async () => {
+  const order = [];
+  const result = await executeGraphWorkflow({
+    kind: 'composite',
+    nodes: {
+      implement: {
+        kind: 'git.worktree',
+        nodes: {
+          run: { kind: 'agent' },
+        },
+      },
+      review: { kind: 'agent', needs: ['implement'] },
+      merge: { kind: 'git.merge', needs: ['implement', 'review'], inputs: ['implement'] },
+    },
+  }, {
+    handlers: {
+      'git.worktree': async () => {
+        order.push('implement');
+        return { branch: 'feature/work', commits: ['abc123'], effects: ['commit:abc123'] };
+      },
+      agent: async ({ id }) => {
+        order.push(id);
+        return { text: 'review only' };
+      },
+    },
+  });
+
+  assert.deepEqual(order, ['implement', 'run', 'review']);
+  assert.deepEqual(result.children.merge.merged, ['implement']);
+  assert.equal(result.children.merge.inputs.implement.type, 'WorkspaceResult');
+});
+
 test('git.worktree handler can run children inside workspace context before closing', async () => {
   const events = [];
   const result = await executeGraphWorkflow({
