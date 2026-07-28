@@ -2219,8 +2219,14 @@ function laneIndent(value: { nodePath?: string; laneId?: string }): string {
 	return "  ".repeat(laneDepth(value));
 }
 
-function laneSortKey(value: { nodePath?: string; laneId?: string; startedAt?: number }): string {
-	return `${String(laneDepth(value)).padStart(3, "0")}:${value.nodePath || value.laneId || String(value.startedAt || 0)}`;
+function laneSortKey(value: { index?: number; nodePath?: string; laneId?: string; startedAt?: number }): string {
+	const order = Number.isFinite(value.index) ? Number(value.index) : Number(value.startedAt || 0);
+	return `${String(order).padStart(12, "0")}:${value.nodePath || value.laneId || ""}`;
+}
+
+function displayLaneKey(worker: { laneId?: string; itemId?: string; branch?: string; nodePath?: string }): string | undefined {
+	const key = workerKey(worker);
+	return key ? `${key}|depth:${laneDepth(worker)}` : undefined;
 }
 
 function formatWorkerStatusText(step: WorkProcessRunRecord["workerStatuses"][number], capturedCommits: number): string {
@@ -2244,7 +2250,7 @@ function formatPipelineWorkerRows(record: Pick<WorkProcessRunRecord, "workerStat
 	const laneGroups = new Map<string, typeof workers>();
 	const nonLaneWorkers: typeof workers = [];
 	for (const worker of workers) {
-		const key = workerKey(worker);
+		const key = displayLaneKey(worker);
 		if (key) laneGroups.set(key, [...(laneGroups.get(key) || []), worker]);
 		else if (!["composite", "loop"].includes(worker.kind || "")) nonLaneWorkers.push(worker);
 	}
@@ -3500,7 +3506,7 @@ function formatRunStateLine(run: RunState): string {
 function renderWidget(runs: Map<string, RunState>): string[] {
 	const grouped = new Map<string, RunState[]>();
 	for (const run of runs.values()) {
-		const key = run.laneId || run.itemId || run.id;
+		const key = displayLaneKey(run) || run.id;
 		grouped.set(key, [...(grouped.get(key) || []), run]);
 	}
 	const active = [...grouped.values()].map((group) => {
@@ -5130,6 +5136,7 @@ Work views and processing:
 						explicitPipeline,
 						planId,
 						defaultPipeline: cfg.defaultPipeline,
+						maxIterations: cfg.maxIterations,
 						now: () => getBacklogTimestamp(backlogDeps.now),
 						createRunId: createBacklogRunId,
 					},

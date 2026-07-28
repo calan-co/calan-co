@@ -155,6 +155,72 @@ test('runWorkProcess omits dependency-blocked and HITL items before execution', 
   }
 });
 
+test('runWorkProcess executes work waves until no eligible work remains', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'agent-workflows-orchestrator-'));
+  const executeInputs = [];
+  let planCalls = 0;
+  try {
+    const result = await runWorkProcess(
+      {
+        cwd,
+        query: 'ready work',
+        defaultPipeline: 'simple-loop',
+        now: () => 1000 + planCalls,
+        createRunId: () => 'run-waves',
+        maxIterations: 5,
+      },
+      {
+        async plan() {
+          planCalls += 1;
+          if (planCalls === 1) return { query: 'ready work', iterations: [{ items: [{ id: 'wi-1', title: 'One' }, { id: 'wi-2', title: 'Two' }] }] };
+          if (planCalls === 2) return { query: 'ready work', iterations: [{ items: [{ id: 'wi-3', title: 'Three' }] }] };
+          return { query: 'ready work', iterations: [] };
+        },
+        async execute(_cwd, input) {
+          executeInputs.push(input);
+          return { status: 'done', branches: input.items.map((item) => `branch-${item.id}`), logs: input.items.map((item) => `log-${item.id}`), workSourceMutations: input.items.map((item) => ({ itemId: item.id, action: 'close', status: 'succeeded' })) };
+        },
+        writeRecord(repo, record) { return join(repo, `${record.id}.json`); },
+      },
+    );
+
+    assert.deepEqual(executeInputs.map((input) => input.items.map((item) => item.id)), [['wi-1', 'wi-2'], ['wi-3']]);
+    assert.deepEqual(result.record.resolvedItems.map((item) => item.id), ['wi-1', 'wi-2', 'wi-3']);
+    assert.deepEqual(result.record.branches, ['branch-wi-1', 'branch-wi-2', 'branch-wi-3']);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('runWorkProcess fails closed when a work wave repeats already-attempted items', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'agent-workflows-orchestrator-'));
+  let planCalls = 0;
+  try {
+    await assert.rejects(
+      runWorkProcess(
+        {
+          cwd,
+          query: 'ready work',
+          defaultPipeline: 'simple-loop',
+          createRunId: () => 'run-cycle',
+          maxIterations: 5,
+        },
+        {
+          async plan() {
+            planCalls += 1;
+            return { query: 'ready work', iterations: [{ items: [{ id: 'wi-repeat', title: 'Repeat' }] }] };
+          },
+          async execute() { return { status: 'done', branches: ['branch-repeat'], logs: [], workSourceMutations: [{ itemId: 'wi-repeat', action: 'close', status: 'succeeded' }] }; },
+        },
+      ),
+      /Work cycle guard stopped processing because ready Work Items repeated: wi-repeat/,
+    );
+    assert.equal(planCalls, 2);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test('runWorkProcess fails closed when no currently executable items remain', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'agent-workflows-orchestrator-'));
   try {

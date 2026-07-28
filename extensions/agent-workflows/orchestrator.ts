@@ -114,6 +114,7 @@ export interface RunWorkProcessInput {
 	explicitPipeline?: string;
 	planId?: string;
 	defaultPipeline?: string;
+	maxIterations?: number;
 	now?: () => number;
 	createRunId?: (startedAt: number) => string;
 }
@@ -465,6 +466,56 @@ function createDefaultRunId(startedAt: number): string {
 	return `work-${startedAt.toString(36)}`;
 }
 
+function appendUnique<T>(left: T[] | undefined, right: T[] | undefined): T[] {
+	return [...(left || []), ...(right || [])];
+}
+
+function itemIdSet(items: WorkItem[] | undefined): Set<string> {
+	return new Set((items || []).map((item) => item.id).filter((id): id is string => typeof id === "string" && id.length > 0));
+}
+
+function closedItemIds(execution: WorkProcessExecutionResult): Set<string> {
+	return new Set((execution.workSourceMutations || [])
+		.filter((outcome) => outcome.action === "close" && outcome.status === "succeeded")
+		.map((outcome) => outcome.itemId));
+}
+
+function mergeWorkProcessRecords(base: WorkProcessRunRecord | undefined, wave: WorkProcessRunRecord): WorkProcessRunRecord {
+	if (!base) return wave;
+	const workerOffset = base.workerStatuses?.length || 0;
+	const groupOffset = base.executionGroups.length;
+	return {
+		...base,
+		status: wave.status,
+		resolvedItems: appendUnique(base.resolvedItems, wave.resolvedItems),
+		branches: appendUnique(base.branches, wave.branches),
+		logs: appendUnique(base.logs, wave.logs),
+		workerStatuses: appendUnique(base.workerStatuses, wave.workerStatuses?.map((worker) => ({ ...worker, index: worker.index + workerOffset }))),
+		workSourceMutations: appendUnique(base.workSourceMutations, wave.workSourceMutations),
+		executionContexts: appendUnique(base.executionContexts, wave.executionContexts),
+		executionGroups: appendUnique(base.executionGroups, wave.executionGroups.map((group) => ({ ...group, index: group.index + groupOffset }))),
+		updatedAt: wave.updatedAt,
+		endedAt: wave.endedAt,
+	};
+}
+
+function selectExecutableIteration(plan: WorkPlanResult, attempted: Set<string>, advisoryNotes: string[]): { iteration?: WorkPlanIteration; repeatedIds: string[]; omittedIds: string[] } {
+	const repeated = new Set<string>();
+	const omitted = new Set<string>();
+	for (const planIteration of plan.iterations || []) {
+		const filtered = filterExecutableIteration(planIteration);
+		for (const id of filtered.omittedIds) omitted.add(id);
+		const executableItems = filtered.iteration.items || [];
+		for (const item of executableItems) if (attempted.has(item.id)) repeated.add(item.id);
+		const nextItems = executableItems.filter((item) => !attempted.has(item.id));
+		if (nextItems.length) {
+			if (filtered.omittedIds.length) advisoryNotes.push(`Work readiness was revalidated before execution; omitted non-executable Work Items: ${filtered.omittedIds.join(", ")}.`);
+			return { iteration: { ...filtered.iteration, items: nextItems }, repeatedIds: [...repeated], omittedIds: [...omitted] };
+		}
+	}
+	return { repeatedIds: [...repeated], omittedIds: [...omitted] };
+}
+
 export async function runWorkProcess(input: RunWorkProcessInput, deps: RunWorkProcessDeps): Promise<RunWorkProcessResult> {
 	const now = input.now || Date.now;
 	let planResult: WorkPlanResult;
@@ -488,53 +539,80 @@ export async function runWorkProcess(input: RunWorkProcessInput, deps: RunWorkPr
 		planResult = await deps.plan(input.cwd, input.query);
 	}
 
-	let iteration = planResult.iterations[0];
-	if (!iteration) throw new Error("No Work Items were selected for processing.");
-	if (input.planId) {
-		const currentPlan = await deps.plan(input.cwd, planResult.query || input.query);
-		iteration = revalidateCachedPlanIteration({ planId: input.planId, plannedIteration: iteration, currentPlan, advisoryNotes });
-	}
-	const filtered = filterExecutableIteration(iteration);
-	iteration = filtered.iteration;
-	if (filtered.omittedIds.length) advisoryNotes.push(`Work readiness was revalidated before execution; omitted non-executable Work Items: ${filtered.omittedIds.join(", ")}.`);
-	if (!iteration.items?.length) throw new Error(`No currently executable Work Items were selected for processing. Omitted non-executable Work Items: ${filtered.omittedIds.join(", ") || "none"}.`);
-
 	const pipeline = selectWorkProcessPipeline({ explicitPipeline: input.explicitPipeline, defaultPipeline: input.defaultPipeline });
 	const startedAt = now();
 	const runId = (input.createRunId || createDefaultRunId)(startedAt);
-	const baseRecord = createWorkProcessRecord({
-		runId,
-		query: planResult.query || input.query,
-		pipeline,
-		iteration,
-		planId: input.planId,
-		startedAt,
-	});
 	const writeRecord = deps.writeRecord || writeWorkProcessRunRecord;
-	const recordPath = writeRecord(input.cwd, baseRecord);
-	try {
-		const execution = await deps.execute(input.cwd, {
+	const attempted = new Set<string>();
+	const maxWaves = Math.max(1, input.maxIterations || 1);
+	let aggregateRecord: WorkProcessRunRecord | undefined;
+	let recordPath = "";
+
+	for (let wave = 0; wave < maxWaves; wave++) {
+		let effectivePlan = planResult;
+		if (input.planId && wave === 0) {
+			const currentPlan = await deps.plan(input.cwd, planResult.query || input.query);
+			const firstIteration = planResult.iterations[0];
+			if (!firstIteration) throw new Error("No Work Items were selected for processing.");
+			effectivePlan = { ...planResult, iterations: [revalidateCachedPlanIteration({ planId: input.planId, plannedIteration: firstIteration, currentPlan, advisoryNotes })] };
+		}
+		const selection = selectExecutableIteration(effectivePlan, attempted, advisoryNotes);
+		if (!selection.iteration) {
+			if (selection.repeatedIds.length) throw new Error(`Work cycle guard stopped processing because ready Work Items repeated: ${selection.repeatedIds.join(", ")}. Ensure the Work Source close/validate hook marks completed work before re-running.`);
+			if (!aggregateRecord) throw new Error(`No currently executable Work Items were selected for processing. Omitted non-executable Work Items: ${selection.omittedIds.join(", ") || "none"}.`);
+			return { record: aggregateRecord, recordPath, advisoryNotes };
+		}
+
+		const waveRecord = createWorkProcessRecord({
 			runId,
-			query: baseRecord.query,
+			query: effectivePlan.query || input.query,
 			pipeline,
-			items: baseRecord.resolvedItems,
-			parallel: planIterationSupportsParallel(iteration),
-			executionContexts: baseRecord.executionContexts,
-			executionGroups: baseRecord.executionGroups,
-			recordPath,
+			iteration: selection.iteration,
+			planId: input.planId,
+			startedAt,
 		});
-		const finalRecord = applyWorkProcessResult(baseRecord, execution, now());
-		writeRecord(input.cwd, finalRecord);
-		return { record: finalRecord, recordPath, advisoryNotes };
-	} catch (error) {
-		const endedAt = now();
-		const errorRecord: WorkProcessRunRecord = {
-			...baseRecord,
-			status: "error",
-			updatedAt: endedAt,
-			endedAt,
-		};
-		writeRecord(input.cwd, errorRecord);
-		throw error;
+		const runningRecord = mergeWorkProcessRecords(aggregateRecord, waveRecord);
+		recordPath = writeRecord(input.cwd, runningRecord);
+		try {
+			const execution = await deps.execute(input.cwd, {
+				runId,
+				query: waveRecord.query,
+				pipeline,
+				items: waveRecord.resolvedItems,
+				parallel: planIterationSupportsParallel(selection.iteration),
+				executionContexts: waveRecord.executionContexts,
+				executionGroups: waveRecord.executionGroups,
+				recordPath,
+			});
+			const finalWaveRecord = applyWorkProcessResult(waveRecord, execution, now());
+			aggregateRecord = mergeWorkProcessRecords(aggregateRecord, finalWaveRecord);
+			writeRecord(input.cwd, aggregateRecord);
+			const waveItemIds = itemIdSet(selection.iteration.items);
+			for (const id of waveItemIds) attempted.add(id);
+			if (aggregateRecord.status !== "done") return { record: aggregateRecord, recordPath, advisoryNotes };
+			const closed = closedItemIds(execution);
+			if (![...waveItemIds].every((id) => closed.has(id))) {
+				advisoryNotes.push("Work wave processing stopped after the current wave because the execution result did not confirm Work Source closure for every item.");
+				return { record: aggregateRecord, recordPath, advisoryNotes };
+			}
+			planResult = await deps.plan(input.cwd, input.query);
+		} catch (error) {
+			const endedAt = now();
+			const errorRecord: WorkProcessRunRecord = {
+				...waveRecord,
+				status: "error",
+				updatedAt: endedAt,
+				endedAt,
+			};
+			aggregateRecord = mergeWorkProcessRecords(aggregateRecord, errorRecord);
+			writeRecord(input.cwd, aggregateRecord);
+			throw error;
+		}
 	}
+	if (aggregateRecord && input.maxIterations) {
+		const selection = selectExecutableIteration(planResult, attempted, advisoryNotes);
+		if (selection.iteration || selection.repeatedIds.length) throw new Error(`Work wave limit exceeded after ${maxWaves} iteration(s). Increase maxIterations only after confirming completed work is closing in the Work Source.`);
+	}
+	if (aggregateRecord) return { record: aggregateRecord, recordPath, advisoryNotes };
+	throw new Error("No Work Items were selected for processing.");
 }
