@@ -13,26 +13,50 @@ export interface ConfigAgentDef {
 	copyToWorktree?: string[];
 }
 
-export interface ConfigChainStep { role: string; prompt: string }
-export interface ConfigPipelineStep { role: string; description?: string; prompt: string; sandbox?: ConfigAgentDef["sandbox"]; model?: string; maxIterations?: number; copyToWorktree?: string[] }
-export interface ConfigPipelineDef { description?: string; branchStrategy?: Record<string, unknown>; sandbox?: ConfigAgentDef["sandbox"]; model?: string; copyToWorktree?: string[]; steps: ConfigPipelineStep[] }
+export interface ConfigPipelineNodeDef { kind?: string; needs?: string[]; role?: string; prompt?: string; promptOverride?: string; nodes?: Record<string, ConfigPipelineNodeDef>; [key: string]: unknown }
+export interface ConfigPipelineDef { description?: string; kind?: string; needs?: string[]; branchStrategy?: Record<string, unknown>; sandbox?: ConfigAgentDef["sandbox"]; model?: string; copyToWorktree?: string[]; nodes?: Record<string, ConfigPipelineNodeDef>; [key: string]: unknown }
 
 export interface ConfigShadowSnapshot {
 	defaultSandbox?: ConfigAgentDef["sandbox"];
 	defaultModel?: string;
 	defaultPipeline?: string;
 	defaultAgent?: string;
+	maxWorkers?: number;
+	maxIterations?: number;
 	workSource?: string;
 	workSourceSetupCommand?: string;
 	issueTracker?: string;
 	issueTrackerSetupCommand?: string;
 	imageNamePattern?: string;
 	agents: Record<string, ConfigAgentDef>;
-	chains: Record<string, ConfigChainStep[]>;
 	pipelines: Record<string, ConfigPipelineDef>;
 }
 
 export type ConfigShadowChange = ShadowChange<ConfigShadowSnapshot>;
+
+function isGraphPipeline(pipeline: ConfigPipelineDef | undefined): boolean {
+	return Boolean(pipeline?.nodes && Object.keys(pipeline.nodes).length > 0);
+}
+
+function setNestedValue(root: Record<string, unknown>, parts: string[], value: unknown): void {
+	let current: Record<string, unknown> = root;
+	for (const part of parts.slice(0, -1)) {
+		if (!current[part] || typeof current[part] !== "object" || Array.isArray(current[part])) current[part] = {};
+		current = current[part] as Record<string, unknown>;
+	}
+	current[parts.at(-1)!] = value;
+}
+
+function renameRoleReferences(value: unknown, oldName: string, newName: string): void {
+	if (Array.isArray(value)) {
+		for (const entry of value) renameRoleReferences(entry, oldName, newName);
+		return;
+	}
+	if (!value || typeof value !== "object") return;
+	const record = value as Record<string, unknown>;
+	if (record.role === oldName) record.role = newName;
+	for (const entry of Object.values(record)) renameRoleReferences(entry, oldName, newName);
+}
 
 export class ConfigShadowModel extends ShadowModelBase<ConfigShadowSnapshot> {
 	private state: ConfigShadowSnapshot;
@@ -59,29 +83,25 @@ export class ConfigShadowModel extends ShadowModelBase<ConfigShadowSnapshot> {
 			if (value === "default" && ["model", "sandbox"].includes(parts[2])) delete (this.state.agents[parts[1]] as any)[parts[2]];
 			else (this.state.agents[parts[1]] as any)[parts[2]] = value;
 		} else if (parts[0] === "pipelines" && parts.length === 3) {
-			this.state.pipelines[parts[1]] ||= { steps: [] };
+			this.state.pipelines[parts[1]] ||= { kind: "composite", nodes: {} };
 			(this.state.pipelines[parts[1]] as any)[parts[2]] = value;
-		} else if (parts[0] === "pipelines" && parts[2] === "steps" && parts.length === 5) {
-			this.state.pipelines[parts[1]] ||= { steps: [] };
-			const index = Number(parts[3]);
-			this.state.pipelines[parts[1]].steps[index] ||= { role: "worker", description: "Worker step", prompt: "Complete the requested task." };
-			if (value === "default" && ["model", "sandbox", "maxIterations"].includes(parts[4])) delete (this.state.pipelines[parts[1]].steps[index] as any)[parts[4]];
-			else (this.state.pipelines[parts[1]].steps[index] as any)[parts[4]] = value;
+		} else if (parts[0] === "pipelines" && parts[2] === "nodes" && parts.length >= 5) {
+			this.state.pipelines[parts[1]] ||= { kind: "composite", nodes: {} };
+			this.state.pipelines[parts[1]].kind ||= "composite";
+			this.state.pipelines[parts[1]].nodes ||= {};
+			setNestedValue(this.state.pipelines[parts[1]] as Record<string, unknown>, parts.slice(2), value);
+		} else if (parts[0] === "pipelines" && parts[2] === "steps") {
+			throw new Error(`Pipeline '${parts[1]}' uses unsupported pipeline step path; edit graph-native nodes instead.`);
 		}
 		this.emit("set-config", `Set ${path}`, before, { path, value });
 	}
 
 	addPipelineStep(pipelineName: string): void {
-		const before = this.capture();
-		this.state.pipelines[pipelineName] ||= { steps: [] };
-		this.state.pipelines[pipelineName].steps.push({ role: "worker", description: "Worker step", prompt: "Complete the requested task." });
-		this.emit("add-pipeline-step", `Add step to pipeline ${pipelineName}`, before, { pipelineName });
+		throw new Error(`Pipeline '${pipelineName}' uses unsupported pipeline step operation; add graph nodes instead.`);
 	}
 
-	deletePipelineStep(pipelineName: string, index: number): void {
-		const before = this.capture();
-		this.state.pipelines[pipelineName]?.steps.splice(index, 1);
-		this.emit("delete-pipeline-step", `Delete step ${index + 1} from pipeline ${pipelineName}`, before, { pipelineName, index });
+	deletePipelineStep(pipelineName: string, _index: number): void {
+		throw new Error(`Pipeline '${pipelineName}' uses unsupported pipeline step operation; delete graph nodes instead.`);
 	}
 
 	addAgent(name: string): void {
@@ -95,8 +115,7 @@ export class ConfigShadowModel extends ShadowModelBase<ConfigShadowSnapshot> {
 		this.state.agents[newName] = this.state.agents[oldName] || { name: newName };
 		this.state.agents[newName].name = newName;
 		delete this.state.agents[oldName];
-		for (const chain of Object.values(this.state.chains)) for (const step of chain) if (step.role === oldName) step.role = newName;
-		for (const pipeline of Object.values(this.state.pipelines)) for (const step of pipeline.steps || []) if (step.role === oldName) step.role = newName;
+		for (const pipeline of Object.values(this.state.pipelines)) renameRoleReferences(pipeline, oldName, newName);
 		this.emit("rename-agent", `Rename role ${oldName} → ${newName}`, before, { oldName, newName });
 	}
 
@@ -109,13 +128,24 @@ export class ConfigShadowModel extends ShadowModelBase<ConfigShadowSnapshot> {
 
 	addPipeline(name: string): void {
 		const before = this.capture();
-		this.state.pipelines[name] = { description: `${name} pipeline`, steps: [{ role: "worker", description: "Worker step", prompt: "Complete the requested task." }] };
+		this.state.pipelines[name] = {
+			description: `${name} graph pipeline`,
+			kind: "composite",
+			nodes: {
+				workspace: {
+					kind: "git.worktree",
+					nodes: {
+						run: { kind: "agent.pi", role: "worker", prompt: "blank" },
+					},
+				},
+			},
+		};
 		this.emit("add-pipeline", `Add pipeline ${name}`, before, { name });
 	}
 
 	renamePipeline(oldName: string, newName: string): void {
 		const before = this.capture();
-		this.state.pipelines[newName] = this.state.pipelines[oldName] || { steps: [] };
+		this.state.pipelines[newName] = this.state.pipelines[oldName] || { kind: "composite", nodes: {} };
 		delete this.state.pipelines[oldName];
 		this.emit("rename-pipeline", `Rename pipeline ${oldName} → ${newName}`, before, { oldName, newName });
 	}

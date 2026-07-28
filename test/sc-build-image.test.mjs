@@ -23,8 +23,6 @@ function makeRepo(name = 'doc-vader', defaultSandbox = 'docker', options = {}) {
     '    sandbox: docker',
     '    maxIterations: 1',
     '',
-    '',
-    'chains:',
   ].join('\n'));
   return cwd;
 }

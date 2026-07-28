@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import agentWorkflows, { parseSimpleYaml } from '../extensions/agent-workflows/index.ts';
+import agentWorkflows, { executePipeline, parseSimpleYaml } from '../extensions/agent-workflows/index.ts';
 
 function createFakePi() {
   const commands = new Map();
@@ -36,8 +36,6 @@ function createTempRepoConfig() {
     '',
     '  default: [researcher, builder]',
     '',
-    'chains:',
-    '',
     'pipelines:',
     '  implement:',
     '    description: Fixed-domain implementation pipeline.',
@@ -46,16 +44,25 @@ function createTempRepoConfig() {
     '      branch: sandcastle/implement',
     '    sandbox: docker',
     '    model: claude-opus-4-8',
-    '    steps:',
-    '      - role: researcher',
-    '        prompt: |',
-    '          Research the requested work and identify the relevant files.',
-    '          $INPUT',
-    '      - role: builder',
-    '        prompt: |',
-    '          Implement the requested work.',
-    '          Original request: $ORIGINAL',
-    '          Research: $INPUT',
+    '    kind: composite',
+    '    nodes:',
+    '      workspace:',
+    '        kind: git.worktree',
+    '        nodes:',
+    '          research:',
+    '            kind: agent.pi',
+    '            role: researcher',
+    '            prompt: |',
+    '              Research the requested work and identify the relevant files.',
+    '              $INPUT',
+    '          build:',
+    '            kind: agent.pi',
+    '            needs: [research]',
+    '            role: builder',
+    '            prompt: |',
+    '              Implement the requested work.',
+    '              Original request: $ORIGINAL',
+    '              Research: $INPUT',
     '',
     '  broken:',
     '    description: Pipeline that fails on the first step.',
@@ -63,10 +70,16 @@ function createTempRepoConfig() {
     '      type: branch',
     '      branch: sandcastle/broken',
     '    sandbox: docker',
-    '    steps:',
-    '      - role: researcher',
-    '        prompt: |',
-    '          Trigger a failure.',
+    '    kind: composite',
+    '    nodes:',
+    '      workspace:',
+    '        kind: git.worktree',
+    '        nodes:',
+    '          fail:',
+    '            kind: agent.pi',
+    '            role: researcher',
+    '            prompt: |',
+    '              Trigger a failure.',
   ].join('\n');
 }
 
@@ -77,36 +90,29 @@ async function createRepo() {
   return repoRoot;
 }
 
-test('parseSimpleYaml keeps chain and pipeline step indentation rules aligned with the sample config', () => {
+test('parseSimpleYaml keeps graph pipeline indentation rules aligned with the sample config', () => {
   const parsed = parseSimpleYaml([
-    'chains:',
-    '  review-flow:',
-    '    - role: reviewer',
-    '      prompt: |',
-    '        Review the branch.',
-    '        $INPUT',
-    '',
     'pipelines:',
     '  implement:',
     '    branchStrategy:',
     '      type: branch',
     '      branch: sandcastle/implement',
-    '    steps:',
-    '      - role: builder',
+    '    kind: composite',
+    '    nodes:',
+    '      run:',
+    '        kind: agent.pi',
+    '        role: builder',
     '        prompt: |',
     '          Implement the requested work.',
     '          $INPUT',
   ].join('\n'));
 
-  assert.equal(parsed.chains['review-flow'].length, 1);
-  assert.equal(parsed.chains['review-flow'][0].role, 'reviewer');
-  assert.match(parsed.chains['review-flow'][0].prompt, /Review the branch\.\n\$INPUT/);
-  assert.equal(parsed.pipelines.implement.steps.length, 1);
+  assert.equal(parsed.pipelines.implement.nodes.run.role, 'builder');
   assert.equal(parsed.pipelines.implement.branchStrategy.branch, 'sandcastle/implement');
-  assert.match(parsed.pipelines.implement.steps[0].prompt, /Implement the requested work\.\n\$INPUT/);
+  assert.match(parsed.pipelines.implement.nodes.run.prompt, /Implement the requested work\.\n\$INPUT/);
 });
 
-test('parseSimpleYaml preserves unsupported pipeline step keys for validation', () => {
+test('parseSimpleYaml preserves unsupported graph node keys for validation', () => {
   const parsed = parseSimpleYaml([
     'roles:',
     '  worker:',
@@ -115,14 +121,17 @@ test('parseSimpleYaml preserves unsupported pipeline step keys for validation', 
     '',
     'pipelines:',
     '  simple-loop:',
-    '    steps:',
-    '      - agent: worker',
+    '    kind: composite',
+    '    nodes:',
+    '      run:',
+    '        kind: agent.pi',
+    '        agent: worker',
     '        prompt: do work',
   ].join('\n'));
 
   assert.equal(parsed.agents.worker.systemPrompt, 'Worker system prompt.');
-  assert.equal(parsed.pipelines['simple-loop'].steps[0].agent, 'worker');
-  assert.equal(parsed.pipelines['simple-loop'].steps[0].role, '');
+  assert.equal(parsed.pipelines['simple-loop'].nodes.run.agent, 'worker');
+  assert.equal(parsed.pipelines['simple-loop'].nodes.run.role, undefined);
 });
 
 test('/work:config-raw validate rejects agent terminology where role is required', async () => {
@@ -140,8 +149,11 @@ test('/work:config-raw validate rejects agent terminology where role is required
     '',
     'pipelines:',
     '  simple-loop:',
-    '    steps:',
-    '      - agent: worker',
+    '    kind: composite',
+    '    nodes:',
+    '      run:',
+    '        kind: agent.pi',
+    '        agent: worker',
     '        prompt: do work',
   ].join('\n'), 'utf8');
 
@@ -155,7 +167,7 @@ test('/work:config-raw validate rejects agent terminology where role is required
 
   assert.equal(notifications[0].type, 'error');
   assert.match(notifications[0].message, /config\.agents is not supported/);
-  assert.match(notifications[0].message, /config\.pipelines\.simple-loop\.steps\[0\]\.agent is not supported/);
+  assert.match(notifications[0].message, /config\.pipelines\.simple-loop\.nodes\.run\.agent is not supported/);
 });
 
 test('/work:pipeline registers and parses prompt text deterministically', async () => {
@@ -223,6 +235,144 @@ test('/work:pipeline registers and parses prompt text deterministically', async 
   assert.equal(record.steps[1].status, 'completed');
   assert.equal(record.steps[0].commits[0], 'commit-1');
   assert.equal(record.steps[1].commits[0], 'commit-2');
+});
+
+test('executePipeline propagates host pi provider defaults when pipeline config inherits Agent Default', async () => {
+  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-pi-default-model-'));
+  const hostPiDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-host-pi-'));
+  const previousHostPiDir = process.env.PI_HOST_AGENT_DIR;
+  try {
+    await fs.mkdir(path.join(repoRoot, '.pi/sandcastle'), { recursive: true });
+    await fs.writeFile(path.join(hostPiDir, 'settings.json'), JSON.stringify({ defaultProvider: 'openai-codex', defaultModel: 'host-pi-model' }), 'utf8');
+    process.env.PI_HOST_AGENT_DIR = hostPiDir;
+    await fs.writeFile(path.join(repoRoot, '.pi/sandcastle/config.yaml'), [
+      'defaultAgent: pi',
+      'defaultSandbox: no-sandbox',
+      'defaultModel: Agent Default',
+      'roles:',
+      '  worker:',
+      '    model: Agent Default',
+      'pipelines:',
+      '  simple-loop:',
+      '    sandbox: no-sandbox',
+      '    model: Agent Default',
+      '    kind: composite',
+      '    nodes:',
+      '      workspace:',
+      '        kind: git.worktree',
+      '        nodes:',
+      '          run:',
+      '            kind: agent.pi',
+      '            role: worker',
+      '            prompt: $INPUT',
+    ].join('\n'), 'utf8');
+
+    const commands = [];
+    await executePipeline(repoRoot, 'simple-loop', 'do work', {
+      now: () => 1700000002000,
+      createWorktree: async () => ({
+        branch: 'sandcastle/simple-loop',
+        worktreePath: path.join(repoRoot, '.pi/sandcastle/worktrees/simple-loop'),
+        close: async () => ({}),
+        run: async (options) => {
+          commands.push(options.agent.buildPrintCommand({ prompt: options.prompt }).command);
+          return {
+            iterations: [],
+            commits: [{ sha: 'host-default-commit' }],
+            branch: 'sandcastle/simple-loop',
+            stdout: '',
+            logFilePath: options.logging.path,
+          };
+        },
+      }),
+      loadSandboxProvider: async (kind) => ({ kind }),
+    });
+
+    assert.match(commands[0], /--provider 'openai-codex'/);
+    assert.match(commands[0], /--model 'host-pi-model'/);
+  } finally {
+    if (previousHostPiDir === undefined) delete process.env.PI_HOST_AGENT_DIR;
+    else process.env.PI_HOST_AGENT_DIR = previousHostPiDir;
+    await fs.rm(repoRoot, { recursive: true, force: true });
+    await fs.rm(hostPiDir, { recursive: true, force: true });
+  }
+});
+
+test('executePipeline gives pi pipeline steps the same host agent directory mounts used by /work:plan', async () => {
+  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-pi-host-mounts-'));
+  const hostPiDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-host-pi-mounts-'));
+  const previousHostPiDir = process.env.PI_HOST_AGENT_DIR;
+  try {
+    await fs.mkdir(path.join(repoRoot, '.pi/sandcastle'), { recursive: true });
+    await fs.writeFile(path.join(hostPiDir, 'settings.json'), JSON.stringify({ defaultProvider: 'azure-openai-responses', defaultModel: 'host-pi-model' }), 'utf8');
+    await fs.writeFile(path.join(hostPiDir, 'auth.json'), JSON.stringify({ provider: 'secret' }), 'utf8');
+    await fs.writeFile(path.join(hostPiDir, 'trust.json'), JSON.stringify({ trusted: true }), 'utf8');
+    process.env.PI_HOST_AGENT_DIR = hostPiDir;
+    await fs.writeFile(path.join(repoRoot, '.pi/sandcastle/config.yaml'), [
+      'defaultAgent: pi',
+      'defaultSandbox: docker',
+      'defaultModel: Agent Default',
+      'roles:',
+      '  worker:',
+      '    provider: pi',
+      '    model: Agent Default',
+      'pipelines:',
+      '  simple-loop:',
+      '    sandbox: docker',
+      '    model: Agent Default',
+      '    kind: composite',
+      '    nodes:',
+      '      workspace:',
+      '        kind: git.worktree',
+      '        nodes:',
+      '          run:',
+      '            kind: agent.pi',
+      '            role: worker',
+      '            prompt: $INPUT',
+    ].join('\n'), 'utf8');
+
+    const sandboxCalls = [];
+    const runCalls = [];
+    await executePipeline(repoRoot, 'simple-loop', 'do work', {
+      now: () => 1700000003000,
+      createWorktree: async () => ({
+        branch: 'sandcastle/simple-loop',
+        worktreePath: path.join(repoRoot, '.pi/sandcastle/worktrees/simple-loop'),
+        close: async () => ({}),
+        run: async (options) => {
+          runCalls.push(options);
+          return { iterations: [], commits: [{ sha: 'host-mount-commit' }], branch: 'sandcastle/simple-loop', stdout: '' };
+        },
+      }),
+      loadSandboxProvider: async (kind, options) => {
+        sandboxCalls.push({ kind, options });
+        return { kind, options };
+      },
+      image: {
+        inspectImageCreated: async () => new Date(1700000000000),
+      },
+    });
+
+    assert.equal(sandboxCalls[0].kind, 'docker');
+    assert.match(sandboxCalls[0].options.env.PI_CODING_AGENT_DIR, /\/home\/agent\/\.pi-host-agent/);
+    assert.deepEqual(
+      sandboxCalls[0].options.mounts.map((mount) => ({ sandboxPath: mount.sandboxPath, readonly: mount.readonly })),
+      [
+        { sandboxPath: '/home/agent/.pi-host-agent', readonly: false },
+        { sandboxPath: '/home/agent/.pi-host-agent/auth.json', readonly: true },
+        { sandboxPath: '/home/agent/.pi-host-agent/trust.json', readonly: true },
+      ],
+    );
+    assert.deepEqual(runCalls[0].agent.env, {}, 'sandboxed Pi runs must not duplicate PI_CODING_AGENT_* env on the agent provider');
+    const command = runCalls[0].agent.buildPrintCommand({ prompt: 'prompt' }).command;
+    assert.match(command, /--provider 'azure-openai-responses'/);
+    assert.match(command, /--model 'host-pi-model'/);
+  } finally {
+    if (previousHostPiDir === undefined) delete process.env.PI_HOST_AGENT_DIR;
+    else process.env.PI_HOST_AGENT_DIR = previousHostPiDir;
+    await fs.rm(repoRoot, { recursive: true, force: true });
+    await fs.rm(hostPiDir, { recursive: true, force: true });
+  }
 });
 
 test('/work:pipeline rejects unknown pipelines with available options', async () => {

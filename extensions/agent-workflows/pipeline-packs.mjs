@@ -8,9 +8,78 @@ function yamlScalar(value) {
   return text;
 }
 
+function yamlModelScalar(value) {
+  return yamlScalar(value ?? 'Agent Default');
+}
+
 function yamlBlock(text, indent = 6) {
   const pad = ' '.repeat(indent);
   return `|\n${String(text || '').split('\n').map((line) => `${pad}${line}`).join('\n')}`;
+}
+
+function yamlMapKey(value) {
+  return /^[A-Za-z0-9_-]+$/.test(value) ? value : JSON.stringify(value);
+}
+
+function isPlainObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function yamlValueLines(key, value, indent) {
+  const pad = ' '.repeat(indent);
+  if (value === undefined) return [];
+  if (typeof value === 'string' && value.includes('\n')) return [`${pad}${yamlMapKey(key)}: ${yamlBlock(value, indent + 2)}`];
+  if (Array.isArray(value)) {
+    if (value.every((entry) => !isPlainObject(entry) && !Array.isArray(entry))) return [`${pad}${yamlMapKey(key)}: ${yamlScalar(value)}`];
+    const lines = [`${pad}${yamlMapKey(key)}:`];
+    for (const entry of value) {
+      if (isPlainObject(entry)) {
+        const entries = Object.entries(entry).filter(([, child]) => child !== undefined);
+        if (!entries.length) {
+          lines.push(`${' '.repeat(indent + 2)}- {}`);
+          continue;
+        }
+        const [[firstKey, firstValue], ...rest] = entries;
+        if (isPlainObject(firstValue) || Array.isArray(firstValue) || (typeof firstValue === 'string' && firstValue.includes('\n'))) {
+          lines.push(`${' '.repeat(indent + 2)}- ${yamlMapKey(firstKey)}:`);
+          lines.push(...yamlObjectLines(firstValue, indent + 4));
+        } else {
+          lines.push(`${' '.repeat(indent + 2)}- ${yamlMapKey(firstKey)}: ${yamlScalar(firstValue)}`);
+        }
+        for (const [childKey, childValue] of rest) lines.push(...yamlValueLines(childKey, childValue, indent + 4));
+      } else {
+        lines.push(`${' '.repeat(indent + 2)}- ${yamlScalar(entry)}`);
+      }
+    }
+    return lines;
+  }
+  if (isPlainObject(value)) return [`${pad}${yamlMapKey(key)}:`, ...yamlObjectLines(value, indent + 2)];
+  return [`${pad}${yamlMapKey(key)}: ${yamlScalar(value)}`];
+}
+
+function yamlObjectLines(value, indent, preferredOrder = []) {
+  if (!isPlainObject(value)) return [`${' '.repeat(indent)}${yamlScalar(value)}`];
+  const emitted = new Set();
+  const lines = [];
+  for (const key of preferredOrder) {
+    if (Object.prototype.hasOwnProperty.call(value, key) && value[key] !== undefined) {
+      lines.push(...yamlValueLines(key, value[key], indent));
+      emitted.add(key);
+    }
+  }
+  for (const [key, entry] of Object.entries(value)) {
+    if (emitted.has(key) || entry === undefined || key === 'name') continue;
+    lines.push(...yamlValueLines(key, entry, indent));
+  }
+  return lines;
+}
+
+function renderGraphPipeline(name, pipeline) {
+  if (!pipeline || pipeline.kind !== 'composite' || !pipeline.nodes) throw new Error(`Pipeline '${name}' must be graph-native with kind: composite and nodes.`);
+  const lines = [`  ${yamlMapKey(name)}:`];
+  const order = ['description', 'kind', 'needs', 'branchStrategy', 'sandbox', 'model', 'copyToWorktree', 'nodes'];
+  lines.push(...yamlObjectLines(pipeline, 4, order));
+  return lines;
 }
 
 export function loadPipelinePacks() {
@@ -32,9 +101,11 @@ export function configToYaml(config) {
     '',
     'runtimeVersion: 1',
     `defaultSandbox: ${yamlScalar(config.defaultSandbox)}`,
-    `defaultModel: ${yamlScalar(config.defaultModel)}`,
+    `defaultModel: ${yamlModelScalar(config.defaultModel)}`,
     `defaultPipeline: ${yamlScalar(config.defaultPipeline)}`,
     `defaultAgent: ${yamlScalar(config.defaultAgent)}`,
+    `maxWorkers: ${yamlScalar(config.maxWorkers || 5)}`,
+    `maxIterations: ${yamlScalar(config.maxIterations || 10)}`,
     `workSource: ${yamlScalar(config.workSource || config.issueTracker)}`,
     ...(config.workSourceSetupCommand || config.issueTrackerSetupCommand ? [`workSourceSetupCommand: ${yamlScalar(config.workSourceSetupCommand || config.issueTrackerSetupCommand)}`] : []),
     `imageNamePattern: ${yamlScalar(config.imageNamePattern || 'sandcastle:<repo-dir-name>')}`,
@@ -54,29 +125,9 @@ export function configToYaml(config) {
     if (prompt.format !== undefined) lines.push(`    format: ${yamlScalar(prompt.format)}`);
     if (prompt.template !== undefined) lines.push(`    template: ${yamlBlock(prompt.template, 6)}`);
   }
-  if (Object.keys(config.chains || {}).length) {
-    lines.push('', 'chains:');
-    for (const [name, steps] of Object.entries(config.chains || {})) {
-      lines.push(`  ${name}:`);
-      for (const step of steps || []) {
-        lines.push(`    - role: ${yamlScalar(step.role)}`, `      prompt: ${yamlBlock(step.prompt || '', 6)}`);
-      }
-    }
-  }
   lines.push('', 'pipelines:');
   for (const [name, pipeline] of Object.entries(config.pipelines)) {
-    lines.push(`  ${name}:`, `    description: ${yamlScalar(pipeline.description)}`, '    branchStrategy:');
-    for (const [key, value] of Object.entries(pipeline.branchStrategy || {})) lines.push(`      ${key}: ${yamlScalar(value)}`);
-    if (pipeline.sandbox !== undefined) lines.push(`    sandbox: ${yamlScalar(pipeline.sandbox)}`);
-    lines.push(`    model: ${yamlScalar(pipeline.model)}`, `    copyToWorktree: ${yamlScalar(pipeline.copyToWorktree || [])}`, '    steps:');
-    for (const step of pipeline.steps || []) {
-      lines.push(`      - kind: ${yamlScalar(step.kind || 'runRole')}`, `        role: ${yamlScalar(step.role)}`);
-      if (step.description !== undefined) lines.push(`        description: ${yamlScalar(step.description)}`);
-      lines.push(`        prompt: ${yamlScalar(step.prompt)}`);
-      if (step.maxIterations !== undefined) lines.push(`        maxIterations: ${yamlScalar(step.maxIterations)}`);
-      if (step.copyToWorktree !== undefined) lines.push(`        copyToWorktree: ${yamlScalar(step.copyToWorktree)}`);
-    }
-    lines.push('');
+    lines.push(...renderGraphPipeline(name, pipeline), '');
   }
   return lines.join('\n').replace(/\n+$/, '\n');
 }
@@ -89,9 +140,11 @@ export function buildDefaultConfigText(defaults = {}) {
     '',
     'runtimeVersion: 1',
     `defaultSandbox: ${yamlScalar(cfg.defaultSandbox)}`,
-    `defaultModel: ${yamlScalar(cfg.defaultModel)}`,
+    `defaultModel: ${yamlModelScalar(cfg.defaultModel)}`,
     `defaultPipeline: ${yamlScalar(cfg.defaultPipeline)}`,
     `defaultAgent: ${yamlScalar(cfg.defaultAgent)}`,
+    `maxWorkers: ${yamlScalar(cfg.maxWorkers || 5)}`,
+    `maxIterations: ${yamlScalar(cfg.maxIterations || 10)}`,
     `workSource: ${yamlScalar(cfg.workSource || cfg.issueTracker)}`,
     ...(cfg.workSourceSetupCommand || cfg.issueTrackerSetupCommand ? [`workSourceSetupCommand: ${yamlScalar(cfg.workSourceSetupCommand || cfg.issueTrackerSetupCommand)}`] : []),
     `imageNamePattern: ${yamlScalar(cfg.imageNamePattern || 'sandcastle:<repo-dir-name>')}`,

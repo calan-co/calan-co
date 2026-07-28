@@ -41,7 +41,7 @@ The documentation should make the deterministic parsing rules, read-only versus 
 
 ## Tasks
 
-- [x] Document the implemented /work:config-raw, /work:run, /work:pipeline, and /sc run-management commands with examples tied to the actual extension behavior.
+- [x] Document the implemented /work:config, /work:run, /work:pipeline, and /sc run-management commands with examples tied to the actual extension behavior.
 - [x] Document /work:list, /work:inspect, /work:plan, /work:next, /work:process, and backlog run-management commands.
 - [x] Document deterministic parsing rules, especially that --pipeline/-p is the only pipeline selector.
 - [x] Document read-only versus durable commands and where run records/logs are stored.

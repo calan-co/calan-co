@@ -5,8 +5,8 @@ import test from 'node:test';
 const docsFileUrl = new URL('../docs/command-surface.md', import.meta.url);
 const documentedCommandSnippets = [
   {
-    message: 'issue 00010 should document /work:config-raw',
-    snippet: '`/work:config-raw`',
+    message: 'issue 00010 should document /work:config',
+    snippet: '`/work:config`',
   },
   {
     message: 'issue 00010 should document /work:run',
@@ -83,13 +83,13 @@ const requiredDocsSnippets = [
     snippet: '.pi/sandcastle/results',
   },
   {
-    message: 'issue 00010 should document /work:config-raw init semantics',
+    message: 'issue 00010 should document /work:config init semantics',
     snippet:
-      '`/work:config-raw init` hydrates missing repo-local files and prompt templates without overwriting existing edits.',
+      '`/work:config init` hydrates missing repo-local files and prompt templates without overwriting existing edits.',
   },
   {
-    message: 'issue 00010 should document fixed pipeline execution',
-    snippet: '`/work:pipeline <pipeline> [prompt]` runs a fixed-domain Pipeline directly.',
+    message: 'issue 00010 should document graph pipeline execution',
+    snippet: '`/work:pipeline <pipeline> [prompt]` runs a graph-native Pipeline directly.',
   },
   {
     message: 'issue 00010 should explain deterministic query parsing',
@@ -106,7 +106,7 @@ const requiredDocsSnippets = [
   {
     message: 'issue 00010 should define where durable state begins',
     snippet:
-      'Durable state begins when `/work:process` or `/work:resume` executes an adapter-backed pipeline.'
+      'Durable state begins when `/work:process` or `/work:resume` executes an adapter-backed graph pipeline.'
   },
   {
     message: 'issue 00010 should reserve a separate namespace for PR workflows',

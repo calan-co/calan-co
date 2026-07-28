@@ -26,7 +26,10 @@ export interface WorkPlanIteration {
 }
 
 export interface WorkPlanResult {
+	kind?: "workPlan" | "work-plan";
+	scope?: "forecast" | "actionable";
 	query?: string;
+	actionable?: WorkPlanResult;
 	iterations: WorkPlanIteration[];
 }
 
@@ -46,6 +49,27 @@ export interface WorkExecutionGroup {
 	contexts: WorkExecutionContext[];
 }
 
+export interface WorkProcessWorkerStatus {
+	index: number;
+	role: string;
+	status: "running" | "completed" | "failed";
+	branch?: string;
+	commits?: string[];
+	logPath?: string;
+	error?: string;
+	nodePath?: string;
+	kind?: string;
+	laneId?: string;
+	itemId?: string;
+}
+
+export interface WorkSourceMutationOutcome {
+	itemId: string;
+	action: "validate" | "close";
+	status: "succeeded" | "failed";
+	message?: string;
+}
+
 export interface WorkProcessRunRecord {
 	id: string;
 	kind?: "work-process";
@@ -56,6 +80,8 @@ export interface WorkProcessRunRecord {
 	status: WorkProcessStatus;
 	branches: string[];
 	logs: string[];
+	workerStatuses?: WorkProcessWorkerStatus[];
+	workSourceMutations?: WorkSourceMutationOutcome[];
 	executionContexts: WorkExecutionContext[];
 	executionGroups: WorkExecutionGroup[];
 	startedAt: number;
@@ -77,6 +103,8 @@ export interface WorkProcessExecutionInput {
 export interface WorkProcessExecutionResult {
 	branches?: string[];
 	logs?: string[];
+	workerStatuses?: WorkProcessWorkerStatus[];
+	workSourceMutations?: WorkSourceMutationOutcome[];
 	status?: WorkProcessStatus;
 }
 
@@ -100,6 +128,7 @@ export interface RunWorkProcessDeps {
 export interface RunWorkProcessResult {
 	record: WorkProcessRunRecord;
 	recordPath: string;
+	advisoryNotes?: string[];
 }
 
 export function sanitizeBranchSegment(value: unknown): string {
@@ -165,6 +194,27 @@ function validateForbiddenWorkPlanFields(scope: string, value: unknown, errors: 
 	}
 }
 
+function formatWorkPlanObject(value: Record<string, unknown>): string {
+	return Object.entries(value)
+		.map(([key, entry]) => `${key}: ${Array.isArray(entry) ? entry.join(", ") : isRecord(entry) ? formatWorkPlanObject(entry as Record<string, unknown>) : String(entry)}`)
+		.join("; ");
+}
+
+function normalizeWorkPlanShape(value: unknown): unknown {
+	if (!isRecord(value)) return value;
+	const plan = JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+	if (Array.isArray(plan.iterations)) {
+		plan.iterations = plan.iterations.map((iteration) => {
+			if (!isRecord(iteration)) return iteration;
+			const next: Record<string, unknown> = { ...iteration };
+			if (isRecord(next.rationale)) next.rationale = formatWorkPlanObject(next.rationale as Record<string, unknown>);
+			if (Array.isArray(next.items)) next.items = next.items.map((item) => typeof item === "string" ? { id: item } : item);
+			return next;
+		});
+	}
+	return plan;
+}
+
 export function validateExecutablePlanArtifact(plan: any): string[] {
 	const errors: string[] = [];
 	if (!isRecord(plan)) return ["Planner output must be a JSON object."];
@@ -172,11 +222,19 @@ export function validateExecutablePlanArtifact(plan: any): string[] {
 		if (FORBIDDEN_WORK_PLAN_EXECUTION_FIELDS.has(field)) errors.push(`Plan must not author execution field '${field}'.`);
 		else if (field !== "iterations") validateForbiddenWorkPlanFields(`Plan ${field}`, child, errors);
 	}
-	if (plan.schemaVersion !== undefined && plan.schemaVersion !== 1) errors.push("Plan schemaVersion must be 1 when provided.");
-	validateOptionalString("Plan", plan, "summary", errors);
-	validateOptionalString("Plan", plan, "query", errors);
-	if (!Array.isArray(plan.iterations)) return [...errors, "Planner output must contain an iterations array."];
-	for (const [iterationIndex, iteration] of plan.iterations.entries()) {
+	const normalizedPlan = normalizeWorkPlanShape(plan);
+	if (!isRecord(normalizedPlan)) return ["Planner output must be a JSON object."];
+	if (normalizedPlan.kind !== undefined && normalizedPlan.kind !== "workPlan" && normalizedPlan.kind !== "work-plan") errors.push("Plan kind must be workPlan when provided.");
+	if (normalizedPlan.scope !== undefined && normalizedPlan.scope !== "forecast" && normalizedPlan.scope !== "actionable") errors.push("Plan scope must be forecast or actionable when provided.");
+	if (normalizedPlan.schemaVersion !== undefined && normalizedPlan.schemaVersion !== 1) errors.push("Plan schemaVersion must be 1 when provided.");
+	validateOptionalString("Plan", normalizedPlan, "summary", errors);
+	validateOptionalString("Plan", normalizedPlan, "query", errors);
+	if (normalizedPlan.actionable !== undefined) {
+		if (!isRecord(normalizedPlan.actionable)) errors.push("Plan actionable must be a Work Plan object.");
+		else errors.push(...validateExecutablePlanArtifact(normalizedPlan.actionable).map((error) => `Plan actionable ${error.replace(/^Plan(?:ner output)?\s*/, "")}`));
+	}
+	if (!Array.isArray(normalizedPlan.iterations)) return [...errors, "Planner output must contain an iterations array."];
+	for (const [iterationIndex, iteration] of normalizedPlan.iterations.entries()) {
 		const iterationScope = `Plan iteration ${iterationIndex + 1}`;
 		if (!isRecord(iteration)) {
 			errors.push(`${iterationScope} must be an object.`);
@@ -223,7 +281,9 @@ export function validateExecutablePlanArtifact(plan: any): string[] {
 export function normalizeExecutablePlanArtifact(plan: any): WorkPlanResult {
 	const errors = validateExecutablePlanArtifact(plan);
 	if (errors.length) throw new Error(`Work Plan artifact is not executable:\n- ${errors.join("\n- ")}`);
-	const normalized = JSON.parse(JSON.stringify(plan)) as WorkPlanResult;
+	const normalized = normalizeWorkPlanShape(plan) as WorkPlanResult;
+	normalized.scope = normalized.scope || "actionable";
+	if (normalized.actionable) normalized.actionable = normalizeExecutablePlanArtifact(normalized.actionable);
 	normalized.iterations = normalized.iterations.map((iteration) => ({
 		...iteration,
 		items: (iteration.items || []).map((item) => ({ ...item, id: item.id.trim() })),
@@ -240,6 +300,63 @@ export function planIterationSupportsParallel(iteration: any): boolean {
 	if (typeof iteration?.classifications?.parallelizable === "boolean") return iteration.classifications.parallelizable;
 	if (typeof iteration?.supportsParallel === "boolean") return iteration.supportsParallel;
 	return (iteration?.items || []).length > 1;
+}
+
+function workItemStringArray(item: WorkItem, key: string): string[] {
+	const value = item[key];
+	return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0) : [];
+}
+
+function isHitlWorkItem(item: WorkItem, iteration: WorkPlanIteration): boolean {
+	const tags = workItemStringArray(item, "tags").map((tag) => tag.toLowerCase());
+	if (tags.some((tag) => tag === "hitl" || tag === "human-in-the-loop" || tag === "human")) return true;
+	const iterationHitl = Array.isArray(iteration.hitl) ? iteration.hitl : [];
+	return typeof item.id === "string" && iterationHitl.includes(item.id);
+}
+
+function isExplicitlyDependencyBlockedWorkItem(item: WorkItem): boolean {
+	const status = typeof item.status === "string" ? item.status.toLowerCase() : "";
+	const readiness = typeof item.readiness === "string" ? item.readiness.toLowerCase() : "";
+	const dependencyState = isRecord(item.dependencyState) && typeof item.dependencyState.status === "string" ? item.dependencyState.status.toLowerCase() : "";
+	const classifications = isRecord(item.classifications) && typeof item.classifications.dependencyState === "string" ? item.classifications.dependencyState.toLowerCase() : "";
+	return [status, readiness, dependencyState, classifications].some((value) => value === "blocked" || value === "dependency-blocked" || value === "has-dependencies");
+}
+
+function normalizeDependencyToken(value: string): string {
+	return value.trim().toLowerCase().replace(/^\[\[/, "").replace(/\]\]$/, "").replace(/^backlog\//, "").replace(/\.md$/, "");
+}
+
+function workItemReferenceTokens(item: WorkItem): Set<string> {
+	const tokens = new Set<string>();
+	for (const key of ["id", "sourcePath", "relativePath", "filePath", "title"] as const) {
+		const value = item[key];
+		if (typeof value === "string" && value.trim()) tokens.add(normalizeDependencyToken(value));
+	}
+	for (const token of Array.from(tokens)) {
+		const numeric = token.match(/(?:^|[^0-9])(\d{3,5})(?:[^0-9]|$)/)?.[1];
+		if (numeric) tokens.add(numeric.replace(/^0+/, "") || numeric);
+	}
+	return tokens;
+}
+
+function dependsOnSelectedWorkItem(item: WorkItem, selectedTokens: Set<string>): boolean {
+	const dependencies = [...workItemStringArray(item, "dependsOn"), ...workItemStringArray(item, "dependencies")];
+	return dependencies.some((dependency) => {
+		const normalized = normalizeDependencyToken(dependency);
+		const numeric = normalized.match(/(?:^|[^0-9])(\d{3,5})(?:[^0-9]|$)/)?.[1];
+		return selectedTokens.has(normalized) || Boolean(numeric && selectedTokens.has(numeric.replace(/^0+/, "") || numeric));
+	});
+}
+
+function filterExecutableIteration(iteration: WorkPlanIteration): { iteration: WorkPlanIteration; omittedIds: string[] } {
+	const items = Array.isArray(iteration.items) ? iteration.items : [];
+	const selectedTokens = new Set(items.flatMap((item) => Array.from(workItemReferenceTokens(item))));
+	const executable = items.filter((item) => !isExplicitlyDependencyBlockedWorkItem(item) && !dependsOnSelectedWorkItem(item, selectedTokens) && !isHitlWorkItem(item, iteration));
+	const executableIds = new Set(executable.map((item) => item.id));
+	return {
+		iteration: { ...iteration, items: executable },
+		omittedIds: items.filter((item) => !executableIds.has(item.id)).map((item) => item.id).filter((id): id is string => typeof id === "string" && id.length > 0),
+	};
 }
 
 export function buildExecutionGroups(input: { runId: string; pipeline: string; iteration: WorkPlanIteration }): WorkExecutionGroup[] {
@@ -271,6 +388,36 @@ export function writeWorkProcessRunRecord(cwd: string, record: WorkProcessRunRec
 	mkdirSync(join(cwd, WORK_PROCESS_RUNS_DIR), { recursive: true });
 	writeFileSync(recordPath, JSON.stringify({ ...record, kind: WORK_PROCESS_RUN_KIND }, null, 2));
 	return recordPath;
+}
+
+function collectPlanItems(plan: WorkPlanResult): WorkItem[] {
+	return (plan.iterations || []).flatMap((iteration) => Array.isArray(iteration.items) ? iteration.items : []);
+}
+
+function revalidateCachedPlanIteration(input: {
+	planId: string;
+	plannedIteration: WorkPlanIteration;
+	currentPlan: WorkPlanResult;
+	advisoryNotes: string[];
+}): WorkPlanIteration {
+	const plannedItems = Array.isArray(input.plannedIteration.items) ? input.plannedIteration.items : [];
+	const currentReadyItems = collectPlanItems(input.currentPlan);
+	const currentReadyById = new Map(currentReadyItems.map((item) => [item.id, item]));
+	const executableItems: WorkItem[] = [];
+	const omittedIds: string[] = [];
+	for (const plannedItem of plannedItems) {
+		const currentItem = currentReadyById.get(plannedItem.id);
+		if (currentItem) executableItems.push(currentItem);
+		else omittedIds.push(plannedItem.id);
+	}
+	if (!executableItems.length) {
+		const suffix = omittedIds.length ? ` Omitted no-longer-ready Work Items: ${omittedIds.join(", ")}.` : "";
+		throw new Error(`Cached Work Plan '${input.planId}' has no currently ready planned Work Items after revalidation.${suffix}`);
+	}
+	if (omittedIds.length) {
+		input.advisoryNotes.push(`Cached Work Plan '${input.planId}' was revalidated against current readiness; omitted no-longer-ready Work Items: ${omittedIds.join(", ")}.`);
+	}
+	return { ...input.plannedIteration, items: executableItems };
 }
 
 export function createWorkProcessRecord(input: {
@@ -307,6 +454,8 @@ export function applyWorkProcessResult(record: WorkProcessRunRecord, execution: 
 		status: execution.status || "done",
 		branches: execution.branches || record.branches,
 		logs: execution.logs || [],
+		workerStatuses: execution.workerStatuses || record.workerStatuses,
+		workSourceMutations: execution.workSourceMutations || record.workSourceMutations,
 		updatedAt: endedAt,
 		endedAt,
 	};
@@ -319,6 +468,7 @@ function createDefaultRunId(startedAt: number): string {
 export async function runWorkProcess(input: RunWorkProcessInput, deps: RunWorkProcessDeps): Promise<RunWorkProcessResult> {
 	const now = input.now || Date.now;
 	let planResult: WorkPlanResult;
+	const advisoryNotes: string[] = [];
 	if (input.planId) {
 		if (!deps.readPlanRecord) throw new Error("Cached Work Plan reading is not configured.");
 		const cachedPlanRecord = deps.readPlanRecord(input.cwd, input.planId);
@@ -326,13 +476,28 @@ export async function runWorkProcess(input: RunWorkProcessInput, deps: RunWorkPr
 		const validationErrors = validateExecutablePlanArtifact(cachedPlan);
 		if (validationErrors.length) throw new Error(`Cached Work Plan '${input.planId}' is not executable:\n- ${validationErrors.join("\n- ")}`);
 		const normalizedPlan = normalizeExecutablePlanArtifact(cachedPlan);
-		planResult = { query: normalizedPlan.query, iterations: normalizedPlan.iterations };
+		if (normalizedPlan.scope === "forecast") {
+			if (!normalizedPlan.actionable) throw new Error(`Cached Work Plan '${input.planId}' is a forecast and does not contain an actionable Work Plan. Re-run /work:plan or process without --plan so current readiness can be derived.`);
+			planResult = normalizedPlan.actionable;
+			advisoryNotes.push(`Cached Work Plan '${input.planId}' is a forecast; /work:process executed only its actionable section and left forecast iterations advisory.`);
+		} else {
+			planResult = normalizedPlan;
+		}
+		planResult = { ...planResult, query: planResult.query || normalizedPlan.query };
 	} else {
 		planResult = await deps.plan(input.cwd, input.query);
 	}
 
-	const iteration = planResult.iterations[0];
+	let iteration = planResult.iterations[0];
 	if (!iteration) throw new Error("No Work Items were selected for processing.");
+	if (input.planId) {
+		const currentPlan = await deps.plan(input.cwd, planResult.query || input.query);
+		iteration = revalidateCachedPlanIteration({ planId: input.planId, plannedIteration: iteration, currentPlan, advisoryNotes });
+	}
+	const filtered = filterExecutableIteration(iteration);
+	iteration = filtered.iteration;
+	if (filtered.omittedIds.length) advisoryNotes.push(`Work readiness was revalidated before execution; omitted non-executable Work Items: ${filtered.omittedIds.join(", ")}.`);
+	if (!iteration.items?.length) throw new Error(`No currently executable Work Items were selected for processing. Omitted non-executable Work Items: ${filtered.omittedIds.join(", ") || "none"}.`);
 
 	const pipeline = selectWorkProcessPipeline({ explicitPipeline: input.explicitPipeline, defaultPipeline: input.defaultPipeline });
 	const startedAt = now();
@@ -360,7 +525,7 @@ export async function runWorkProcess(input: RunWorkProcessInput, deps: RunWorkPr
 		});
 		const finalRecord = applyWorkProcessResult(baseRecord, execution, now());
 		writeRecord(input.cwd, finalRecord);
-		return { record: finalRecord, recordPath };
+		return { record: finalRecord, recordPath, advisoryNotes };
 	} catch (error) {
 		const endedAt = now();
 		const errorRecord: WorkProcessRunRecord = {

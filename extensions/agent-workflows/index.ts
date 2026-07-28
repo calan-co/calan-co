@@ -1,6 +1,18 @@
 // Agent Workflows extension: Pi-native delegation UI backed by Sandcastle sandboxes.
 // Commands: /work:* command surfaces backed by an Agent Workflows execution runtime adapter.
 
+export {
+	GLOBAL_NODE_DISCRIMINATOR,
+	MERGEABLE_RESULT_INTERFACE,
+	RESULT_CONTRACTS,
+	assertValidWorkflowModel,
+	validateWorkflowModel,
+	type ResultContract,
+	type WorkflowNodeModel,
+	type WorkflowValidationDiagnostic,
+	type WorkflowValidationResult,
+} from "./workflow-model.ts";
+
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { SelectList as PiSelectList, matchesKey } from "@earendil-works/pi-tui";
 import type { SelectListTheme as PiSelectListTheme } from "@earendil-works/pi-tui";
@@ -25,7 +37,7 @@ import { noSandbox } from "@ai-hero/sandcastle/sandboxes/no-sandbox";
 import { podman } from "@ai-hero/sandcastle/sandboxes/podman";
 import { vercel } from "@ai-hero/sandcastle/sandboxes/vercel";
 import { spawn, spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
@@ -34,7 +46,21 @@ import { buildSandcastleImage } from "./build-image.ts";
 import { registerWorkCommands } from "./work-source.mjs";
 import { buildDefaultConfigText, configToYaml, packsToConfig } from "./pipeline-packs.mjs";
 import { renderWorkBrief } from "./work-brief.mjs";
-import { loadExecutionRuntimePack, listRuntimeAgents, listRuntimePipelines } from "./execution-runtime.ts";
+import { collectRuntimeAdapterCapabilities, loadExecutionRuntimePack, listRuntimeAgents, listRuntimePipelines } from "./execution-runtime.ts";
+import { executeGraphWorkflow, type CompositeResult, type GitMergeResult, type GraphNodeExecutionContext, type GraphWorkflowNode, type NodeResult } from "./graph-executor.ts";
+import { discoverHooksByCapability, type GraphNodeHook, type HookContext } from "./hooks.ts";
+export {
+	HOOK_PHASES,
+	HOOK_TOPOLOGIES,
+	WELL_KNOWN_HOOK_CONTEXT_NAMESPACES,
+	discoverHooksByCapability,
+	runHooksForPhase,
+	sortHooksForPhase,
+	type GraphNodeHook,
+	type HookContext,
+	type HookPhase,
+	type HookTopology,
+} from "./hooks.ts";
 import {
 	runWorkProcess,
 	validateExecutablePlanArtifact,
@@ -42,6 +68,8 @@ import {
 	type WorkExecutionContext,
 	type WorkExecutionGroup,
 	type WorkItem,
+	type WorkProcessRunRecord,
+	type WorkSourceMutationOutcome,
 } from "./orchestrator.ts";
 import {
 	formatStatusSelection,
@@ -50,6 +78,8 @@ import {
 	resumeWorkRun,
 	selectWorkRunForStatus,
 } from "./work-runs.mjs";
+import { createDocVaderWorkSourceAdapter, createDocVaderWorkSourceHooks } from "./work-source-adapters.mjs";
+export { createDocVaderWorkSourceAdapter, createDocVaderWorkSourceHooks } from "./work-source-adapters.mjs";
 
 const ToolType = {
 	Object(schema: Record<string, unknown>) {
@@ -78,11 +108,6 @@ interface AgentDef {
 
 type SandcastleSandbox = NonNullable<AgentDef["sandbox"]>;
 
-interface ChainStep {
-	role: string;
-	prompt: string;
-}
-
 interface PipelineStep {
 	role: string;
 	description?: string;
@@ -93,6 +118,18 @@ interface PipelineStep {
 	model?: string;
 	maxIterations?: number;
 	copyToWorktree?: string[];
+	[key: string]: unknown;
+}
+
+interface PipelineNodeDef {
+	kind?: string;
+	needs?: string[];
+	capabilities?: string[];
+	role?: string;
+	prompt?: string;
+	promptOverride?: string;
+	nodes?: Record<string, PipelineNodeDef>;
+	[key: string]: unknown;
 }
 
 interface PipelineBranchStrategyConfig {
@@ -103,11 +140,15 @@ interface PipelineBranchStrategyConfig {
 
 interface PipelineDef {
 	description?: string;
+	kind?: string;
+	needs?: string[];
 	branchStrategy?: PipelineBranchStrategyConfig;
 	sandbox?: AgentDef["sandbox"];
 	model?: string;
 	copyToWorktree?: string[];
-	steps: PipelineStep[];
+	nodes?: Record<string, PipelineNodeDef>;
+	steps?: PipelineStep[];
+	[key: string]: unknown;
 }
 
 type PipelineBranchStrategy = WorktreeBranchStrategy;
@@ -122,6 +163,8 @@ interface SandcastleConfig {
 	defaultModel?: string;
 	defaultPipeline?: string;
 	defaultAgent?: string;
+	maxWorkers?: number;
+	maxIterations?: number;
 	workSource?: string;
 	workSourceSetupCommand?: string;
 	issueTracker?: string;
@@ -129,7 +172,6 @@ interface SandcastleConfig {
 	imageNamePattern?: string;
 	prompts: Record<string, PromptDef>;
 	agents: Record<string, AgentDef>;
-	chains: Record<string, ChainStep[]>;
 	pipelines: Record<string, PipelineDef>;
 }
 
@@ -176,9 +218,12 @@ interface BacklogPlanResult {
 }
 
 export interface WorkPlanArtifact {
+	kind?: "workPlan" | "work-plan";
+	scope?: "forecast" | "actionable";
 	schemaVersion?: 1;
 	summary?: string;
 	query?: string;
+	actionable?: WorkPlanArtifact;
 	iterations: WorkPlanIteration[];
 }
 
@@ -238,6 +283,29 @@ function validateForbiddenWorkPlanFields(scope: string, value: unknown, errors: 
 	}
 }
 
+function formatWorkPlanObject(value: Record<string, unknown>): string {
+	return Object.entries(value)
+		.map(([key, entry]) => `${key}: ${Array.isArray(entry) ? entry.join(", ") : isRecord(entry) ? formatWorkPlanObject(entry) : String(entry)}`)
+		.join("; ");
+}
+
+function normalizeWorkPlanShape(value: unknown): unknown {
+	if (!isRecord(value)) return value;
+	const plan = JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+	if (Array.isArray(plan.iterations)) {
+		plan.iterations = plan.iterations.map((iteration) => {
+			if (!isRecord(iteration)) return iteration;
+			const next: Record<string, unknown> = { ...iteration };
+			if (isRecord(next.rationale)) next.rationale = formatWorkPlanObject(next.rationale);
+			if (Array.isArray(next.items)) {
+				next.items = next.items.map((item) => typeof item === "string" ? { id: item } : item);
+			}
+			return next;
+		});
+	}
+	return plan;
+}
+
 export function validateWorkPlanArtifact(value: unknown): string[] {
 	const errors: string[] = [];
 	if (!isRecord(value)) return ["Planner output must be a JSON object."];
@@ -245,11 +313,19 @@ export function validateWorkPlanArtifact(value: unknown): string[] {
 		if (FORBIDDEN_WORK_PLAN_EXECUTION_FIELDS.has(field)) errors.push(`Plan must not author execution field '${field}'.`);
 		else if (field !== "iterations") validateForbiddenWorkPlanFields(`Plan ${field}`, child, errors);
 	}
-	if (value.schemaVersion !== undefined && value.schemaVersion !== 1) errors.push("Plan schemaVersion must be 1 when provided.");
-	validateOptionalString("Plan", value, "summary", errors);
-	validateOptionalString("Plan", value, "query", errors);
-	if (!Array.isArray(value.iterations)) return [...errors, "Planner output must contain an iterations array."];
-	for (const [iterationIndex, iteration] of value.iterations.entries()) {
+	const normalizedValue = normalizeWorkPlanShape(value);
+	if (!isRecord(normalizedValue)) return ["Planner output must be a JSON object."];
+	if (normalizedValue.kind !== undefined && normalizedValue.kind !== "workPlan" && normalizedValue.kind !== "work-plan") errors.push("Plan kind must be workPlan when provided.");
+	if (normalizedValue.scope !== undefined && normalizedValue.scope !== "forecast" && normalizedValue.scope !== "actionable") errors.push("Plan scope must be forecast or actionable when provided.");
+	if (normalizedValue.schemaVersion !== undefined && normalizedValue.schemaVersion !== 1) errors.push("Plan schemaVersion must be 1 when provided.");
+	validateOptionalString("Plan", normalizedValue, "summary", errors);
+	validateOptionalString("Plan", normalizedValue, "query", errors);
+	if (normalizedValue.actionable !== undefined) {
+		if (!isRecord(normalizedValue.actionable)) errors.push("Plan actionable must be a Work Plan object.");
+		else errors.push(...validateWorkPlanArtifact(normalizedValue.actionable).map((error) => `Plan actionable ${error.replace(/^Plan(?:ner output)?\s*/, "")}`));
+	}
+	if (!Array.isArray(normalizedValue.iterations)) return [...errors, "Planner output must contain an iterations array."];
+	for (const [iterationIndex, iteration] of normalizedValue.iterations.entries()) {
 		const iterationScope = `Plan iteration ${iterationIndex + 1}`;
 		if (!isRecord(iteration)) {
 			errors.push(`${iterationScope} must be an object.`);
@@ -296,7 +372,9 @@ export function validateWorkPlanArtifact(value: unknown): string[] {
 export function normalizeWorkPlanArtifact(value: unknown): WorkPlanArtifact {
 	const errors = validateWorkPlanArtifact(value);
 	if (errors.length) throw new Error(`Work Plan artifact is not executable:\n- ${errors.join("\n- ")}`);
-	const plan = JSON.parse(JSON.stringify(value)) as WorkPlanArtifact;
+	const plan = normalizeWorkPlanShape(value) as WorkPlanArtifact;
+	plan.scope = plan.scope || "actionable";
+	if (plan.actionable) plan.actionable = normalizeWorkPlanArtifact(plan.actionable);
 	plan.iterations = plan.iterations.map((iteration) => ({
 		...iteration,
 		items: iteration.items.map((item) => ({ ...item, id: item.id.trim() })),
@@ -330,6 +408,8 @@ type BacklogProcessStatus = BacklogProcessRecord["status"];
 interface BacklogExecutionResult {
 	branches: string[];
 	logs: string[];
+	workerStatuses?: WorkProcessRunRecord["workerStatuses"];
+	workSourceMutations?: WorkSourceMutationOutcome[];
 	status: BacklogProcessStatus;
 }
 
@@ -344,14 +424,19 @@ interface RunPlanWorkRoleInput {
 	args: string;
 	role: string;
 	task: string;
-	snapshotCwd: string;
 	ctx?: any;
+}
+
+interface WorkSourceMutationAdapter {
+	validate?: (input: { itemId: string; cwd: string; runId: string; pipeline: string; recordPath: string; item?: WorkItem }) => Promise<unknown> | unknown;
+	close?: (input: { itemId: string; cwd: string; runId: string; pipeline: string; recordPath: string; item?: WorkItem }) => Promise<unknown> | unknown;
 }
 
 interface BacklogProcessPlanDeps {
 	ready?: (cwd: string, args: string) => Promise<string>;
 	runPlanWorkRole?: (input: RunPlanWorkRoleInput) => Promise<any>;
 	plan?: (cwd: string, query: string) => Promise<BacklogPlanResult>;
+	workSourceAdapter?: WorkSourceMutationAdapter;
 	execute?: (
 		cwd: string,
 		input: {
@@ -364,7 +449,7 @@ interface BacklogProcessPlanDeps {
 			executionGroups: WorkExecutionGroup[];
 			recordPath: string;
 		},
-	) => Promise<{ branches?: string[]; logs?: string[]; status?: BacklogProcessRecord["status"] }>;
+	) => Promise<{ branches?: string[]; logs?: string[]; workerStatuses?: Array<{ index: number; role: string; status: "running" | "completed" | "failed"; branch?: string; commits?: string[]; logPath?: string; error?: string }>; workSourceMutations?: WorkSourceMutationOutcome[]; status?: BacklogProcessRecord["status"] }>;
 	now?: () => number;
 }
 
@@ -387,29 +472,33 @@ interface RunState {
 	id: string;
 	agent: string;
 	task: string;
-	status: "running" | "done" | "error" | "cancelled";
+	status: "queued" | "running" | "done" | "error" | "cancelled";
 	startedAt: number;
+	endedAt?: number;
 	lastLine: string;
 	logPath?: string;
 	resultPath?: string;
 	branch?: string;
 	commits?: string[];
+	kind?: string;
+	nodePath?: string;
+	laneId?: string;
+	itemId?: string;
 	proc?: SandcastleProcess;
 }
 
-type RootConfigKey = "defaultSandbox" | "defaultModel" | "defaultPipeline" | "defaultAgent" | "workSource" | "workSourceSetupCommand" | "issueTracker" | "issueTrackerSetupCommand" | "imageNamePattern";
+type RootConfigKey = "defaultSandbox" | "defaultModel" | "defaultPipeline" | "defaultAgent" | "maxWorkers" | "maxIterations" | "workSource" | "workSourceSetupCommand" | "issueTracker" | "issueTrackerSetupCommand" | "imageNamePattern";
 type EditableAgentField = "description" | "kind" | "model" | "sandbox" | "maxIterations" | "branch";
 
 const CONFIG_DIR = ".pi/sandcastle";
 const CONFIG_PATH = `${CONFIG_DIR}/config.yaml`;
-const LEGACY_CONFIG_PATH = `${CONFIG_DIR}/agents.yaml`;
 const RUNNER_PATH = `${CONFIG_DIR}/run-job.mjs`;
 const JOBS_DIR = `${CONFIG_DIR}/jobs`;
 const RESULTS_DIR = `${CONFIG_DIR}/results`;
 const SUPPORTED_SANDBOXES = new Set(["docker", "podman", "vercel", "no-sandbox"]);
 const DEFAULT_SANDBOX: NonNullable<AgentDef["sandbox"]> = "docker";
 const DEFAULT_MODEL = "Agent Default";
-const ROOT_CONFIG_KEYS: RootConfigKey[] = ["defaultSandbox", "defaultModel", "defaultPipeline", "defaultAgent", "workSource", "workSourceSetupCommand", "imageNamePattern"];
+const ROOT_CONFIG_KEYS: RootConfigKey[] = ["defaultSandbox", "defaultModel", "defaultPipeline", "defaultAgent", "maxWorkers", "maxIterations", "workSource", "workSourceSetupCommand", "imageNamePattern"];
 const EDITABLE_AGENT_FIELDS: EditableAgentField[] = ["description", "kind", "model", "sandbox", "maxIterations", "branch"];
 const RUNS_DIR = `${CONFIG_DIR}/runs`;
 const PLANS_DIR = `${CONFIG_DIR}/plans`;
@@ -424,10 +513,10 @@ const CONFIG_SCHEMA_PATH = new URL("./schema/config.schema.json", import.meta.ur
 const inFlightImageBuilds = new Map<string, Promise<void>>();
 
 
-const RUNNER_VERSION = "agent-workflows-runner-v2";
+const RUNNER_VERSION = "agent-workflows-runner-v10";
 const RUNNER = String.raw`#!/usr/bin/env node
-// agent-workflows-runner-v2
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+// agent-workflows-runner-v10
+import { readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
 
 const jobPath = process.argv[2];
@@ -438,23 +527,221 @@ function emit(event) {
   console.log(JSON.stringify({ source: "agent-workflows", ...event }));
 }
 
-async function loadSandbox(kind, imageName) {
-  if (kind === "podman") return (await import("@ai-hero/sandcastle/sandboxes/podman")).podman(imageName ? { imageName } : undefined);
+function shellEscape(value) {
+  return "'" + String(value).replace(/'/g, "'\\''") + "'";
+}
+
+function sandboxOptions(imageName, hostPiAgentDir, hostPiFileMounts, sandboxKind) {
+  const options = imageName ? { imageName } : {};
+  if (sandboxKind === "podman") options.userns = false;
+  if (hostPiAgentDir) {
+    options.mounts = [
+      { hostPath: hostPiAgentDir, sandboxPath: "/home/agent/.pi-host-agent", readonly: false },
+      ...(hostPiFileMounts || []),
+    ];
+    options.env = {
+      PI_CODING_AGENT_DIR: "/home/agent/.pi-host-agent",
+      PI_CODING_AGENT_SESSION_DIR: "/home/agent/.pi-host-agent/sessions",
+    };
+  }
+  return Object.keys(options).length ? options : undefined;
+}
+
+function readHostPiDefaults() {
+  const root = process.env.PI_CODING_AGENT_DIR || process.env.PI_HOST_AGENT_DIR || (process.env.HOME ? process.env.HOME + "/.pi/agent" : "");
+  if (!root) return {};
+  try {
+    const settings = JSON.parse(readFileSync(root + "/settings.json", "utf8"));
+    return {
+      provider: typeof settings.defaultProvider === "string" ? settings.defaultProvider : undefined,
+      model: typeof settings.defaultModel === "string" ? settings.defaultModel : undefined,
+      thinking: typeof settings.defaultThinkingLevel === "string" ? settings.defaultThinkingLevel : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function piWithHostDefault(model, piFactory) {
+  const host = readHostPiDefaults();
+  const explicitModel = model && model !== "Agent Default";
+  const effectiveModel = explicitModel ? model : host.model;
+  const base = piFactory(effectiveModel || "Agent Default", { captureSessions: false });
+  const nonCapturing = { ...base, captureSessions: false, sessionStorage: undefined };
+  if (explicitModel) return nonCapturing;
+  return {
+    ...nonCapturing,
+    buildPrintCommand({ prompt, resumeSession }) {
+      const sessionFlag = resumeSession ? " --session " + shellEscape(resumeSession) : "";
+      const providerFlag = host.provider ? " --provider " + shellEscape(host.provider) : "";
+      const modelFlag = effectiveModel ? " --model " + shellEscape(effectiveModel) : "";
+      const thinkingFlag = host.thinking ? " --thinking " + shellEscape(host.thinking) : "";
+      return { command: "pi -p --mode json --no-session" + providerFlag + modelFlag + thinkingFlag + sessionFlag, stdin: prompt };
+    },
+    buildInteractiveArgs({ prompt }) {
+      const args = ["pi", "--no-session"];
+      if (host.provider) args.push("--provider", host.provider);
+      if (effectiveModel) args.push("--model", effectiveModel);
+      if (host.thinking) args.push("--thinking", host.thinking);
+      if (prompt) args.push(prompt);
+      return args;
+    },
+  };
+}
+
+function stripPromiseComplete(text) {
+  return String(text || "").replace(/<promise>COMPLETE<\/promise>/g, "").trim();
+}
+
+function compactText(text, max = 240) {
+  const compact = stripPromiseComplete(text).replace(/\s+/g, " ").trim();
+  return compact.length > max ? compact.slice(0, max - 1) + "…" : compact;
+}
+
+function summarizePiContent(content) {
+  if (!Array.isArray(content)) return undefined;
+  const parts = [];
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue;
+    if (block.type === "thinking") {
+      const summaries = Array.isArray(block.thinkingSignature?.summary)
+        ? block.thinkingSignature.summary.map((entry) => entry?.text).filter(Boolean)
+        : [];
+      parts.push(compactText(summaries.join("; ") || block.thinking, 180));
+    } else if (block.type === "text") {
+      parts.push(compactText(block.text, 320));
+    } else if (block.type === "toolCall") {
+      parts.push("tool: " + (block.name || block.toolName || "tool"));
+    } else if (block.type === "toolResult") {
+      parts.push("tool result: " + (block.toolName || block.name || "tool"));
+    }
+  }
+  return parts.filter(Boolean).join(" | ");
+}
+
+function assistantTextFromContent(content) {
+  if (!Array.isArray(content)) return [];
+  return content
+    .filter((block) => block && typeof block === "object" && block.type === "text" && typeof block.text === "string")
+    .map((block) => stripPromiseComplete(block.text))
+    .filter(Boolean);
+}
+
+function assistantTextsFromPiJsonLine(line) {
+  const text = String(line || "").trim();
+  if (!text.startsWith("{")) return [];
+  try {
+    const event = JSON.parse(text);
+    if ((event.type === "message" || event.type === "turn_end") && event.message?.role === "assistant") return assistantTextFromContent(event.message.content);
+    if (event.type === "agent_end" && Array.isArray(event.messages)) return event.messages.flatMap((message) => message?.role === "assistant" ? assistantTextFromContent(message.content) : []);
+  } catch {}
+  return [];
+}
+
+function summarizePiJsonLine(line) {
+  const text = String(line || "").trim();
+  if (!text.startsWith("{")) return compactText(text);
+  try {
+    const event = JSON.parse(text);
+    if (event.type === "session") return "pi session started: " + (event.id || "unknown");
+    if (event.type === "error") return "pi error: " + compactText(event.error || event.message || text);
+    if ((event.type === "message_start" || event.type === "message_started") && !event.message && !event.role && !event.messageId && !event.id) return undefined;
+    if (event.type === "message_start" || event.type === "message_started") {
+      const role = event.message?.role || event.role || "message";
+      const id = event.message?.id || event.messageId || event.id;
+      return id ? role + " message started: " + id : role + " message started";
+    }
+    if (event.type === "message_update" || event.type === "message_updated") {
+      const role = event.message?.role || event.role || "message";
+      const summary = summarizePiContent(event.message?.content)
+        || summarizePiContent(event.delta?.content)
+        || compactText(event.text || event.delta?.text || event.content || event.message?.text || "", 320);
+      return summary ? role + " update: " + summary : undefined;
+    }
+    if (event.type === "message" && event.message) {
+      const summary = summarizePiContent(event.message.content);
+      return summary ? (event.message.role || "message") + ": " + summary : "pi message: " + (event.message.role || "unknown");
+    }
+    if (event.type === "turn_end" && event.message) {
+      const summary = summarizePiContent(event.message.content);
+      return summary ? "assistant: " + summary : "pi turn complete";
+    }
+    if (event.type === "agent_end") return "pi agent finished" + (Array.isArray(event.messages) ? " (" + event.messages.length + " messages)" : "");
+    if (event.type === "tool_call") return "tool: " + (event.name || event.toolName || "tool");
+    if (event.type === "tool_result") return "tool result: " + (event.toolName || event.name || "tool");
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseJsonObjectFromText(text) {
+  const cleaned = stripPromiseComplete(text);
+  const fenceMarker = String.fromCharCode(96, 96, 96);
+  const fenceStart = cleaned.indexOf(fenceMarker);
+  const fenceEnd = fenceStart >= 0 ? cleaned.indexOf(fenceMarker, fenceStart + fenceMarker.length) : -1;
+  const fenced = fenceStart >= 0 && fenceEnd > fenceStart ? cleaned.slice(fenceStart + fenceMarker.length, fenceEnd).replace(/^json\s*/i, "") : "";
+  const candidates = fenced ? [fenced, cleaned] : [cleaned];
+  for (const candidate of candidates) {
+    const start = candidate.indexOf("{");
+    if (start < 0) continue;
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    for (let index = start; index < candidate.length; index += 1) {
+      const char = candidate[index];
+      if (inString) {
+        if (escape) escape = false;
+        else if (char === "\\") escape = true;
+        else if (char === '"') inString = false;
+        continue;
+      }
+      if (char === '"') inString = true;
+      else if (char === "{") depth += 1;
+      else if (char === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          const jsonText = candidate.slice(start, index + 1);
+          try { return JSON.parse(jsonText); } catch { break; }
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
+function extractPlanObject(assistantTexts, stdout) {
+  const sources = [...assistantTexts].reverse();
+  if (stdout) {
+    const stdoutAssistantTexts = String(stdout).split("\n").flatMap((line) => assistantTextsFromPiJsonLine(line));
+    sources.push(...stdoutAssistantTexts.reverse());
+    sources.push(stdout);
+  }
+  for (const source of sources) {
+    const parsed = parseJsonObjectFromText(source);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+async function loadSandbox(kind, imageName, _hostPiConfig, hostPiAgentDir, hostPiFileMounts) {
+  const options = sandboxOptions(imageName, hostPiAgentDir, hostPiFileMounts, kind);
+  if (kind === "podman") return (await import("@ai-hero/sandcastle/sandboxes/podman")).podman(options);
   if (kind === "vercel") return (await import("@ai-hero/sandcastle/sandboxes/vercel")).vercel();
   if (kind === "no-sandbox") return (await import("@ai-hero/sandcastle/sandboxes/no-sandbox")).noSandbox();
-  return (await import("@ai-hero/sandcastle/sandboxes/docker")).docker(imageName ? { imageName } : undefined);
+  return (await import("@ai-hero/sandcastle/sandboxes/docker")).docker(options);
 }
 
 try {
   const { run, claudeCode, codex, cursor, opencode, copilot, pi } = await import("@ai-hero/sandcastle");
-  const sandbox = await loadSandbox(job.sandbox || "docker", job.imageName);
+  const sandbox = await loadSandbox(job.sandbox || "docker", job.imageName, job.hostPiConfig, job.hostPiAgentDir, job.hostPiFileMounts);
   const makeAgent = (provider, model) => {
     if (provider === "claude") return claudeCode(model);
     if (provider === "codex") return codex(model);
     if (provider === "cursor") return cursor(model);
     if (provider === "opencode") return opencode(model);
     if (provider === "copilot") return copilot(model);
-    return pi(model);
+    return piWithHostDefault(model, pi);
   };
   const prompt = (job.systemPrompt ? job.systemPrompt + "\n\n" : "") + "## Delegated task\n\n" + job.prompt;
   const logPath = job.logPath;
@@ -462,6 +749,7 @@ try {
   mkdirSync(dirname(logPath), { recursive: true });
   mkdirSync(dirname(resultPath), { recursive: true });
 
+  const assistantTexts = [];
   emit({ type: "start", id: job.id, agent: job.agent, sandbox: job.sandbox, model: job.model });
   const result = await run({
     name: job.name || job.id,
@@ -477,633 +765,54 @@ try {
       path: logPath,
       verbose: true,
       onAgentStreamEvent: (event) => {
-        if (event.type === "text") emit({ type: "text", id: job.id, text: event.text || event.chunk || "" });
+        if (event.type === "text") {
+          const text = event.text || event.chunk || "";
+          assistantTexts.push(...assistantTextsFromPiJsonLine(text));
+          const summary = summarizePiJsonLine(text);
+          if (summary) emit({ type: "text", id: job.id, text: summary });
+        }
         else if (event.type === "toolCall") emit({ type: "tool", id: job.id, tool: event.name || event.toolName || "tool" });
-        else if (event.type === "raw") emit({ type: "raw", id: job.id, text: event.text || event.line || "" });
+        else if (event.type === "raw") {
+          const text = event.text || event.line || "";
+          assistantTexts.push(...assistantTextsFromPiJsonLine(text));
+          const summary = summarizePiJsonLine(text);
+          if (summary) emit({ type: "text", id: job.id, text: summary });
+        }
       },
     },
   });
 
-  const payload = {
-    id: job.id,
-    agent: job.agent,
-    branch: result.branch,
-    commits: (result.commits || []).map((c) => c.sha || c),
-    iterations: result.iterations || [],
-    logPath,
-  };
-  writeFileSync(resultPath, JSON.stringify(payload, null, 2));
-  emit({ type: "done", id: job.id, branch: payload.branch, commits: payload.commits, resultPath });
+  if (job.outputKind === "work-plan") {
+    const plan = extractPlanObject(assistantTexts, result.stdout);
+    if (!plan) {
+      const message = "Planner completed but no authoritative Work Plan JSON object could be extracted from assistant output.";
+      writeFileSync(resultPath, JSON.stringify({ id: job.id, agent: job.agent, error: message, logPath }, null, 2));
+      emit({ type: "error", id: job.id, error: message });
+      process.exitCode = 1;
+    } else {
+      writeFileSync(resultPath, JSON.stringify(plan, null, 2));
+      emit({ type: "done", id: job.id, branch: result.branch, commits: (result.commits || []).map((c) => c.sha || c), resultPath });
+    }
+  } else {
+    const payload = {
+      id: job.id,
+      agent: job.agent,
+      branch: result.branch,
+      commits: (result.commits || []).map((c) => c.sha || c),
+      iterations: result.iterations || [],
+      logPath,
+    };
+    writeFileSync(resultPath, JSON.stringify(payload, null, 2));
+    emit({ type: "done", id: job.id, branch: payload.branch, commits: payload.commits, resultPath });
+  }
 } catch (error) {
   const message = error && error.stack ? error.stack : String(error);
   if (job?.resultPath) writeFileSync(job.resultPath, JSON.stringify({ id: job.id, agent: job.agent, error: message }, null, 2));
   emit({ type: "error", id: job?.id, error: message });
   process.exitCode = 1;
+} finally {
+  if (job?.hostPiAgentDir) rmSync(job.hostPiAgentDir, { recursive: true, force: true });
 }
-`;
-
-const LEGACY_SAMPLE_CONFIG = `# Agent Workflows delegation config.
-# Mirrors the out-of-the-box @ai-hero/sandcastle templates.
-# Install runtime once with: npm install --save-dev @ai-hero/sandcastle
-# Optional first-time Sandcastle setup: npx @ai-hero/sandcastle init
-
-defaultSandbox: docker
-defaultModel: Agent Default
-defaultPipeline: simple-loop
-defaultAgent: claude-code
-workSource: github-issues
-# Optional command to configure a custom Work Source after Sandcastle init.
-# workSourceSetupCommand: pi "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"
-imageNamePattern: sandcastle:<repo-dir-name>
-
-agents:
-  planner:
-    description: Deep-reasoning planner for dependency analysis and work selection.
-    model: claude-opus-4-8
-    sandbox: docker
-    maxIterations: 1
-    systemPrompt: |
-      You are the Sandcastle planner agent.
-  worker:
-    description: Simple-loop worker that picks and closes one open task at a time.
-    model: claude-sonnet-4-6
-    sandbox: docker
-    maxIterations: 3
-    systemPrompt: |
-      You are the Sandcastle worker agent.
-  implementer:
-    description: Implementation agent for a selected task or branch.
-    model: claude-sonnet-4-6
-    sandbox: docker
-    maxIterations: 100
-    systemPrompt: |
-      You are the Sandcastle implementer agent.
-  reviewer:
-    description: Reviewer for branch diffs, correctness, tests, and merge blockers.
-    model: claude-sonnet-4-6
-    sandbox: docker
-    maxIterations: 1
-    systemPrompt: |
-      You are the Sandcastle reviewer agent.
-  merger:
-    description: Merger that combines completed branches and resolves conflicts.
-    model: claude-sonnet-4-6
-    sandbox: docker
-    maxIterations: 1
-    systemPrompt: |
-      You are the Sandcastle merger agent.
-
-
-pipelines:
-  simple-loop:
-    description: Sandcastle simple-loop template: one worker picks open issues and closes them.
-    branchStrategy:
-      type: merge-to-head
-    sandbox: docker
-    model: claude-sonnet-4-6
-    copyToWorktree: [node_modules]
-    steps:
-      - role: worker
-        prompt: |
-          # Context
-          
-          ## Open issues
-          
-          !\`{{LIST_TASKS_COMMAND}}\`
-          
-          The list above has already been filtered to issues ready for work and is the sole source of truth for what work exists. Do not run your own unfiltered query to find more issues — if the list is empty, there is nothing to do.
-          
-          ## Recent RALPH commits (last 10)
-          
-          !\`git log --oneline --grep="RALPH" -10\`
-          
-          # Task
-          
-          You are RALPH — an autonomous coding agent working through issues one at a time.
-          
-          ## Priority order
-          
-          Work on issues in this order:
-          
-          1. **Bug fixes** — broken behaviour affecting users
-          2. **Tracer bullets** — thin end-to-end slices that prove an approach works
-          3. **Polish** — improving existing functionality (error messages, UX, docs)
-          4. **Refactors** — internal cleanups with no user-visible change
-          
-          Pick the highest-priority open issue that is not blocked by another open issue.
-          
-          ## Workflow
-          
-          1. **Explore** — read the issue carefully. Pull in the parent PRD if referenced. Read the relevant source files and tests before writing any code.
-          2. **Plan** — decide what to change and why. Keep the change as small as possible.
-          3. **Execute** — use RGR (Red → Green → Repeat → Refactor): write a failing test first, then write the implementation to pass it.
-          4. **Verify** — run \`npm run typecheck\` and \`npm run test\` before committing. Fix any failures before proceeding.
-          5. **Commit** — make a single git commit. The message MUST:
-             - Start with \`RALPH:\` prefix
-             - Include the task completed and any PRD reference
-             - List key decisions made
-             - List files changed
-             - Note any blockers for the next iteration
-          6. **Close** — close the issue with \`{{CLOSE_TASK_COMMAND}}\` explaining what was done.
-          
-          ## Rules
-          
-          - Work on **one issue per iteration**. Do not attempt multiple issues in a single iteration.
-          - Do not close an issue until you have committed the fix and verified tests pass.
-          - Do not leave commented-out code or TODO comments in committed code.
-          - If you are blocked (missing context, failing tests you cannot fix, external dependency), leave a comment on the issue and move on — do not close it.
-          
-          # Done
-          
-          When all actionable issues are complete (or you are blocked on all remaining ones), or the open-issues block at the top of this prompt is empty, output the completion signal:
-          
-          <promise>COMPLETE</promise>
-        maxIterations: 3
-
-  sequential-reviewer:
-    description: Sandcastle sequential-reviewer template: implement one issue, then review the branch.
-    branchStrategy:
-      type: branch
-      branch: sandcastle/sequential-reviewer
-    sandbox: docker
-    model: claude-sonnet-4-6
-    copyToWorktree: [node_modules]
-    steps:
-      - role: implementer
-        prompt: |
-          # Context
-          
-          ## Open issues
-          
-          !\`{{LIST_TASKS_COMMAND}}\`
-          
-          The list above has already been filtered to issues ready for work and is the sole source of truth for what work exists. Do not run your own unfiltered query to find more issues — if the list is empty, there is nothing to do.
-          
-          ## Recent RALPH commits (last 10)
-          
-          !\`git log --oneline --grep="RALPH" -10\`
-          
-          # Task
-          
-          You are RALPH — an autonomous coding agent working through issues one at a time.
-          
-          ## Priority order
-          
-          Work on issues in this order:
-          
-          1. **Bug fixes** — broken behaviour affecting users
-          2. **Tracer bullets** — thin end-to-end slices that prove an approach works
-          3. **Polish** — improving existing functionality (error messages, UX, docs)
-          4. **Refactors** — internal cleanups with no user-visible change
-          
-          Pick the highest-priority open issue that is not blocked by another open issue.
-          
-          ## Workflow
-          
-          1. **Explore** — read the issue carefully. Pull in the parent PRD if referenced. Read the relevant source files and tests before writing any code.
-          2. **Plan** — decide what to change and why. Keep the change as small as possible.
-          3. **Execute** — use RGR (Red → Green → Repeat → Refactor): write a failing test first, then write the implementation to pass it.
-          4. **Verify** — run \`npm run typecheck\` and \`npm run test\` before committing. Fix any failures before proceeding.
-          5. **Commit** — make a single git commit. The message MUST:
-             - Start with \`RALPH:\` prefix
-             - Include the task completed and any PRD reference
-             - List key decisions made
-             - List files changed
-             - Note any blockers for the next iteration
-          6. **Close** — close the issue with \`{{CLOSE_TASK_COMMAND}}\` explaining what was done.
-          
-          ## Rules
-          
-          - Work on **one issue per iteration**. Do not attempt multiple issues in a single iteration.
-          - Do not close an issue until you have committed the fix and verified tests pass.
-          - Do not leave commented-out code or TODO comments in committed code.
-          - If you are blocked (missing context, failing tests you cannot fix, external dependency), leave a comment on the issue and move on — do not close it.
-          
-          # Done
-          
-          When all actionable issues are complete (or you are blocked on all remaining ones), or the open-issues block at the top of this prompt is empty, output the completion signal:
-          
-          <promise>COMPLETE</promise>
-        maxIterations: 1
-      - role: reviewer
-        prompt: |
-          # TASK
-          
-          Review the code changes on branch \`{{BRANCH}}\` and improve code clarity, consistency, and maintainability while preserving exact functionality.
-          
-          # CONTEXT
-          
-          ## Branch diff
-          
-          !\`git diff {{TARGET_BRANCH}}...{{BRANCH}}\`
-          
-          ## Commits on this branch
-          
-          !\`git log {{TARGET_BRANCH}}..{{BRANCH}} --oneline\`
-          
-          # REVIEW PROCESS
-          
-          1. **Understand the change**: Read the diff and commits above to understand the intent.
-          
-          2. **Analyze for improvements**: Look for opportunities to:
-             - Reduce unnecessary complexity and nesting
-             - Eliminate redundant code and abstractions
-             - Improve readability through clear variable and function names
-             - Consolidate related logic
-             - Remove unnecessary comments that describe obvious code
-             - Avoid nested ternary operators - prefer switch statements or if/else chains
-             - Choose clarity over brevity - explicit code is often better than overly compact code
-          
-          3. **Check correctness**:
-             - Does the implementation match the intent? Are edge cases handled?
-             - Are new/changed behaviours covered by tests?
-             - Are there unsafe casts, \`any\` types, or unchecked assumptions?
-             - Does the change introduce injection vulnerabilities, credential leaks, or other security issues?
-          
-          4. **Maintain balance**: Avoid over-simplification that could:
-             - Reduce code clarity or maintainability
-             - Create overly clever solutions that are hard to understand
-             - Combine too many concerns into single functions or components
-             - Remove helpful abstractions that improve code organization
-             - Make the code harder to debug or extend
-          
-          5. **Apply project standards**: Follow the coding standards defined in @.sandcastle/CODING_STANDARDS.md
-          
-          6. **Preserve functionality**: Never change what the code does - only how it does it. All original features, outputs, and behaviors must remain intact.
-          
-          # EXECUTION
-          
-          If you find improvements to make:
-          
-          1. Make the changes directly on this branch
-          2. Run tests and type checking to ensure nothing is broken
-          3. Commit describing the refinements
-          
-          If the code is already clean and well-structured, do nothing.
-          
-          Once complete, output <promise>COMPLETE</promise>.
-        maxIterations: 1
-
-  parallel-planner:
-    description: Sandcastle parallel-planner template: plan unblocked work, implement branches, then merge.
-    branchStrategy:
-      type: branch
-      branch: sandcastle/parallel-planner
-    sandbox: docker
-    model: claude-sonnet-4-6
-    copyToWorktree: [node_modules]
-    steps:
-      - role: planner
-        prompt: |
-          # ISSUES
-          
-          Here are the open issues in the repo:
-          
-          <issues-json>
-          
-          !\`{{LIST_TASKS_COMMAND}}\`
-          
-          </issues-json>
-          
-          The list above has already been filtered to issues ready for work.
-          
-          # TASK
-          
-          Analyze the open issues and build a dependency graph. For each issue, determine whether it **blocks** or **is blocked by** any other open issue.
-          
-          An issue B is **blocked by** issue A if:
-          
-          - B requires code or infrastructure that A introduces
-          - B and A modify overlapping files or modules, making concurrent work likely to produce merge conflicts
-          - B's requirements depend on a decision or API shape that A will establish
-          
-          An issue is **unblocked** if it has zero blocking dependencies on other open issues.
-          
-          For each unblocked issue, assign a branch name using the exact format \`sandcastle/issue-{id}\` (no slug or other suffix). This must be deterministic so that re-planning the same issue always produces the same branch name and accumulated progress is preserved.
-          
-          # OUTPUT
-          
-          Output your plan as a JSON object wrapped in \`<plan>\` tags:
-          
-          <plan>
-          {"issues": [{"id": "42", "title": "Fix auth bug", "branch": "sandcastle/issue-42"}]}
-          </plan>
-          
-          Include only unblocked issues. If every issue is blocked, include the single highest-priority candidate (the one with the fewest or weakest dependencies).
-          
-          Always emit the \`<plan>\` tags, even when there is nothing to do. If there are no issues to work on at all, output \`<plan>{"issues": []}</plan>\` so the run can exit cleanly.
-        maxIterations: 1
-      - role: implementer
-        prompt: |
-          # TASK
-          
-          Fix issue {{TASK_ID}}: {{ISSUE_TITLE}}
-          
-          Pull in the issue using \`{{VIEW_TASK_COMMAND}}\`. If it has a parent PRD, pull that in too.
-          
-          Only work on the issue specified.
-          
-          Work on branch {{BRANCH}}. Make commits and run tests.
-          
-          # CONTEXT
-          
-          Here are the last 10 commits:
-          
-          <recent-commits>
-          
-          !\`git log -n 10 --format="%H%n%ad%n%B---" --date=short\`
-          
-          </recent-commits>
-          
-          # EXPLORATION
-          
-          Explore the repo and fill your context window with relevant information that will allow you to complete the task.
-          
-          Pay extra attention to test files that touch the relevant parts of the code.
-          
-          # EXECUTION
-          
-          If applicable, use RGR to complete the task.
-          
-          1. RED: write one test
-          2. GREEN: write the implementation to pass that test
-          3. REPEAT until done
-          4. REFACTOR the code
-          
-          # FEEDBACK LOOPS
-          
-          Before committing, run \`npm run typecheck\` and \`npm run test\` to ensure the tests pass.
-          
-          # COMMIT
-          
-          Make a git commit. The commit message must:
-          
-          1. Start with \`RALPH:\` prefix
-          2. Include task completed + PRD reference
-          3. Key decisions made
-          4. Files changed
-          5. Blockers or notes for next iteration
-          
-          Keep it concise.
-          
-          # THE ISSUE
-          
-          If the task is not complete, leave a comment on the issue with what was done.
-          
-          Do not close the issue - this will be done later.
-          
-          Once complete, output <promise>COMPLETE</promise>.
-          
-          # FINAL RULES
-          
-          ONLY WORK ON A SINGLE TASK.
-        maxIterations: 100
-      - role: merger
-        prompt: |
-          # TASK
-          
-          Merge the following branches into the current branch:
-          
-          {{BRANCHES}}
-          
-          For each branch:
-          
-          1. Run \`git merge <branch> --no-edit\`
-          2. If there are merge conflicts, resolve them intelligently by reading both sides and choosing the correct resolution
-          3. After resolving conflicts, run \`npm run typecheck\` and \`npm run test\` to verify everything works
-          4. If tests fail, fix the issues before proceeding to the next branch
-          
-          After all branches are merged, make a single commit summarizing the merge.
-          
-          # CLOSE ISSUES
-          
-          For each branch that was merged, close its issue using the following command:
-          
-          \`{{CLOSE_TASK_COMMAND}}\`
-          
-          Here are all the issues:
-          
-          {{ISSUES}}
-          
-          Once you've merged everything you can, output <promise>COMPLETE</promise>.
-        maxIterations: 1
-
-  parallel-planner-with-review:
-    description: Sandcastle parallel-planner-with-review template: plan, implement, review, then merge.
-    branchStrategy:
-      type: branch
-      branch: sandcastle/parallel-planner-with-review
-    sandbox: docker
-    model: claude-sonnet-4-6
-    copyToWorktree: [node_modules]
-    steps:
-      - role: planner
-        prompt: |
-          # ISSUES
-          
-          Here are the open issues in the repo:
-          
-          <issues-json>
-          
-          !\`{{LIST_TASKS_COMMAND}}\`
-          
-          </issues-json>
-          
-          The list above has already been filtered to issues ready for work.
-          
-          # TASK
-          
-          Analyze the open issues and build a dependency graph. For each issue, determine whether it **blocks** or **is blocked by** any other open issue.
-          
-          An issue B is **blocked by** issue A if:
-          
-          - B requires code or infrastructure that A introduces
-          - B and A modify overlapping files or modules, making concurrent work likely to produce merge conflicts
-          - B's requirements depend on a decision or API shape that A will establish
-          
-          An issue is **unblocked** if it has zero blocking dependencies on other open issues.
-          
-          For each unblocked issue, assign a branch name using the exact format \`sandcastle/issue-{id}\` (no slug or other suffix). This must be deterministic so that re-planning the same issue always produces the same branch name and accumulated progress is preserved.
-          
-          # OUTPUT
-          
-          Output your plan as a JSON object wrapped in \`<plan>\` tags:
-          
-          <plan>
-          {"issues": [{"id": "42", "title": "Fix auth bug", "branch": "sandcastle/issue-42"}]}
-          </plan>
-          
-          Include only unblocked issues. If every issue is blocked, include the single highest-priority candidate (the one with the fewest or weakest dependencies).
-          
-          Always emit the \`<plan>\` tags, even when there is nothing to do. If there are no issues to work on at all, output \`<plan>{"issues": []}</plan>\` so the run can exit cleanly.
-        maxIterations: 1
-      - role: implementer
-        prompt: |
-          # TASK
-          
-          Fix issue {{TASK_ID}}: {{ISSUE_TITLE}}
-          
-          Pull in the issue using \`{{VIEW_TASK_COMMAND}}\`. If it has a parent PRD, pull that in too.
-          
-          Only work on the issue specified.
-          
-          Work on branch {{BRANCH}}. Make commits and run tests.
-          
-          # CONTEXT
-          
-          Here are the last 10 commits:
-          
-          <recent-commits>
-          
-          !\`git log -n 10 --format="%H%n%ad%n%B---" --date=short\`
-          
-          </recent-commits>
-          
-          # EXPLORATION
-          
-          Explore the repo and fill your context window with relevant information that will allow you to complete the task.
-          
-          Pay extra attention to test files that touch the relevant parts of the code.
-          
-          # EXECUTION
-          
-          If applicable, use RGR to complete the task.
-          
-          1. RED: write one test
-          2. GREEN: write the implementation to pass that test
-          3. REPEAT until done
-          4. REFACTOR the code
-          
-          # FEEDBACK LOOPS
-          
-          Before committing, run \`npm run typecheck\` and \`npm run test\` to ensure the tests pass.
-          
-          # COMMIT
-          
-          Make a git commit. The commit message must:
-          
-          1. Start with \`RALPH:\` prefix
-          2. Include task completed + PRD reference
-          3. Key decisions made
-          4. Files changed
-          5. Blockers or notes for next iteration
-          
-          Keep it concise.
-          
-          # THE ISSUE
-          
-          If the task is not complete, leave a comment on the issue with what was done.
-          
-          Do not close the issue - this will be done later.
-          
-          Once complete, output <promise>COMPLETE</promise>.
-          
-          # FINAL RULES
-          
-          ONLY WORK ON A SINGLE TASK.
-        maxIterations: 100
-      - role: reviewer
-        prompt: |
-          # TASK
-          
-          Review the code changes on branch \`{{BRANCH}}\` and improve code clarity, consistency, and maintainability while preserving exact functionality.
-          
-          # CONTEXT
-          
-          ## Branch diff
-          
-          !\`git diff {{TARGET_BRANCH}}...{{BRANCH}}\`
-          
-          ## Commits on this branch
-          
-          !\`git log {{TARGET_BRANCH}}..{{BRANCH}} --oneline\`
-          
-          # REVIEW PROCESS
-          
-          1. **Understand the change**: Read the diff and commits above to understand the intent.
-          
-          2. **Analyze for improvements**: Look for opportunities to:
-             - Reduce unnecessary complexity and nesting
-             - Eliminate redundant code and abstractions
-             - Improve readability through clear variable and function names
-             - Consolidate related logic
-             - Remove unnecessary comments that describe obvious code
-             - Avoid nested ternary operators - prefer switch statements or if/else chains
-             - Choose clarity over brevity - explicit code is often better than overly compact code
-          
-          3. **Check correctness**:
-             - Does the implementation match the intent? Are edge cases handled?
-             - Are new/changed behaviours covered by tests?
-             - Are there unsafe casts, \`any\` types, or unchecked assumptions?
-             - Does the change introduce injection vulnerabilities, credential leaks, or other security issues?
-          
-          4. **Maintain balance**: Avoid over-simplification that could:
-             - Reduce code clarity or maintainability
-             - Create overly clever solutions that are hard to understand
-             - Combine too many concerns into single functions or components
-             - Remove helpful abstractions that improve code organization
-             - Make the code harder to debug or extend
-          
-          5. **Apply project standards**: Follow the coding standards defined in @.sandcastle/CODING_STANDARDS.md
-          
-          6. **Preserve functionality**: Never change what the code does - only how it does it. All original features, outputs, and behaviors must remain intact.
-          
-          # EXECUTION
-          
-          If you find improvements to make:
-          
-          1. Make the changes directly on this branch
-          2. Run tests and type checking to ensure nothing is broken
-          3. Commit describing the refinements
-          
-          If the code is already clean and well-structured, do nothing.
-          
-          Once complete, output <promise>COMPLETE</promise>.
-        maxIterations: 1
-      - role: merger
-        prompt: |
-          # TASK
-          
-          Merge the following branches into the current branch:
-          
-          {{BRANCHES}}
-          
-          For each branch:
-          
-          1. Run \`git merge <branch> --no-edit\`
-          2. If there are merge conflicts, resolve them intelligently by reading both sides and choosing the correct resolution
-          3. After resolving conflicts, run \`npm run typecheck\` and \`npm run test\` to verify everything works
-          4. If tests fail, fix the issues before proceeding to the next branch
-          
-          After all branches are merged, make a single commit summarizing the merge.
-          
-          # CLOSE ISSUES
-          
-          For each branch that was merged, close its issue using the following command:
-          
-          \`{{CLOSE_TASK_COMMAND}}\`
-          
-          Here are all the issues:
-          
-          {{ISSUES}}
-          
-          Once you've merged everything you can, output <promise>COMPLETE</promise>.
-        maxIterations: 1
-
-  archive:
-    description: Doc-Vader archive helper for terminal-state backlog reconciliation.
-    branchStrategy:
-      type: branch
-      branch: sandcastle/archive
-    sandbox: docker
-    model: claude-sonnet-4-6
-    steps:
-      - role: reviewer
-        prompt: |
-          Inspect terminal-state backlog work and identify safe archive/reconciliation actions.
-
-$INPUT
-        maxIterations: 1
 `;
 
 function tokenizeCommandArgs(raw: string): string[] {
@@ -1210,31 +919,17 @@ function createBacklogPlanId(createdAt: number): string {
 	return `plan-${createdAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function gitQuiet(cwd: string, args: string[]): void {
-	const result = spawnSync("git", args, { cwd, encoding: "utf8" });
-	if (result.status !== 0) throw new Error((result.stderr || result.stdout || `git ${args.join(" ")} failed`).trim());
+export function validateSandcastleWorkspaceSource(cwd: string): string[] {
+	const repo = spawnSync("git", ["rev-parse", "--git-dir"], { cwd, encoding: "utf8" });
+	if (repo.status !== 0) return ["Repository is not a git repository. Sandcastle workspaces require a git repository before any role can run."];
+	const head = spawnSync("git", ["rev-parse", "--verify", "HEAD"], { cwd, encoding: "utf8" });
+	if (head.status !== 0) return ["Repository has no HEAD commit. Sandcastle workspaces require at least one commit before any role can run; create an initial commit, then retry."];
+	return [];
 }
 
-export function createPlannerSnapshot(cwd: string): string {
-	const snapshot = mkdtempSync(join(tmpdir(), "agent-workflows-planner-"));
-	const root = resolve(cwd);
-	cpSync(root, snapshot, {
-		recursive: true,
-		filter(source) {
-			const rel = resolve(source).slice(root.length).replace(/^\/+/, "");
-			if (!rel) return true;
-			const [top, second] = rel.split(/[\\/]/);
-			if ([".git", "node_modules", ".pi", ".sandcastle", "patches", "coverage", "dist"].includes(top)) return false;
-			return second !== ".git";
-		},
-	});
-	gitQuiet(snapshot, ["init", "--quiet"]);
-	gitQuiet(snapshot, ["config", "user.email", "agent-workflows@example.invalid"]);
-	gitQuiet(snapshot, ["config", "user.name", "Agent Workflows Planner Snapshot"]);
-	writeFileSync(join(snapshot, ".agent-workflows-planner-snapshot"), "This disposable git repository is used only for sandboxed planning.\n");
-	gitQuiet(snapshot, ["add", "-A"]);
-	gitQuiet(snapshot, ["commit", "--quiet", "--message", "planner snapshot"]);
-	return snapshot;
+function assertSandcastleWorkspaceSource(cwd: string): void {
+	const issues = validateSandcastleWorkspaceSource(cwd);
+	if (issues.length) throw new Error(issues.join("\n"));
 }
 
 function createInvalidBacklogPlanId(createdAt: number): string {
@@ -1379,6 +1074,7 @@ function readWorkItems(cwd: string): WorkItem[] {
 
 const readBacklogItems = readWorkItems;
 
+
 const SAMPLE_CONFIG = configToYaml(packsToConfig());
 
 function matchesWorkQuery(item: WorkItem, query: string): boolean {
@@ -1426,7 +1122,7 @@ async function defaultPlanBacklogProcessing(cwd: string, query: string): Promise
 function hydrateConfigDefaults(raw: string): { text: string; changed: boolean; changes: string[] } {
 	let text = raw;
 	const changes: string[] = [];
-	for (const [key, value] of Object.entries({ defaultPipeline: "simple-loop", defaultAgent: "claude-code", workSource: "github-issues" })) {
+	for (const [key, value] of Object.entries({ defaultPipeline: "simple-loop", defaultAgent: "claude-code", maxWorkers: 5, maxIterations: 10, workSource: "github-issues" })) {
 		if (!new RegExp(`^${key}:`, "m").test(text)) {
 			text = setConfigValueInText(text, key, value);
 			changes.push(`added ${key}`);
@@ -1438,7 +1134,11 @@ function hydrateConfigDefaults(raw: string): { text: string; changed: boolean; c
 function runnerNeedsRefresh(path: string): boolean {
 	if (!existsSync(path)) return false;
 	const text = readFileSync(path, "utf8");
-	return !text.includes(RUNNER_VERSION) || text.includes("importUserPackage") || text.includes("PI_AGENT_NODE_MODULES");
+	return !text.includes(RUNNER_VERSION)
+		|| text.includes("importUserPackage")
+		|| text.includes("PI_AGENT_NODE_MODULES")
+		|| text.includes("function piWithHostDefault(model)")
+		|| text.includes("const base = pi(model && model !== \"Agent Default\"");
 }
 
 function ensureScaffold(cwd: string, options: { overwrite?: boolean; hydrate?: boolean } = {}): { changes: string[]; overwritten: string[] } {
@@ -1449,11 +1149,6 @@ function ensureScaffold(cwd: string, options: { overwrite?: boolean; hydrate?: b
 	const changes: string[] = [];
 	const overwritten: string[] = [];
 	const configPath = join(cwd, CONFIG_PATH);
-	const legacyConfigPath = join(cwd, LEGACY_CONFIG_PATH);
-	if (!existsSync(configPath) && existsSync(legacyConfigPath) && !options.overwrite) {
-		writeFileSync(configPath, readFileSync(legacyConfigPath, "utf8"));
-		changes.push(`migrated ${LEGACY_CONFIG_PATH} to ${CONFIG_PATH}`);
-	}
 	const hadConfig = existsSync(configPath);
 	if (!hadConfig || options.overwrite) {
 		if (hadConfig && options.overwrite) overwritten.push(CONFIG_PATH);
@@ -1478,7 +1173,7 @@ function configPackText(pack: string): string {
 
 function listConfigPacks(): SelectItem[] {
 	return [
-		{ value: "default", label: "Sandcastle defaults", description: "Out-of-the-box Sandcastle template pipelines plus archive helper" },
+		{ value: "default", label: "Graph workflow defaults", description: "Out-of-the-box graph-native Agent Workflows pipelines plus archive helper" },
 		{ value: "simple-loop", label: "simple-loop", description: "Worker picks and closes issues one by one" },
 		{ value: "sequential-reviewer", label: "sequential-reviewer", description: "Implement then review one issue branch" },
 		{ value: "parallel-planner", label: "parallel-planner", description: "Plan unblocked work, implement, merge" },
@@ -1492,11 +1187,7 @@ function ensureScaffoldPath(cwd: string): string {
 }
 
 function existingConfigPath(cwd: string): string {
-	const configPath = join(cwd, CONFIG_PATH);
-	if (existsSync(configPath)) return configPath;
-	const legacyConfigPath = join(cwd, LEGACY_CONFIG_PATH);
-	if (existsSync(legacyConfigPath)) return legacyConfigPath;
-	return configPath;
+	return join(cwd, CONFIG_PATH);
 }
 
 function readConfigText(cwd: string): string {
@@ -1580,6 +1271,22 @@ function formatScalarForYaml(value: unknown): string {
 	return text;
 }
 
+function presentModelSetting(value: unknown): unknown {
+	return value === undefined || value === null || value === "" ? DEFAULT_MODEL : value;
+}
+
+function configForPresentation(cfg: SandcastleConfig): SandcastleConfig {
+	return {
+		...cfg,
+		defaultModel: presentModelSetting(cfg.defaultModel) as string,
+		agents: Object.fromEntries(Object.entries(cfg.agents).map(([name, agent]) => [name, { ...agent, model: presentModelSetting(agent.model) }])),
+		pipelines: Object.fromEntries(Object.entries(cfg.pipelines).map(([name, pipeline]) => [name, {
+			...pipeline,
+			model: presentModelSetting(pipeline.model) as string,
+		}])) as Record<string, PipelineDef>,
+	};
+}
+
 function formatConfigValue(value: unknown): string {
 	if (typeof value === "string") return value;
 	return JSON.stringify(value, null, 2);
@@ -1592,8 +1299,7 @@ function readConfigValue(cfg: SandcastleConfig, path: string): unknown {
 		return cfg.agents[parts[1]]?.[parts[2]];
 	}
 	if (parts[0] === "pipelines" && parts.length === 3) return (cfg.pipelines[parts[1]] as any)?.[parts[2]];
-	if (parts[0] === "pipelines" && parts[2] === "steps" && parts.length === 5) return (cfg.pipelines[parts[1]]?.steps?.[Number(parts[3])] as any)?.[parts[4]];
-	if (parts[0] === "chains" && parts.length === 2) return cfg.chains[parts[1]];
+	if (parts[0] === "pipelines" && parts[2] === "nodes" && parts.length >= 5) return parts.slice(2).reduce((current: any, part) => current?.[part], cfg.pipelines[parts[1]] as any);
 	return undefined;
 }
 
@@ -1602,17 +1308,19 @@ function supportedConfigPath(path: string): boolean {
 	if (parts.length === 1) return isRootConfigKey(parts[0]);
 	if (parts[0] === "roles" && parts.length === 3 && isEditableAgentField(parts[2])) return true;
 	if (parts[0] === "pipelines" && parts.length === 3 && ["description", "model", "sandbox"].includes(parts[2])) return true;
-	if (parts[0] === "pipelines" && parts[2] === "steps" && parts.length === 5 && ["role", "prompt", "model", "sandbox", "maxIterations"].includes(parts[4])) return true;
+	if (parts[0] === "pipelines" && parts[2] === "nodes" && parts.length >= 5 && ["role", "prompt", "promptOverride", "model", "sandbox", "maxIterations"].includes(parts.at(-1)!)) return true;
 	return false;
 }
 
 function defaultConfigValue(path: string): unknown {
 	const parts = splitConfigPath(path);
 	if (parts.length === 1 && isRootConfigKey(parts[0])) {
-		return DEFAULT_CONFIG[parts[0]];
+		const value = DEFAULT_CONFIG[parts[0]];
+		return parts[0] === "defaultModel" ? presentModelSetting(value) : value;
 	}
 	if (parts[0] === "roles" && parts.length === 3 && isEditableAgentField(parts[2])) {
-		return DEFAULT_CONFIG.agents[parts[1]]?.[parts[2]];
+		const value = DEFAULT_CONFIG.agents[parts[1]]?.[parts[2]];
+		return parts[2] === "model" ? presentModelSetting(value) : value;
 	}
 	return undefined;
 }
@@ -1651,13 +1359,19 @@ function setConfigValueInText(raw: string, path: string, value: unknown): string
 				lines[i] = replacement;
 				return lines.join("\n");
 			}
-			if (/^(roles|prompts|chains|pipelines):\s*$/.test(lines[i])) {
+			if (/^(roles|prompts|pipelines):\s*$/.test(lines[i])) {
 				lines.splice(i, 0, replacement);
 				return lines.join("\n");
 			}
 		}
 		lines.push(replacement);
 		return lines.join("\n");
+	}
+
+	if (parts[0] === "pipelines" && parts[2] === "nodes" && parts.length >= 5) {
+		const model = new ConfigShadowModel(mergeWithPackDefaults(normalizeConfig(parseSimpleYaml(raw))));
+		model.setConfigValue(path, value);
+		return configToYaml(model.snapshot());
 	}
 
 	if (parts[0] === "roles" && parts.length === 3) {
@@ -1764,18 +1478,24 @@ function appendAgentText(raw: string, name: string): string {
 
 function appendPipelineText(raw: string, name: string): string {
 	if (new RegExp(`^  ${yamlMapKeyRegex(name)}:\\s*$`, "m").test(raw)) throw new Error(`Pipeline '${name}' already exists.`);
-	const block = [`  ${formatYamlMapKey(name)}:`, `    description: ${name} pipeline`, `    steps:`, `      - role: worker`, `        prompt: |`, `          Complete the requested task.`].join("\n");
+	const block = [
+		`  ${formatYamlMapKey(name)}:`,
+		`    description: ${name} graph pipeline`,
+		`    kind: composite`,
+		`    nodes:`,
+		`      workspace:`,
+		`        kind: git.worktree`,
+		`        nodes:`,
+		`          run:`,
+		`            kind: agent.pi`,
+		`            role: worker`,
+		`            prompt: blank`,
+	].join("\n");
 	return appendToYamlSection(raw, "pipelines", block);
 }
 
 function resetConfigText(raw: string, path?: string): string {
-	if (!path) {
-		let updated = raw;
-		for (const name of ROOT_CONFIG_KEYS) {
-			updated = setConfigValueInText(updated, name, defaultConfigValue(name));
-		}
-		return updated;
-	}
+	if (!path) return SAMPLE_CONFIG;
 	return setConfigValueInText(raw, path, defaultConfigValue(path));
 }
 
@@ -1809,6 +1529,23 @@ function schemaEnumForPath(path: string): string[] | undefined {
 	return Array.isArray(current.enum) ? current.enum.map(String) : undefined;
 }
 
+function configuredGraphNodePaths(pipelineName: string, nodes: Record<string, PipelineNodeDef> | undefined, prefix = `pipelines.${pipelineName}.nodes`): string[] {
+	if (!nodes) return [];
+	return Object.entries(nodes).flatMap(([nodeId, node]) => {
+		const nodePrefix = `${prefix}.${nodeId}`;
+		return [
+			...(node.role !== undefined ? [`${nodePrefix}.role`] : []),
+			...(node.prompt !== undefined ? [`${nodePrefix}.prompt`] : []),
+			...(node.promptOverride !== undefined ? [`${nodePrefix}.promptOverride`] : []),
+			...((node as any).model !== undefined ? [`${nodePrefix}.model`] : []),
+			...((node as any).sandbox !== undefined ? [`${nodePrefix}.sandbox`] : []),
+			...((node as any).maxIterations !== undefined ? [`${nodePrefix}.maxIterations`] : []),
+			...configuredGraphNodePaths(pipelineName, node.nodes, `${nodePrefix}.nodes`),
+			...(node.node ? configuredGraphNodePaths(pipelineName, { node: node.node }, nodePrefix) : []),
+		];
+	});
+}
+
 function configuredConfigPaths(cfg: SandcastleConfig): string[] {
 	const rootPaths = ROOT_CONFIG_KEYS;
 	const agentFields = ["description", "kind", "model", "sandbox", "provider", "maxIterations", "branch", "systemPrompt"];
@@ -1816,7 +1553,10 @@ function configuredConfigPaths(cfg: SandcastleConfig): string[] {
 	return [
 		...rootPaths,
 		...Object.keys(cfg.agents).flatMap((agent) => agentFields.map((field) => `roles.${agent}.${field}`)),
-		...Object.keys(cfg.pipelines).flatMap((pipeline) => pipelineFields.map((field) => `pipelines.${pipeline}.${field}`)),
+		...Object.entries(cfg.pipelines).flatMap(([pipeline, def]) => [
+			...pipelineFields.map((field) => `pipelines.${pipeline}.${field}`),
+			...configuredGraphNodePaths(pipeline, def.nodes),
+		]),
 	].sort();
 }
 
@@ -1856,7 +1596,7 @@ function validateAgainstSchema(value: any, schema: any, root: any = schema, path
 }
 
 function validateRawConfigText(raw: string): string[] {
-	const allowedTopLevel = new Set(["runtimeVersion", ...ROOT_CONFIG_KEYS, "issueTracker", "issueTrackerSetupCommand", "roles", "prompts", "policies", "pipelines", "chains"]);
+	const allowedTopLevel = new Set(["runtimeVersion", ...ROOT_CONFIG_KEYS, "issueTracker", "issueTrackerSetupCommand", "roles", "prompts", "policies", "pipelines"]);
 	const issues: string[] = [];
 	for (const line of raw.replace(/\r/g, "").split("\n")) {
 		const match = line.match(/^([A-Za-z0-9_-]+):\s*/);
@@ -1884,6 +1624,11 @@ function configForSchemaValidation(cfg: SandcastleConfig): Record<string, unknow
 	return stripUndefinedAndInternalKeys(value) as Record<string, unknown>;
 }
 
+function assertGraphNativeConfig(cwd: string, cfg: SandcastleConfig): void {
+	const issues = validateAgainstSchema(configForSchemaValidation(cfg), loadConfigSchema());
+	if (issues.length) throw new Error(`Invalid Agent Workflows configuration in ${join(cwd, CONFIG_PATH)}:\n- ${issues.join("\n- ")}`);
+}
+
 function validateConfig(cwd: string, cfg: SandcastleConfig): string[] {
 	const issues: string[] = [];
 	const configPath = join(cwd, CONFIG_PATH);
@@ -1907,37 +1652,44 @@ function validateConfig(cwd: string, cfg: SandcastleConfig): string[] {
 	}
 	const planWorkRoles = Object.entries(cfg.agents).filter(([, agent]) => agent.kind === "planWork").map(([name]) => name);
 	if (planWorkRoles.length > 1) issues.push(`Exactly one role may have kind 'planWork'; found ${planWorkRoles.join(", ")}.`);
-	for (const [chainName, steps] of Object.entries(cfg.chains)) {
-		if (!Array.isArray(steps) || !steps.length) {
-			issues.push(`Chain '${chainName}' has no steps.`);
-			continue;
-		}
-		for (const step of steps) {
-			if (!cfg.agents[step.role]) issues.push(`Chain '${chainName}' references unknown role '${step.role}'.`);
-			if (!step.prompt || !step.prompt.trim()) issues.push(`Chain '${chainName}' has an empty prompt step.`);
-		}
-	}
 	if (cfg.defaultSandbox && !SUPPORTED_SANDBOXES.has(cfg.defaultSandbox)) {
 		issues.push(`Default sandbox provider '${cfg.defaultSandbox}' is unsupported.`);
 	}
 	return issues;
 }
 
+function normalizeModelSetting(value: unknown): string | undefined {
+	if (value === undefined || value === null || value === "" || value === DEFAULT_MODEL || value === "default") return undefined;
+	return String(value);
+}
+
+function normalizeAgentConfig(agent: AgentDef): AgentDef {
+	return { ...agent, model: normalizeModelSetting(agent.model) };
+}
+
+function normalizePipelineConfig(pipeline: PipelineDef): PipelineDef {
+	return {
+		...pipeline,
+		model: normalizeModelSetting(pipeline.model),
+	};
+}
+
 function normalizeConfig(cfg: Partial<SandcastleConfig>): SandcastleConfig {
 	return {
 		defaultSandbox: cfg.defaultSandbox ?? DEFAULT_SANDBOX,
-		defaultModel: cfg.defaultModel ?? DEFAULT_MODEL,
+		defaultModel: normalizeModelSetting(cfg.defaultModel),
 		defaultPipeline: cfg.defaultPipeline ?? "simple-loop",
 		defaultAgent: cfg.defaultAgent ?? "claude-code",
+		maxWorkers: cfg.maxWorkers ?? 5,
+		maxIterations: cfg.maxIterations ?? 10,
 		workSource: cfg.workSource ?? cfg.issueTracker ?? "github-issues",
 		workSourceSetupCommand: cfg.workSourceSetupCommand ?? cfg.issueTrackerSetupCommand,
 		issueTracker: cfg.issueTracker,
 		issueTrackerSetupCommand: cfg.issueTrackerSetupCommand,
 		imageNamePattern: cfg.imageNamePattern ?? "sandcastle:<repo-dir-name>",
 		prompts: cfg.prompts || {},
-		agents: cfg.agents || {},
-		chains: cfg.chains || {},
-		pipelines: cfg.pipelines || {},
+		agents: Object.fromEntries(Object.entries(cfg.agents || {}).map(([name, agent]) => [name, normalizeAgentConfig(agent)])),
+		pipelines: Object.fromEntries(Object.entries(cfg.pipelines || {}).map(([name, pipeline]) => [name, normalizePipelineConfig(pipeline)])),
 	};
 }
 
@@ -1958,13 +1710,15 @@ function mergeWithPackDefaults(cfg: SandcastleConfig): SandcastleConfig {
 	const agents = { ...DEFAULT_CONFIG.agents } as Record<string, AgentDef>;
 	for (const [name, agent] of Object.entries(cfg.agents || {})) agents[name] = { ...(DEFAULT_CONFIG.agents[name] || { name }), ...agent, name };
 	const pipelines = { ...DEFAULT_CONFIG.pipelines } as Record<string, PipelineDef>;
-	for (const [name, pipeline] of Object.entries(cfg.pipelines || {})) pipelines[name] = { ...(DEFAULT_CONFIG.pipelines[name] || { steps: [] }), ...pipeline, steps: pipeline.steps || DEFAULT_CONFIG.pipelines[name]?.steps || [] };
+	for (const [name, pipeline] of Object.entries(cfg.pipelines || {})) {
+		const defaultPipeline = DEFAULT_CONFIG.pipelines[name] || {};
+		pipelines[name] = { ...defaultPipeline, ...pipeline };
+	}
 	return {
 		...DEFAULT_CONFIG,
 		...cfg,
 		prompts: { ...DEFAULT_CONFIG.prompts, ...cfg.prompts },
 		agents,
-		chains: { ...DEFAULT_CONFIG.chains, ...cfg.chains },
 		pipelines,
 	};
 }
@@ -2003,16 +1757,209 @@ function setField<T extends object, K extends keyof T>(target: T, key: K, value:
 	target[key] = value;
 }
 
+function lineIndent(line: string): number {
+	return line.match(/^\s*/)?.[0].length ?? 0;
+}
+
+function nextYamlContentLine(lines: string[], start: number): number {
+	let index = start;
+	while (index < lines.length) {
+		const trimmed = lines[index].trim();
+		if (trimmed && !trimmed.startsWith("#")) break;
+		index++;
+	}
+	return index;
+}
+
+function parseYamlBlockScalar(lines: string[], start: number, parentIndent: number): { value: string; next: number } {
+	const text: string[] = [];
+	let index = start;
+	while (index < lines.length) {
+		const line = lines[index];
+		const trimmed = line.trim();
+		const indent = lineIndent(line);
+		if (trimmed && indent <= parentIndent) break;
+		if (!trimmed) text.push("");
+		else text.push(line.slice(Math.min(indent, parentIndent + 2)));
+		index++;
+	}
+	return { value: text.join("\n").trimEnd(), next: index };
+}
+
+function parseYamlKeyValue(text: string): { key: string; value: string } | null {
+	const match = text.match(/^(.+?):(?:\s*(.*))?$/);
+	if (!match) return null;
+	return { key: parseYamlMapKey(match[1]), value: match[2] ?? "" };
+}
+
+function parseYamlMapBlock(lines: string[], start: number, indent: number): { value: Record<string, unknown>; next: number } {
+	const value: Record<string, unknown> = {};
+	let index = start;
+	while (index < lines.length) {
+		index = nextYamlContentLine(lines, index);
+		if (index >= lines.length) break;
+		const line = lines[index];
+		const currentIndent = lineIndent(line);
+		const trimmed = line.trim();
+		if (currentIndent < indent || trimmed.startsWith("- ")) break;
+		if (currentIndent > indent) {
+			index++;
+			continue;
+		}
+		const pair = parseYamlKeyValue(trimmed);
+		if (!pair) {
+			index++;
+			continue;
+		}
+		if (pair.value === "|") {
+			const block = parseYamlBlockScalar(lines, index + 1, currentIndent);
+			value[pair.key] = block.value;
+			index = block.next;
+			continue;
+		}
+		if (pair.value === "") {
+			const childIndex = nextYamlContentLine(lines, index + 1);
+			if (childIndex < lines.length && lineIndent(lines[childIndex]) > currentIndent) {
+				const block = parseYamlBlock(lines, childIndex, lineIndent(lines[childIndex]));
+				value[pair.key] = block.value;
+				index = block.next;
+				continue;
+			}
+			value[pair.key] = {};
+			index++;
+			continue;
+		}
+		value[pair.key] = parseScalar(pair.value);
+		index++;
+	}
+	return { value, next: index };
+}
+
+function parseYamlSequenceBlock(lines: string[], start: number, indent: number): { value: unknown[]; next: number } {
+	const value: unknown[] = [];
+	let index = start;
+	while (index < lines.length) {
+		index = nextYamlContentLine(lines, index);
+		if (index >= lines.length) break;
+		const line = lines[index];
+		const currentIndent = lineIndent(line);
+		const trimmed = line.trim();
+		if (currentIndent < indent || !trimmed.startsWith("- ")) break;
+		if (currentIndent > indent) {
+			index++;
+			continue;
+		}
+		const rest = trimmed.slice(2).trim();
+		if (!rest) {
+			const childIndex = nextYamlContentLine(lines, index + 1);
+			if (childIndex < lines.length && lineIndent(lines[childIndex]) > currentIndent) {
+				const block = parseYamlBlock(lines, childIndex, lineIndent(lines[childIndex]));
+				value.push(block.value);
+				index = block.next;
+				continue;
+			}
+			value.push(null);
+			index++;
+			continue;
+		}
+		const pair = parseYamlKeyValue(rest);
+		if (pair) {
+			const entry: Record<string, unknown> = {};
+			if (pair.value === "|") {
+				const block = parseYamlBlockScalar(lines, index + 1, currentIndent);
+				entry[pair.key] = block.value;
+				index = block.next;
+			} else if (pair.value === "") {
+				const childIndex = nextYamlContentLine(lines, index + 1);
+				if (childIndex < lines.length && lineIndent(lines[childIndex]) > currentIndent) {
+					const block = parseYamlBlock(lines, childIndex, lineIndent(lines[childIndex]));
+					entry[pair.key] = block.value;
+					index = block.next;
+				} else {
+					entry[pair.key] = {};
+					index++;
+				}
+			} else {
+				entry[pair.key] = parseScalar(pair.value);
+				index++;
+			}
+			const childIndex = nextYamlContentLine(lines, index);
+			if (childIndex < lines.length && lineIndent(lines[childIndex]) > currentIndent) {
+				const block = parseYamlMapBlock(lines, childIndex, currentIndent + 2);
+				Object.assign(entry, block.value);
+				index = block.next;
+			}
+			value.push(entry);
+			continue;
+		}
+		value.push(parseScalar(rest));
+		index++;
+	}
+	return { value, next: index };
+}
+
+function parseYamlBlock(lines: string[], start: number, indent: number): { value: unknown; next: number } {
+	const index = nextYamlContentLine(lines, start);
+	if (index >= lines.length) return { value: {}, next: index };
+	const trimmed = lines[index].trim();
+	if (lineIndent(lines[index]) === indent && trimmed.startsWith("- ")) return parseYamlSequenceBlock(lines, index, indent);
+	return parseYamlMapBlock(lines, index, indent);
+}
+
+function parseYamlDocument(raw: string): Record<string, unknown> {
+	const lines = raw.replace(/\r/g, "").split("\n");
+	const parsed = parseYamlBlock(lines, 0, 0).value;
+	return isRecord(parsed) ? parsed : {};
+}
+
+function cloneYamlValue(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(cloneYamlValue);
+	if (!isRecord(value)) return value;
+	return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, cloneYamlValue(entry)]));
+}
+
+function normalizeParsedPipelineNodes(value: Record<string, unknown>): Record<string, PipelineNodeDef> {
+	return Object.fromEntries(Object.entries(value).map(([id, node]) => [id, normalizeParsedPipelineNode(isRecord(node) ? node : { kind: node })]));
+}
+
+function normalizeParsedPipelineNode(value: Record<string, unknown>): PipelineNodeDef {
+	const node: PipelineNodeDef = {};
+	for (const [key, entry] of Object.entries(value)) {
+		if (key === "nodes" && isRecord(entry)) node.nodes = normalizeParsedPipelineNodes(entry);
+		else (node as Record<string, unknown>)[key] = cloneYamlValue(entry);
+	}
+	return node;
+}
+
+function normalizeParsedMapPipeline(value: Record<string, unknown>, fallback?: PipelineDef): PipelineDef {
+	const pipeline: PipelineDef = { ...(fallback || {}) };
+	for (const [key, entry] of Object.entries(value)) {
+		if (key === "nodes" && isRecord(entry)) pipeline.nodes = normalizeParsedPipelineNodes(entry);
+		else if (key === "steps" && Array.isArray(entry)) pipeline.steps = entry as PipelineStep[];
+		else (pipeline as Record<string, unknown>)[key] = cloneYamlValue(entry);
+	}
+	return pipeline;
+}
+
+function mergeMapFormPipelines(raw: string, pipelines: Record<string, PipelineDef>): Record<string, PipelineDef> {
+	const parsedPipelines = parseYamlDocument(raw).pipelines;
+	if (!isRecord(parsedPipelines)) return pipelines;
+	const merged = { ...pipelines };
+	for (const [name, value] of Object.entries(parsedPipelines)) {
+		if (!isRecord(value)) continue;
+		if (value.kind !== undefined || value.nodes !== undefined) merged[name] = normalizeParsedMapPipeline(value, merged[name]);
+	}
+	return merged;
+}
+
 export function parseSimpleYaml(raw: string): SandcastleConfig {
-	const cfg: SandcastleConfig = { prompts: {}, agents: {}, chains: {}, pipelines: {} };
+	const cfg: SandcastleConfig = { prompts: {}, agents: {}, pipelines: {} };
 	const lines = raw.replace(/\r/g, "").split("\n");
 	let section = "";
 	let currentAgent = "";
 	let currentPrompt = "";
-	let currentChain = "";
 	let currentPipeline = "";
 	let currentPipelineStep: PipelineStep | null = null;
-	let currentStep: ChainStep | null = null;
 	let currentBranchStrategy: PipelineBranchStrategyConfig | null = null;
 	let blockTarget: YamlBlockTarget | null = null;
 
@@ -2031,18 +1978,17 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 		}
 		const trimmed = line.trim();
 		if (!trimmed || trimmed.startsWith("#")) continue;
-		const top = trimmed.match(/^(defaultSandbox|defaultModel|defaultPipeline|defaultAgent|workSource|workSourceSetupCommand|issueTracker|issueTrackerSetupCommand|imageNamePattern):\s*(.*)$/);
+		const top = trimmed.match(/^(defaultSandbox|defaultModel|defaultPipeline|defaultAgent|maxWorkers|maxIterations|workSource|workSourceSetupCommand|issueTracker|issueTrackerSetupCommand|imageNamePattern):\s*(.*)$/);
 		if (top) {
 			const key = top[1] as RootConfigKey;
 			setField(cfg, key, parseScalar(top[2]) as SandcastleConfig[typeof key]);
 			continue;
 		}
-		const sectionMatch = line.match(/^(roles|prompts|chains|pipelines):\s*$/);
+		const sectionMatch = line.match(/^(roles|prompts|pipelines):\s*$/);
 		if (sectionMatch) {
 			section = sectionMatch[1];
 			currentAgent = "";
 			currentPrompt = "";
-			currentChain = "";
 			currentPipeline = "";
 			currentPipelineStep = null;
 			currentBranchStrategy = null;
@@ -2082,32 +2028,11 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 			}
 			continue;
 		}
-		if (section === "chains") {
-			const chain = line.match(/^  (\S.*):\s*$/);
-			if (chain) {
-				currentChain = parseYamlMapKey(chain[1]);
-				cfg.chains[currentChain] = [];
-				continue;
-			}
-			const step = line.match(/^\s{4}-\s+role:\s*(.+)$/);
-			if (step && currentChain) {
-				currentStep = { role: parseScalar(step[1]), prompt: DEFAULT_STEP_PROMPT };
-				cfg.chains[currentChain].push(currentStep);
-				continue;
-			}
-			const prompt = line.match(/^\s{6}prompt:\s*(.*)$/);
-			if (prompt && currentStep) {
-				blockTarget = assignBlockOrScalar(prompt[1], 6, (value) => {
-					currentStep!.prompt = value;
-				});
-			}
-			continue;
-		}
 		if (section === "pipelines") {
 			const pipeline = line.match(/^  (\S.*):\s*$/);
 			if (pipeline) {
 				currentPipeline = parseYamlMapKey(pipeline[1]);
-				cfg.pipelines[currentPipeline] = { steps: [] };
+				cfg.pipelines[currentPipeline] = {};
 				currentPipelineStep = null;
 				currentBranchStrategy = null;
 				continue;
@@ -2137,20 +2062,20 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 			const roleStep = line.match(/^\s{6}-\s+role:\s*(.+)$/);
 			if (roleStep) {
 				currentPipelineStep = { kind: "runRole", role: parseScalar(roleStep[1]), prompt: DEFAULT_STEP_PROMPT };
-				cfg.pipelines[currentPipeline].steps.push(currentPipelineStep);
+				(cfg.pipelines[currentPipeline].steps ||= []).push(currentPipelineStep);
 				continue;
 			}
 			const unknownStep = line.match(/^\s{6}-\s+([A-Za-z0-9_-]+):\s*(.*)$/);
 			if (unknownStep) {
 				currentPipelineStep = { kind: "runRole", role: "", prompt: DEFAULT_STEP_PROMPT } as any;
 				setField(currentPipelineStep as any, unknownStep[1] as any, parseScalar(unknownStep[2]) as any);
-				cfg.pipelines[currentPipeline].steps.push(currentPipelineStep);
+				(cfg.pipelines[currentPipeline].steps ||= []).push(currentPipelineStep);
 				continue;
 			}
 			const kindStep = line.match(/^\s{6}-\s+kind:\s*(.+)$/);
 			if (kindStep) {
 				currentPipelineStep = { kind: parseScalar(kindStep[1]), role: "", prompt: DEFAULT_STEP_PROMPT };
-				cfg.pipelines[currentPipeline].steps.push(currentPipelineStep);
+				(cfg.pipelines[currentPipeline].steps ||= []).push(currentPipelineStep);
 				continue;
 			}
 			const pipelineStepField = line.match(/^\s{8}([A-Za-z0-9_-]+):\s*(.*)$/);
@@ -2163,17 +2088,21 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 		}
 	}
 	if (blockTarget) blockTarget.set(blockTarget.text.join("\n").trimEnd());
+	cfg.pipelines = mergeMapFormPipelines(raw, cfg.pipelines);
 	return cfg;
 }
 
 async function loadConfig(cwd: string): Promise<SandcastleConfig> {
 	const raw = readConfigText(cwd);
-	return mergeWithPackDefaults(normalizeConfig(parseSimpleYaml(raw)));
+	const parsed = normalizeConfig(parseSimpleYaml(raw));
+	assertGraphNativeConfig(cwd, parsed);
+	return mergeWithPackDefaults(parsed);
 }
 
 async function loadExistingConfig(cwd: string): Promise<SandcastleConfig> {
 	const raw = readExistingConfigText(cwd);
-	return mergeWithPackDefaults(normalizeConfig(parseSimpleYaml(raw)));
+	const parsed = normalizeConfig(parseSimpleYaml(raw));
+	return mergeWithPackDefaults(parsed);
 }
 
 function resolveDefaultRunAgentName(cfg: SandcastleConfig): string | undefined {
@@ -2245,6 +2174,56 @@ function buildRunSummary(record: ScRunRecord): string {
 	return `Run ${record.id} ${record.status}: agent ${record.agent}; branch ${record.branch || "(pending)"}; commits ${commits}; log ${record.logPath || "(pending)"}`;
 }
 
+function statusGlyph(status: string | undefined): string {
+	if (status === "done" || status === "completed" || status === "succeeded") return "✓";
+	if (status === "error" || status === "failed") return "✗";
+	if (status === "running") return "▶";
+	return "•";
+}
+
+function formatPipelineWorkerRows(record: Pick<WorkProcessRunRecord, "workerStatuses"> | undefined): string[] {
+	const workers = record?.workerStatuses || [];
+	if (!workers.length) return ["  (no worker details recorded)"];
+	return workers.map((step) => {
+		const details = [
+			step.itemId ? `item ${step.itemId}` : undefined,
+			step.nodePath ? `node ${step.nodePath}` : undefined,
+			step.laneId ? `lane ${step.laneId}` : undefined,
+			step.branch ? `branch ${step.branch}` : undefined,
+			step.commits?.length ? `commits ${step.commits.join(", ")}` : undefined,
+			step.logPath ? `log ${step.logPath}` : undefined,
+		].filter(Boolean).join(" · ");
+		return `  ${statusGlyph(step.status)} Worker ${step.index + 1}: ${step.role} ${step.status}${details ? ` — ${details}` : ""}`;
+	});
+}
+
+function formatWorkSourceMutationRows(record: Pick<WorkProcessRunRecord, "workSourceMutations">): string[] {
+	const mutations = record.workSourceMutations || [];
+	if (!mutations.length) return [];
+	return [
+		"Work Source:",
+		...mutations.map((mutation) => `  ${statusGlyph(mutation.status)} ${mutation.itemId}: ${mutation.action} ${mutation.status}${mutation.message ? ` — ${mutation.message}` : ""}`),
+	];
+}
+
+function formatWorkProcessSummary(input: { record: WorkProcessRunRecord; recordPath: string; advisoryNotes?: string[] }): string {
+	const record = input.record;
+	const lines = [
+		`Work process ${record.id}`,
+		`Status: ${statusGlyph(record.status)} ${record.status}`,
+		`Pipeline: ${record.pipeline}`,
+		`Items: ${record.resolvedItems.length}`,
+		"Workers:",
+		...formatPipelineWorkerRows(record),
+	];
+	if (record.branches.length) lines.push("Approved changes merged:", ...record.branches.map((branch) => `  - ${branch}`));
+	lines.push("Artifacts:", `  Record: ${input.recordPath}`);
+	if (record.logs.length) lines.push(...record.logs.map((log) => `  Log: ${log}`));
+	lines.push(...formatWorkSourceMutationRows(record));
+	if (input.advisoryNotes?.length) lines.push("Notes:", ...input.advisoryNotes.map((note) => `  - ${note}`));
+	return lines.join("\n");
+}
+
 const AGENT_DEFAULT_MODELS: Record<string, string> = {
 	claude: "claude-opus-4-8",
 	"claude-code": "claude-opus-4-8",
@@ -2256,8 +2235,156 @@ const AGENT_DEFAULT_MODELS: Record<string, string> = {
 };
 
 function resolveModelForProvider(model: string | undefined, provider: string | undefined): string {
+	if (provider === "pi" && (!model || model === "Agent Default")) return "Agent Default";
 	if (!model || model === DEFAULT_MODEL) return AGENT_DEFAULT_MODELS[provider || "pi"] || AGENT_DEFAULT_MODELS.pi;
 	return model;
+}
+
+interface HostPiDefaults {
+	provider?: string;
+	model?: string;
+	thinking?: string;
+}
+
+interface HostPiAgentRuntime {
+	dir: string;
+	fileMounts: Array<{ hostPath: string; sandboxPath: string; readonly: true }>;
+}
+
+const HOST_PI_SANDBOX_DIR = "/home/agent/.pi-host-agent";
+
+function readHostPiDefaults(): HostPiDefaults {
+	const settingsPath = join(process.env.PI_CODING_AGENT_DIR || process.env.PI_HOST_AGENT_DIR || join(process.env.HOME || "", ".pi", "agent"), "settings.json");
+	try {
+		const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+		return {
+			provider: typeof settings.defaultProvider === "string" && settings.defaultProvider.trim() ? settings.defaultProvider : undefined,
+			model: typeof settings.defaultModel === "string" && settings.defaultModel.trim() ? settings.defaultModel : undefined,
+			thinking: typeof settings.defaultThinkingLevel === "string" && settings.defaultThinkingLevel.trim() ? settings.defaultThinkingLevel : undefined,
+		};
+	} catch {
+		return {};
+	}
+}
+
+function resolvePipelineModelForProvider(model: string | undefined, provider: string | undefined): string {
+	if (provider === "pi" && (!model || model === DEFAULT_MODEL)) return DEFAULT_MODEL;
+	return resolveModelForProvider(model, provider);
+}
+
+function createHostPiAgentRuntime(): HostPiAgentRuntime {
+	const sourceDir = process.env.PI_HOST_AGENT_DIR || join(process.env.HOME || "", ".pi", "agent");
+	const tmp = mkdtempSync(join(tmpdir(), "agent-workflows-pi-agent-"));
+	mkdirSync(join(tmp, "sessions"), { recursive: true });
+	const settingsPath = join(sourceDir, "settings.json");
+	let settings: any = {};
+	try { settings = JSON.parse(readFileSync(settingsPath, "utf8")); } catch {}
+	writeFileSync(join(tmp, "settings.json"), JSON.stringify({
+		defaultProvider: settings.defaultProvider,
+		defaultModel: settings.defaultModel,
+		defaultThinkingLevel: settings.defaultThinkingLevel,
+		theme: settings.theme,
+	}, null, 2));
+	const fileMounts: Array<{ hostPath: string; sandboxPath: string; readonly: true }> = [];
+	const authPath = join(sourceDir, "auth.json");
+	if (existsSync(authPath)) fileMounts.push({ hostPath: authPath, sandboxPath: `${HOST_PI_SANDBOX_DIR}/auth.json`, readonly: true });
+	const trustPath = join(sourceDir, "trust.json");
+	if (existsSync(trustPath)) fileMounts.push({ hostPath: trustPath, sandboxPath: `${HOST_PI_SANDBOX_DIR}/trust.json`, readonly: true });
+	return { dir: tmp, fileMounts };
+}
+
+function piAgentRuntimeDir(hostPiRuntime: HostPiAgentRuntime | undefined, sandbox: AgentDef["sandbox"] | undefined): string | undefined {
+	if (!hostPiRuntime) return undefined;
+	return sandbox === "no-sandbox" ? hostPiRuntime.dir : HOST_PI_SANDBOX_DIR;
+}
+
+function piAgentEnvironment(hostPiRuntime: HostPiAgentRuntime | undefined, sandbox: AgentDef["sandbox"] | undefined): Record<string, string> | undefined {
+	const dir = piAgentRuntimeDir(hostPiRuntime, sandbox);
+	if (!dir || sandbox === "no-sandbox") return undefined;
+	return {
+		PI_CODING_AGENT_DIR: dir,
+		PI_CODING_AGENT_SESSION_DIR: `${dir}/sessions`,
+	};
+}
+
+function withSandboxRuntimeOptions(kind: AgentDef["sandbox"] | undefined, options: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+	const next = { ...(options || {}) };
+	if (kind === "podman" && next.userns === undefined) next.userns = false;
+	return Object.keys(next).length ? next : undefined;
+}
+
+function cleanupCreatedPodmanSandcastleContainers(): void {
+	const result = spawnSync("podman", ["ps", "-a", "--filter", "name=sandcastle-", "--filter", "status=created", "--format", "{{.Names}}"], { encoding: "utf8", env: process.env });
+	if (result.status !== 0) return;
+	const names = (result.stdout || "").split(/\r?\n/).map((entry) => entry.trim()).filter((entry) => /^sandcastle-[0-9a-f-]+$/i.test(entry));
+	if (names.length) spawnSync("podman", ["rm", "-f", ...names], { stdio: "ignore", env: process.env });
+}
+
+function withPodmanCreateCleanup<T extends Record<string, any>>(provider: T, kind: AgentDef["sandbox"] | undefined): T {
+	if (kind !== "podman" || typeof provider?.create !== "function") return provider;
+	return {
+		...provider,
+		async create(...args: unknown[]) {
+			try {
+				return await provider.create(...args);
+			} catch (error) {
+				cleanupCreatedPodmanSandcastleContainers();
+				throw error;
+			}
+		},
+	};
+}
+
+function hostPiSandboxOptions(cwd: string, cfg: Partial<SandcastleConfig>, hostPiRuntime: HostPiAgentRuntime | undefined, sandbox: AgentDef["sandbox"] | undefined = "docker"): Record<string, unknown> | undefined {
+	const options: Record<string, unknown> = { imageName: defaultSandcastleImageName(cwd, cfg.imageNamePattern) };
+	if (hostPiRuntime) {
+		options.mounts = [
+			{ hostPath: hostPiRuntime.dir, sandboxPath: HOST_PI_SANDBOX_DIR, readonly: false },
+			...hostPiRuntime.fileMounts,
+		];
+		options.env = piAgentEnvironment(hostPiRuntime, sandbox);
+	}
+	return withSandboxRuntimeOptions(sandbox, options);
+}
+
+function createPiAgentWithHostDefaults(model: string | undefined, hostPiRuntime: HostPiAgentRuntime | undefined, sandbox: AgentDef["sandbox"] | undefined, piFactory = piAgent): any {
+	const host = readHostPiDefaults();
+	const explicitModel = Boolean(model && model !== DEFAULT_MODEL);
+	const effectiveModel = explicitModel ? model : host.model;
+	const base = piFactory(effectiveModel || DEFAULT_MODEL, { captureSessions: false } as any);
+	const nonCapturing = { ...base, captureSessions: false, sessionStorage: undefined };
+	if (explicitModel) return nonCapturing;
+	return {
+		...nonCapturing,
+		buildPrintCommand({ prompt, resumeSession }: any) {
+			const sessionFlag = resumeSession ? ` --session ${shellEscapeForCommand(resumeSession)}` : "";
+			const providerFlag = host.provider ? ` --provider ${shellEscapeForCommand(host.provider)}` : "";
+			const modelFlag = effectiveModel ? ` --model ${shellEscapeForCommand(effectiveModel)}` : "";
+			const thinkingFlag = host.thinking ? ` --thinking ${shellEscapeForCommand(host.thinking)}` : "";
+			return { command: `pi -p --mode json --no-session${providerFlag}${modelFlag}${thinkingFlag}${sessionFlag}`, stdin: prompt };
+		},
+		buildInteractiveArgs({ prompt }: any) {
+			const args = ["pi", "--no-session"];
+			if (host.provider) args.push("--provider", host.provider);
+			if (effectiveModel) args.push("--model", effectiveModel);
+			if (host.thinking) args.push("--thinking", host.thinking);
+			if (prompt) args.push(prompt);
+			return args;
+		},
+	};
+}
+
+function createAgentProviderForRuntime(model: string, provider: AgentDef["provider"] | undefined, options: { hostPiRuntime?: HostPiAgentRuntime; sandbox?: AgentDef["sandbox"]; claudeCodeFactory?: typeof claudeCode } = {}): any {
+	if (provider === "claude" || provider === "claude-code") return options.claudeCodeFactory ? options.claudeCodeFactory(model) : claudeCode(model);
+	if (provider === "codex") return codex(model);
+	if (provider === "cursor") return cursor(model);
+	if (provider === "opencode") return opencode(model);
+	if (provider === "copilot") return copilot(model);
+	return createPiAgentWithHostDefaults(model, options.hostPiRuntime, options.sandbox);
+}
+
+function shellEscapeForCommand(value: unknown): string {
+	return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
 
 function resolveAgentRuntimeSettings(agent: AgentDef, cfg: SandcastleConfig): AgentRuntimeSettings {
@@ -2269,22 +2396,16 @@ function resolveAgentRuntimeSettings(agent: AgentDef, cfg: SandcastleConfig): Ag
 	};
 }
 
-function resolveSandboxProvider(kind: SandcastleSandbox): SandboxProvider {
-	if (kind === "podman") return podman();
+function resolveSandboxProvider(kind: SandcastleSandbox, options?: Record<string, unknown>): SandboxProvider {
+	const runtimeOptions = withSandboxRuntimeOptions(kind, options);
+	if (kind === "podman") return withPodmanCreateCleanup(podman(runtimeOptions as any), kind);
 	if (kind === "vercel") return vercel();
 	if (kind === "no-sandbox") return noSandbox();
-	return docker();
+	return docker(runtimeOptions as any);
 }
 
 const createDefaultSandcastleRunCapability = (): SandcastleRunCapability => ({
-	makeAgent: (model, provider = "pi") => {
-		if (provider === "claude" || provider === "claude-code") return claudeCode(model);
-		if (provider === "codex") return codex(model);
-		if (provider === "cursor") return cursor(model);
-		if (provider === "opencode") return opencode(model);
-		if (provider === "copilot") return copilot(model);
-		return piAgent(model);
-	},
+	makeAgent: (model, provider = "pi") => createAgentProviderForRuntime(model, provider),
 	makeSandbox: (kind) => resolveSandboxProvider(kind),
 	run: sandcastleRun,
 });
@@ -2355,6 +2476,8 @@ function scaffoldSetupSignature(cfg: SandcastleConfig): Record<string, unknown> 
 		runtimeVersion: 1,
 		defaultPipeline: cfg.defaultPipeline || "simple-loop",
 		defaultAgent: cfg.defaultAgent || "claude-code",
+		maxWorkers: cfg.maxWorkers || 5,
+		maxIterations: cfg.maxIterations || 10,
 		defaultSandbox: imageProviderForSandbox(cfg.defaultSandbox) || "docker",
 		defaultModel: cfg.defaultModel && cfg.defaultModel !== DEFAULT_MODEL ? cfg.defaultModel : DEFAULT_MODEL,
 		issueTracker: cfg.workSource || cfg.issueTracker || "github-issues",
@@ -2561,13 +2684,15 @@ function registerScRunCommand(
 				logPath: runSettings.logPath,
 			}, now);
 
+			let hostPiRuntime: HostPiAgentRuntime | undefined;
 			try {
+				hostPiRuntime = runSettings.provider === "pi" ? createHostPiAgentRuntime() : undefined;
 				await ensureSandboxImage(ctx.cwd, runSettings.sandbox, deps.image, (reason, imageName) => {
 					ctx.ui.notify(`Execution image ${imageName} is ${reason}; rebuilding before /work:run.`, "info");
 				}, cfg);
 				const result = await sandcastle.run({
-					agent: sandcastle.makeAgent(runSettings.model, runSettings.provider),
-					sandbox: sandcastle.makeSandbox(runSettings.sandbox),
+					agent: hostPiRuntime ? createAgentProviderForRuntime(runSettings.model, runSettings.provider, { hostPiRuntime, sandbox: runSettings.sandbox }) : sandcastle.makeAgent(runSettings.model, runSettings.provider),
+					sandbox: hostPiRuntime ? resolveSandboxProvider(runSettings.sandbox, hostPiSandboxOptions(ctx.cwd, cfg, hostPiRuntime, runSettings.sandbox)) : sandcastle.makeSandbox(runSettings.sandbox),
 					cwd: ctx.cwd,
 					prompt,
 					maxIterations: 1,
@@ -2595,6 +2720,8 @@ function registerScRunCommand(
 					error: error instanceof Error ? error.message : String(error),
 				}, now);
 				ctx.ui.notify(buildRunSummary(failedRecord), "error");
+			} finally {
+				if (hostPiRuntime?.dir) rmSync(hostPiRuntime.dir, { recursive: true, force: true });
 			}
 		},
 	});
@@ -2604,10 +2731,32 @@ interface PipelineRunStepRecord {
 	index: number;
 	role: string;
 	status: "running" | "completed" | "failed";
+	maxIterations?: number;
 	branch?: string;
 	commits: string[];
 	logPath: string;
 	error?: string;
+	kind?: string;
+	nodePath?: string;
+	laneId?: string;
+	itemId?: string;
+}
+
+interface PipelineRunNodeRecord {
+	nodePath: string;
+	kind: string;
+	status: "completed" | "failed";
+	resultType?: string;
+	role?: string;
+	branch?: string;
+	worktreePath?: string;
+	commits?: string[];
+	logPath?: string;
+	effects?: string[];
+	mergedBranches?: string[];
+	mergedCommits?: string[];
+	laneId?: string;
+	itemId?: string;
 }
 
 interface PipelineRunRecord {
@@ -2617,6 +2766,7 @@ interface PipelineRunRecord {
 	prompt: string;
 	status: "running" | "completed" | "failed";
 	branchStrategy: PipelineBranchStrategy;
+	executor?: "graph";
 	branch?: string;
 	worktreePath?: string;
 	logDir: string;
@@ -2624,15 +2774,33 @@ interface PipelineRunRecord {
 	startedAt: string;
 	completedAt?: string;
 	steps: PipelineRunStepRecord[];
+	nodes?: PipelineRunNodeRecord[];
+	result?: Record<string, unknown>;
 	error?: string;
 }
+
+interface GitCommandResult {
+	status: number | null;
+	stdout: string;
+	stderr: string;
+}
+
+type GitCommandRunner = (args: string[], options: { cwd: string }) => GitCommandResult | Promise<GitCommandResult>;
 
 interface PipelineExecutionDeps {
 	createWorktree?: typeof createWorktree;
 	claudeCode?: typeof claudeCode;
-	loadSandboxProvider?: (kind: AgentDef["sandbox"] | undefined) => Promise<any>;
+	makeAgent?: (model: string, provider?: AgentDef["provider"]) => any;
+	loadSandboxProvider?: (kind: AgentDef["sandbox"] | undefined, options?: Record<string, unknown>) => Promise<any>;
+	runGit?: GitCommandRunner;
+	onStepUpdate?: (step: PipelineRunStepRecord, record: PipelineRunRecord) => void;
+	onStepStreamEvent?: (step: PipelineRunStepRecord, event: unknown, record: PipelineRunRecord) => void;
 	image?: SandboxImageDeps;
 	now?: () => number;
+	graphInput?: unknown;
+	graphHooks?: GraphNodeHook[];
+	graphHookCapabilities?: string[];
+	graphHookNamespaces?: Record<string, unknown>;
 }
 
 function sanitizePathSegment(value: string): string {
@@ -2659,22 +2827,6 @@ function getPipelineCommitShas(commits: Array<{ sha: string }> | undefined): str
 	return (commits || []).map((commit) => commit.sha);
 }
 
-function summarizePipelineStepResult(
-	pipelineName: string,
-	agent: string,
-	branch: string | undefined,
-	commits: string[],
-	logPath: string,
-): string {
-	return [
-		`Pipeline: ${pipelineName}`,
-		`Step: ${agent}`,
-		`Branch: ${branch}`,
-		`Commits: ${commits.join(", ") || "none"}`,
-		`Log: ${logPath}`,
-	].join("\n");
-}
-
 function resolvePipelineBranchStrategy(pipelineName: string, pipeline: PipelineDef): PipelineBranchStrategy {
 	const branch = `sandcastle/${sanitizePathSegment(pipelineName)}`;
 	const branchStrategy = pipeline.branchStrategy;
@@ -2687,16 +2839,295 @@ function resolvePipelineBranchStrategy(pipelineName: string, pipeline: PipelineD
 	};
 }
 
-async function loadPipelineSandboxProvider(kind: AgentDef["sandbox"] | undefined): Promise<any> {
-	if (kind === "podman") return (await import("../../node_modules/@ai-hero/sandcastle/dist/sandboxes/podman.js")).podman();
+async function loadPipelineSandboxProvider(kind: AgentDef["sandbox"] | undefined, options?: Record<string, unknown>): Promise<any> {
+	const runtimeOptions = withSandboxRuntimeOptions(kind, options);
+	if (kind === "podman") return withPodmanCreateCleanup((await import("../../node_modules/@ai-hero/sandcastle/dist/sandboxes/podman.js")).podman(runtimeOptions as any), kind);
 	if (kind === "vercel") return (await import("../../node_modules/@ai-hero/sandcastle/dist/sandboxes/vercel.js")).vercel();
 	if (kind === "no-sandbox") return (await import("../../node_modules/@ai-hero/sandcastle/dist/sandboxes/no-sandbox.js")).noSandbox();
-	return (await import("../../node_modules/@ai-hero/sandcastle/dist/sandboxes/docker.js")).docker();
+	return (await import("../../node_modules/@ai-hero/sandcastle/dist/sandboxes/docker.js")).docker(runtimeOptions as any);
 }
 
 async function writePipelineRunRecord(record: PipelineRunRecord): Promise<void> {
 	mkdirSync(dirname(record.recordPath), { recursive: true });
 	writeFileSync(record.recordPath, JSON.stringify(record, null, 2));
+}
+
+function pipelineHasGraphNodes(pipeline: PipelineDef): boolean {
+	return pipeline.kind === "composite" && Boolean(pipeline.nodes && Object.keys(pipeline.nodes).length > 0);
+}
+
+function collectPipelineNodeCapabilities(nodes: Record<string, PipelineNodeDef> | undefined): string[] {
+	const capabilities = new Set<string>();
+	const visit = (node: PipelineNodeDef | undefined) => {
+		if (!node || typeof node !== "object") return;
+		if (typeof node.kind === "string" && node.kind.length) {
+			capabilities.add(node.kind);
+			capabilities.add(`node.kind:${node.kind}`);
+		}
+		if (Array.isArray((node as any).capabilities)) {
+			for (const capability of (node as any).capabilities) if (typeof capability === "string" && capability.length) capabilities.add(capability);
+		}
+		if (node.node) visit(node.node as PipelineNodeDef);
+		for (const child of Object.values(node.nodes || {})) visit(child as PipelineNodeDef);
+	};
+	for (const node of Object.values(nodes || {})) visit(node as PipelineNodeDef);
+	return [...capabilities];
+}
+
+function buildGraphHookCapabilities(pipeline: PipelineDef, deps: PipelineExecutionDeps): string[] {
+	const pack = loadExecutionRuntimePack();
+	return [...new Set([
+		...collectRuntimeAdapterCapabilities(pack, ["sandcastle"]),
+		...collectPipelineNodeCapabilities(pipeline.nodes),
+		...(deps.graphHookCapabilities || []).filter((entry): entry is string => typeof entry === "string" && entry.length > 0),
+	])];
+}
+
+function providerNamespaceValue(namespaces: Record<string, unknown> | undefined, key: string): Record<string, unknown> {
+	const value = namespaces?.[key];
+	return isRecord(value) ? value as Record<string, unknown> : {};
+}
+
+function nodeResultStringArray(result: NodeResult, key: "commits" | "effects"): string[] {
+	const value = (result as any)[key];
+	return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0) : [];
+}
+
+function nodeResultRepositoryEffects(result: NodeResult): string[] {
+	return nodeResultStringArray(result, "effects").filter((effect) => !isLogArtifactEffect(effect));
+}
+
+function isLogArtifactEffect(value: string): boolean {
+	return /^(log|logs|logPath|logFilePath)(:|=|$)/i.test(value.trim());
+}
+
+function nodeResultLogPath(result: NodeResult): string | undefined {
+	const logPath = (result as any).logPath;
+	return typeof logPath === "string" && logPath.length ? logPath : undefined;
+}
+
+function nodeResultBranch(result: NodeResult): string | undefined {
+	const branch = (result as any).branch;
+	return typeof branch === "string" && branch.length ? branch : undefined;
+}
+
+function nodeResultString(result: NodeResult, key: string): string | undefined {
+	const value = (result as any)[key];
+	return typeof value === "string" && value.length ? value : undefined;
+}
+
+function graphResultHasEffects(result: NodeResult): boolean {
+	if (nodeResultStringArray(result, "commits").length || nodeResultRepositoryEffects(result).length) return true;
+	if (result.type === "CompositeResult" || result.type === "WorkspaceResult") return Object.values((result as any).children || {}).some((child) => graphResultHasEffects(child as NodeResult));
+	if (result.type === "LoopResult") return ((result as any).iterations || []).some((child: NodeResult) => graphResultHasEffects(child));
+	return false;
+}
+
+function graphLoopItem(context: GraphNodeExecutionContext): Record<string, unknown> | undefined {
+	return isRecord(context.loop?.item) ? context.loop?.item as Record<string, unknown> : undefined;
+}
+
+function graphExecutionContextItem(context: GraphNodeExecutionContext): Record<string, unknown> | undefined {
+	const item = graphLoopItem(context);
+	if (typeof item?.branch === "string" && item.branch.length) return item;
+	const itemId = typeof item?.itemId === "string" && item.itemId.length ? item.itemId : typeof item?.id === "string" && item.id.length ? item.id : undefined;
+	if (!itemId) return undefined;
+	const input = isRecord(context.input) ? context.input as Record<string, unknown> : undefined;
+	const executionContexts = Array.isArray(input?.executionContexts) ? input.executionContexts : [];
+	return executionContexts.find((entry): entry is Record<string, unknown> => isRecord(entry) && entry.itemId === itemId);
+}
+
+function graphContextString(context: GraphNodeExecutionContext, key: string): string | undefined {
+	const value = graphExecutionContextItem(context)?.[key] ?? graphLoopItem(context)?.[key];
+	return typeof value === "string" && value.length ? value : undefined;
+}
+
+function graphWorkspaceString(context: GraphNodeExecutionContext, key: string): string | undefined {
+	const value = isRecord(context.workspace) ? context.workspace[key] : undefined;
+	return typeof value === "string" && value.length ? value : undefined;
+}
+
+function collectGraphResultStringArray(result: NodeResult, key: "commits" | "effects"): string[] {
+	const own = nodeResultStringArray(result, key);
+	if (result.type === "CompositeResult" || result.type === "WorkspaceResult") return [...own, ...Object.values((result as any).children || {}).flatMap((child) => collectGraphResultStringArray(child as NodeResult, key))];
+	if (result.type === "LoopResult") return [...own, ...((result as any).iterations || []).flatMap((child: NodeResult) => collectGraphResultStringArray(child, key))];
+	return own;
+}
+
+function graphStatusNodePath(context: GraphNodeExecutionContext): string {
+	if (context.loop) return context.path.replace(/\.node(?=\.|$)/, `.iterations.${context.loop.index}`);
+	return context.path;
+}
+
+function graphResultSummary(result: NodeResult): Record<string, unknown> {
+	return {
+		type: result.type,
+		status: result.status,
+		nodeId: result.nodeId,
+		kind: result.kind,
+		effects: nodeResultStringArray(result, "effects"),
+		commits: nodeResultStringArray(result, "commits"),
+	};
+}
+
+function collectGraphNodeRecords(result: NodeResult, path = "root"): PipelineRunNodeRecord[] {
+	const record: PipelineRunNodeRecord = {
+		nodePath: path,
+		kind: result.kind,
+		status: result.status === "succeeded" ? "completed" : "failed",
+		resultType: result.type,
+		...(nodeResultString(result, "role") ? { role: nodeResultString(result, "role") } : {}),
+		...(nodeResultBranch(result) ? { branch: nodeResultBranch(result) } : {}),
+		...(nodeResultString(result, "worktreePath") ? { worktreePath: nodeResultString(result, "worktreePath") } : {}),
+		...(nodeResultStringArray(result, "commits").length ? { commits: nodeResultStringArray(result, "commits") } : {}),
+		...(nodeResultLogPath(result) ? { logPath: nodeResultLogPath(result) } : {}),
+		...(nodeResultStringArray(result, "effects").length ? { effects: nodeResultStringArray(result, "effects") } : {}),
+		...(Array.isArray((result as any).mergedBranches) ? { mergedBranches: (result as any).mergedBranches.filter((entry: unknown): entry is string => typeof entry === "string" && entry.length > 0) } : {}),
+		...(Array.isArray((result as any).mergedCommits) ? { mergedCommits: (result as any).mergedCommits.filter((entry: unknown): entry is string => typeof entry === "string" && entry.length > 0) } : {}),
+		...(nodeResultString(result, "laneId") ? { laneId: nodeResultString(result, "laneId") } : {}),
+		...(nodeResultString(result, "itemId") ? { itemId: nodeResultString(result, "itemId") } : {}),
+	};
+	const children: PipelineRunNodeRecord[] = [];
+	if (result.type === "CompositeResult" || result.type === "WorkspaceResult") {
+		for (const [id, child] of Object.entries((result as any).children || {})) children.push(...collectGraphNodeRecords(child as NodeResult, `${path}.nodes.${id}`));
+	}
+	if (result.type === "LoopResult") {
+		for (const [index, child] of ((result as any).iterations || []).entries()) children.push(...collectGraphNodeRecords(child as NodeResult, `${path}.iterations.${index}`));
+	}
+	return [record, ...children];
+}
+
+interface GraphMergeCandidate {
+	need: string;
+	nodeId: string;
+	branch: string;
+	commits: string[];
+}
+
+function defaultRunGit(args: string[], options: { cwd: string }): GitCommandResult {
+	const result = spawnSync("git", args, { cwd: options.cwd, encoding: "utf8", env: process.env });
+	return {
+		status: result.status,
+		stdout: result.stdout || "",
+		stderr: result.stderr || (result.error ? result.error.message : ""),
+	};
+}
+
+async function runGraphGit(deps: PipelineExecutionDeps, cwd: string, args: string[]): Promise<GitCommandResult> {
+	return await (deps.runGit || defaultRunGit)(args, { cwd });
+}
+
+async function assertGraphGit(deps: PipelineExecutionDeps, cwd: string, args: string[], description: string): Promise<string> {
+	const result = await runGraphGit(deps, cwd, args);
+	if (result.status !== 0) throw new Error(`${description} failed: ${(result.stderr || result.stdout || `git ${args.join(" ")}`).trim()}`);
+	return result.stdout.trim();
+}
+
+async function graphWorktreeDirtyStatus(deps: PipelineExecutionDeps, cwd: string): Promise<string> {
+	const result = await runGraphGit(deps, cwd, ["status", "--porcelain"]);
+	return result.status === 0 ? result.stdout.trim() : "";
+}
+
+async function commitGraphWorktreeChanges(deps: PipelineExecutionDeps, cwd: string, message: string): Promise<string[]> {
+	const dirty = await graphWorktreeDirtyStatus(deps, cwd);
+	if (!dirty) return [];
+	await assertGraphGit(deps, cwd, ["add", "-A"], "graph worktree stage changes");
+	const staged = await runGraphGit(deps, cwd, ["diff", "--cached", "--quiet"]);
+	if (staged.status === 0) return [];
+	await assertGraphGit(deps, cwd, ["commit", "-m", message], "graph worktree commit changes");
+	const sha = await assertGraphGit(deps, cwd, ["rev-parse", "HEAD"], "graph worktree commit HEAD");
+	return sha ? [sha] : [];
+}
+
+function collectWorkspaceMergeCandidates(needs: Record<string, NodeResult>, inputNames?: string[]): GraphMergeCandidate[] {
+	const candidates: GraphMergeCandidate[] = [];
+	const entries = inputNames?.length ? inputNames.map((name) => [name, needs[name]] as const) : Object.entries(needs);
+	for (const [need, result] of entries) if (result) collectWorkspaceMergeCandidatesFromResult(need, result, candidates);
+	return candidates;
+}
+
+function collectWorkspaceMergeCandidatesFromResult(need: string, result: NodeResult, candidates: GraphMergeCandidate[]): void {
+	if (result.type === "WorkspaceResult") {
+		const commits = nodeResultStringArray(result, "commits");
+		const effects = nodeResultRepositoryEffects(result);
+		if (!commits.length && !effects.length) return;
+		const branch = nodeResultBranch(result);
+		if (!branch) throw new Error(`git.merge requires mergeable branches; '${need}' produced no branch`);
+		candidates.push({ need, nodeId: result.nodeId, branch, commits });
+		return;
+	}
+	if (result.type === "LoopResult") {
+		for (const [index, child] of (((result as any).mergeableResults || []) as NodeResult[]).entries()) collectWorkspaceMergeCandidatesFromResult(`${need}[${index}]`, child, candidates);
+	}
+}
+
+function isAcceptedReviewText(value: unknown): boolean | undefined {
+	const text = typeof value === "string" ? value.toLowerCase() : "";
+	if (!text.trim()) return undefined;
+	if (/\b(reject(?:ed)?|request changes|changes requested|blocker|blocked|do not merge|not accepted|fail(?:ed)?)\b/.test(text)) return false;
+	if (/\b(accept(?:ed)?|approved?|approve|no blockers?|safe to merge|looks good|pass(?:ed)?)\b/.test(text)) return true;
+	return undefined;
+}
+
+function collectAcceptedReviewBranches(result: NodeResult | undefined, accepted = new Set<string>()): Set<string> {
+	if (!result) return accepted;
+	if (result.type === "WorkspaceResult") {
+		const branch = nodeResultBranch(result);
+		const childVerdicts = Object.values(result.children || {}).map((child) => isAcceptedReviewText((child as any).stdout ?? (child as any).output));
+		if (branch && childVerdicts.some((verdict) => verdict === true) && !childVerdicts.some((verdict) => verdict === false)) accepted.add(branch);
+		return accepted;
+	}
+	if (result.type === "LoopResult") for (const child of result.iterations || []) collectAcceptedReviewBranches(child, accepted);
+	if (result.type === "CompositeResult") for (const child of Object.values(result.children || {})) collectAcceptedReviewBranches(child, accepted);
+	return accepted;
+}
+
+async function mergeGraphWorkspaceBranches(
+	context: GraphNodeExecutionContext,
+	deps: PipelineExecutionDeps,
+	targetCwd: string,
+): Promise<Partial<GitMergeResult>> {
+	const mergeInputs = Array.isArray((context.node as any).inputs) ? (context.node as any).inputs.filter((entry: unknown): entry is string => typeof entry === "string" && entry.length > 0) : undefined;
+	let candidates = collectWorkspaceMergeCandidates(context.needs, mergeInputs);
+	if ((context.node as any).strategy === "accepted-only" && context.needs.review) {
+		const acceptedBranches = collectAcceptedReviewBranches(context.needs.review);
+		candidates = candidates.filter((candidate) => acceptedBranches.has(candidate.branch));
+		if (!candidates.length) throw new Error(`${context.path} has no review-accepted mergeable branches`);
+	}
+	if (!candidates.length) throw new Error(`${context.path} requires effectful mergeable branches`);
+	await assertGraphGit(deps, targetCwd, ["rev-parse", "--show-toplevel"], `${context.path} git repository check`);
+	const targetBranch = await assertGraphGit(deps, targetCwd, ["rev-parse", "--abbrev-ref", "HEAD"], `${context.path} target branch check`);
+	let previousHead = await assertGraphGit(deps, targetCwd, ["rev-parse", "HEAD"], `${context.path} target HEAD check`);
+	const startHead = previousHead;
+	const mergedBranches: string[] = [];
+	const mergedCommits: string[] = [];
+	const effects: string[] = [];
+
+	for (const candidate of candidates) {
+		const result = await runGraphGit(deps, targetCwd, ["merge", "--no-ff", "--no-edit", candidate.branch]);
+		if (result.status !== 0) {
+			await runGraphGit(deps, targetCwd, ["merge", "--abort"]);
+			throw new Error(`${context.path} failed to merge '${candidate.branch}' into '${targetBranch}': ${(result.stderr || result.stdout || "merge conflict").trim()}`);
+		}
+		const nextHead = await assertGraphGit(deps, targetCwd, ["rev-parse", "HEAD"], `${context.path} post-merge HEAD check`);
+		if (nextHead !== previousHead) {
+			mergedBranches.push(candidate.branch);
+			mergedCommits.push(nextHead);
+			effects.push(`merge:${candidate.branch}`);
+			for (const commit of candidate.commits) effects.push(`commit:${commit}`);
+		}
+		previousHead = nextHead;
+	}
+
+	if (previousHead === startHead || !effects.length) throw new Error(`${context.path} completed without merge effects`);
+	return {
+		branch: targetBranch,
+		merged: mergedBranches,
+		mergedBranches,
+		mergedCommits,
+		commits: mergedCommits,
+		effects,
+	};
 }
 
 export async function executePipeline(
@@ -2721,11 +3152,17 @@ export async function executePipeline(
 	const recordPath = join(runDir, "record.json");
 	const logDir = join(runDir, "logs");
 	const branchStrategy = resolvePipelineBranchStrategy(pipelineName, pipeline);
+	const useGraphExecutor = pipelineHasGraphNodes(pipeline);
+	if (!useGraphExecutor) throw new Error(`Pipeline '${pipelineName}' is not graph-native. Fix ${CONFIG_PATH} to use kind: composite with nodes.`);
 	const createWorktreeImpl = deps.createWorktree || createWorktree;
-	const makePipelineAgent = deps.claudeCode
-		? (model: string) => deps.claudeCode!(model)
-		: (model: string) => piAgent(model);
+	const makePipelineAgent = deps.makeAgent;
 	const loadSandboxProvider = deps.loadSandboxProvider || loadPipelineSandboxProvider;
+	const graphHookCapabilities = buildGraphHookCapabilities(pipeline, deps);
+	const configuredGraphHooks = [
+		...((cfg.workSource || cfg.issueTracker) === "doc-vader" ? createDocVaderWorkSourceHooks() : []),
+		...(deps.graphHooks || []),
+	];
+	const graphHooks = discoverHooksByCapability(configuredGraphHooks, graphHookCapabilities);
 	const record: PipelineRunRecord = {
 		id,
 		kind: PIPELINE_RUN_KIND,
@@ -2733,6 +3170,7 @@ export async function executePipeline(
 		prompt,
 		status: "running",
 		branchStrategy,
+		executor: "graph",
 		logDir,
 		recordPath,
 		startedAt: new Date(startedAtMs).toISOString(),
@@ -2741,58 +3179,177 @@ export async function executePipeline(
 	let worktree: Awaited<ReturnType<typeof createWorktreeImpl>> | undefined;
 
 	try {
-		worktree = await createWorktreeImpl({
-			cwd,
-			branchStrategy,
-			copyToWorktree: pipeline.copyToWorktree,
-		});
-		record.branch = worktree.branch;
-		record.worktreePath = worktree.worktreePath;
-		await writePipelineRunRecord(record);
-
-		let input = prompt;
-		for (const [index, step] of pipeline.steps.entries()) {
-			const stepRecord: PipelineRunStepRecord = {
-				index,
-				role: step.role,
-				status: "running",
-				commits: [],
-				logPath: buildPipelineStepLogPath(logDir, index, step.role),
-			};
-			record.steps.push(stepRecord);
-			await writePipelineRunRecord(record);
-
-			const sandboxKind = step.sandbox || pipeline.sandbox || cfg.defaultSandbox || DEFAULT_SANDBOX;
-			await ensureSandboxImage(cwd, sandboxKind, deps.image, undefined, cfg);
-			const sandbox = await loadSandboxProvider(sandboxKind);
-			const role = cfg.agents[step.role];
-			const stepPromptBody = resolvePipelineStepPrompt(step.promptOverride || resolvePromptText(cfg, step.prompt), input, prompt);
-			const stepPrompt = role?.systemPrompt ? `${role.systemPrompt}\n\n## Delegated task\n\n${stepPromptBody}` : stepPromptBody;
-			const result = await worktree.run({
-				agent: makePipelineAgent(step.model || role?.model || pipeline.model || cfg.defaultModel || DEFAULT_MODEL),
-				sandbox,
-				prompt: stepPrompt,
-				maxIterations: step.maxIterations || 1,
-				logging: {
-					type: "file",
-					path: stepRecord.logPath,
-					verbose: true,
-				},
+		if (!useGraphExecutor) {
+			worktree = await createWorktreeImpl({
+				cwd,
+				branchStrategy,
+				copyToWorktree: pipeline.copyToWorktree,
 			});
-
-			const commitShas = getPipelineCommitShas(result.commits);
-			stepRecord.status = "completed";
-			stepRecord.branch = result.branch;
-			stepRecord.commits = commitShas;
-			record.branch = result.branch || record.branch;
-			stepRecord.logPath = result.logFilePath || stepRecord.logPath;
-			input = summarizePipelineStepResult(pipelineName, step.role, result.branch, commitShas, stepRecord.logPath);
-			await writePipelineRunRecord(record);
+			record.branch = worktree.branch;
+			record.worktreePath = worktree.worktreePath;
 		}
-		record.status = "completed";
-		record.completedAt = new Date(now()).toISOString();
 		await writePipelineRunRecord(record);
-		return record;
+
+		if (useGraphExecutor) {
+			const runAgentNode = async (context: GraphNodeExecutionContext) => {
+				const node = context.node as PipelineNodeDef;
+				const roleName = node.role;
+				const workspaceWorktree = isRecord(context.workspace) ? (context.workspace.worktree as any) : undefined;
+				if (!workspaceWorktree || typeof workspaceWorktree.run !== "function") throw new Error(`${context.path} agent node must execute inside git.worktree`);
+				const contextBranch = graphContextString(context, "branch") || graphWorkspaceString(context, "branch");
+				const itemId = graphContextString(context, "itemId");
+				const nodePath = graphStatusNodePath(context);
+				const laneId = graphContextString(context, "contextId") || (context.loop ? `${nodePath}:${context.loop.index}` : undefined);
+				const contextPromptPrefix = graphLoopItem(context) ? `Execution context: ${laneId || "unknown"}${itemId ? `\nWork Item: ${itemId}` : ""}${contextBranch ? `\nBranch: ${contextBranch}` : ""}\n\n` : "";
+				if (!roleName) throw new Error(`${context.path} agent node must reference a role`);
+				const role = cfg.agents[roleName];
+				if (!role) throw new Error(`${context.path} references unknown role '${roleName}'`);
+				const stepRecord: PipelineRunStepRecord = {
+					index: record.steps.length,
+					role: roleName,
+					status: "running",
+					maxIterations: Number.isInteger((node as any).maxIterations) ? Number((node as any).maxIterations) : cfg.maxIterations || 10,
+					commits: [],
+					logPath: buildPipelineStepLogPath(logDir, record.steps.length, roleName),
+					kind: node.kind,
+					nodePath,
+					...(contextBranch ? { branch: contextBranch } : {}),
+					...(itemId ? { itemId } : {}),
+					...(laneId ? { laneId } : {}),
+				};
+				record.steps.push(stepRecord);
+				await writePipelineRunRecord(record);
+				deps.onStepUpdate?.(stepRecord, record);
+
+				const sandboxKind = (node as any).sandbox || role.sandbox || pipeline.sandbox || cfg.defaultSandbox || DEFAULT_SANDBOX;
+				await ensureSandboxImage(cwd, sandboxKind, deps.image, undefined, cfg);
+				const provider = role.provider || cfg.defaultAgent || "pi";
+				const model = resolvePipelineModelForProvider((node as any).model || role.model || pipeline.model || cfg.defaultModel, provider);
+				const hostPiRuntime = provider === "pi" ? createHostPiAgentRuntime() : undefined;
+				try {
+					const sandbox = await loadSandboxProvider(sandboxKind, hostPiRuntime ? hostPiSandboxOptions(cwd, cfg, hostPiRuntime, sandboxKind) : withSandboxRuntimeOptions(sandboxKind, { imageName: defaultSandcastleImageName(cwd, cfg.imageNamePattern) }));
+					const template = node.promptOverride || resolvePromptText(cfg, node.prompt || "$INPUT");
+					const stepPromptBody = `${contextPromptPrefix}${resolvePipelineStepPrompt(template, prompt, prompt)}`;
+					const stepPrompt = role.systemPrompt ? `${role.systemPrompt}\n\n## Delegated task\n\n${stepPromptBody}` : stepPromptBody;
+					const result = await workspaceWorktree.run({
+						agent: makePipelineAgent ? makePipelineAgent(model, provider) : createAgentProviderForRuntime(model, provider, { hostPiRuntime, sandbox: sandboxKind, claudeCodeFactory: deps.claudeCode }),
+						sandbox,
+						prompt: stepPrompt,
+						maxIterations: stepRecord.maxIterations,
+						logging: {
+							type: "file",
+							path: stepRecord.logPath,
+							verbose: true,
+							onAgentStreamEvent: (event: unknown) => deps.onStepStreamEvent?.(stepRecord, event, record),
+						},
+					});
+
+					const commitShas = getPipelineCommitShas(result.commits);
+					const resultBranch = contextBranch || result.branch;
+					stepRecord.status = "completed";
+					stepRecord.branch = resultBranch;
+					stepRecord.commits = commitShas;
+					record.branch = resultBranch || record.branch;
+					stepRecord.logPath = result.logFilePath || stepRecord.logPath;
+					await writePipelineRunRecord(record);
+					deps.onStepUpdate?.(stepRecord, record);
+					return {
+						role: roleName,
+						branch: resultBranch,
+						commits: commitShas,
+						logPath: result.logFilePath,
+						stdout: result.stdout,
+						...(itemId ? { itemId } : {}),
+						...(laneId ? { laneId } : {}),
+					};
+				} catch (error) {
+					stepRecord.status = "failed";
+					stepRecord.error = error instanceof Error ? error.message : String(error);
+					await writePipelineRunRecord(record);
+					deps.onStepUpdate?.(stepRecord, record);
+					throw error;
+				} finally {
+					if (hostPiRuntime?.dir) rmSync(hostPiRuntime.dir, { recursive: true, force: true });
+				}
+			};
+			const graphResult = await executeGraphWorkflow({ kind: "composite", nodes: pipeline.nodes } as GraphWorkflowNode, {
+				input: deps.graphInput ?? prompt,
+				hooks: graphHooks,
+				hookCapabilities: graphHookCapabilities,
+				hookContext: {
+					global: { cwd, runId: id, pipeline: pipelineName, recordPath, logDir },
+					runtime: { executor: "graph", adapter: "sandcastle", cwd, pipeline: pipelineName, runId: id, recordPath, logDir },
+					providers: {
+						...(deps.graphHookNamespaces || {}),
+						git: { branchStrategy, targetCwd: worktree?.worktreePath || cwd, ...providerNamespaceValue(deps.graphHookNamespaces, "git") },
+						work: { graphInput: deps.graphInput, ...providerNamespaceValue(deps.graphHookNamespaces, "work") },
+					},
+				},
+				handlers: {
+					agent: runAgentNode,
+					"agent.pi": runAgentNode,
+					script: async ({ node }) => ({ output: (node as any).run || (node as any).command || (node as any).with?.run }),
+					"git.worktree": async (context) => {
+						if (!context.executeChildren) throw new Error(`${context.path} cannot execute git.worktree children`);
+						const contextBranch = graphContextString(context, "branch");
+						const workspaceBranchStrategy: PipelineBranchStrategy = contextBranch
+							? {
+								type: "branch",
+								branch: contextBranch,
+								...(branchStrategy.type === "branch" && branchStrategy.baseBranch ? { baseBranch: branchStrategy.baseBranch } : {}),
+							}
+							: branchStrategy;
+						const laneWorktree = await createWorktreeImpl({
+							cwd,
+							branchStrategy: workspaceBranchStrategy,
+							copyToWorktree: pipeline.copyToWorktree,
+						});
+						try {
+							const workspaceBranch = contextBranch || laneWorktree.branch;
+							const childRun = await context.executeChildren({
+								workspace: {
+									branch: workspaceBranch,
+									worktreePath: laneWorktree.worktreePath,
+									worktree: laneWorktree,
+								},
+							});
+							const childResults = Object.values(childRun.children) as NodeResult[];
+							const childCommits = childResults.flatMap((child) => collectGraphResultStringArray(child, "commits"));
+							const autoCommits = await commitGraphWorktreeChanges(deps, laneWorktree.worktreePath, `agent-workflows: capture ${graphContextString(context, "itemId") || context.id} changes`);
+							const commits = [...childCommits, ...autoCommits];
+							const childEffects = childResults.flatMap((child) => collectGraphResultStringArray(child, "effects")).filter((effect) => !isLogArtifactEffect(effect));
+							const itemId = graphContextString(context, "itemId");
+							const nodePath = graphStatusNodePath(context);
+							const laneId = graphContextString(context, "contextId") || (context.loop ? `${nodePath}:${context.loop.index}` : undefined);
+							record.branch = record.branch || workspaceBranch;
+							record.worktreePath = record.worktreePath || laneWorktree.worktreePath;
+							return {
+								branch: workspaceBranch,
+								worktreePath: laneWorktree.worktreePath,
+								commits,
+								effects: [...commits.map((commit) => `commit:${commit}`), ...childEffects],
+								children: childRun.children,
+								order: childRun.order,
+								...(itemId ? { itemId } : {}),
+								...(laneId ? { laneId } : {}),
+							};
+						} finally {
+							await laneWorktree.close().catch(() => undefined);
+						}
+					},
+					"git.merge": async (context) => mergeGraphWorkspaceBranches(context, deps, worktree?.worktreePath || cwd),
+				},
+			}) as CompositeResult;
+			record.nodes = collectGraphNodeRecords(graphResult);
+			record.result = graphResultSummary(graphResult);
+			if (!graphResultHasEffects(graphResult)) throw new Error("Graph pipeline completed without effects");
+			record.status = "completed";
+			record.completedAt = new Date(now()).toISOString();
+			await writePipelineRunRecord(record);
+			return record;
+		}
+
+		throw new Error(`Pipeline '${pipelineName}' is not graph-native. Fix ${CONFIG_PATH} to use kind: composite with nodes.`);
 	} catch (error) {
 		record.status = "failed";
 		record.error = error instanceof Error ? error.message : String(error);
@@ -2801,6 +3358,7 @@ export async function executePipeline(
 		if (lastStep && lastStep.status === "running") {
 			lastStep.status = "failed";
 			lastStep.error = record.error;
+			deps.onStepUpdate?.(lastStep, record);
 		}
 		await writePipelineRunRecord(record);
 		throw error;
@@ -2809,15 +3367,90 @@ export async function executePipeline(
 	}
 }
 
+function formatRunStateLine(run: RunState): string {
+	const details = [
+		run.itemId ? `item ${run.itemId}` : undefined,
+		run.nodePath ? `node ${run.nodePath}` : undefined,
+		run.laneId ? `lane ${run.laneId}` : undefined,
+	].filter((entry): entry is string => Boolean(entry));
+	const statusText = run.lastLine || run.task.slice(0, 48);
+	return details.length ? `${details.join("; ")}; ${statusText}` : statusText;
+}
+
 function renderWidget(runs: Map<string, RunState>): string[] {
 	const active = [...runs.values()].sort((a, b) => b.startedAt - a.startedAt).slice(0, 8);
-	const lines = [`Execution runs: ${runs.size}`];
+	const lines = [`Execution workers: ${runs.size}`];
 	for (const run of active) {
-		const age = Math.round((Date.now() - run.startedAt) / 1000);
+		const ageSource = run.endedAt || Date.now();
+		const age = Math.max(0, Math.round((ageSource - run.startedAt) / 1000));
 		const commits = run.commits?.length ? ` · ${run.commits.length} commit(s)` : "";
-		lines.push(`${run.status.padEnd(9)} ${run.agent.padEnd(12)} ${age}s · ${run.lastLine || run.task.slice(0, 48)}${commits}`);
+		lines.push(`${run.status.padEnd(9)} ${run.agent.padEnd(12)} ${age}s · ${formatRunStateLine(run)}${commits}`);
 	}
 	return lines;
+}
+
+function statusTextValue(value: unknown): string {
+	if (typeof value === "string") {
+		const trimmed = value.trim();
+		if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+			try {
+				return statusTextValue(JSON.parse(trimmed));
+			} catch {
+				return value;
+			}
+		}
+		return value;
+	}
+	if (value === undefined || value === null) return "";
+	if (Array.isArray(value)) return value.map(statusTextValue).filter(Boolean).join(" ");
+	if (typeof value === "object") {
+		const record = value as Record<string, unknown>;
+		if (record.type === "thinking") return statusTextValue(record.thinking);
+		if (record.type === "message_update" || record.assistantMessageEvent) {
+			const nestedEvent = record.assistantMessageEvent as Record<string, unknown> | undefined;
+			const nestedText = statusTextValue(nestedEvent?.text ?? nestedEvent?.content ?? nestedEvent?.partial);
+			if (nestedText) return nestedText;
+			return "";
+		}
+		for (const key of ["text", "message", "content", "delta", "partial", "thinking"]) {
+			const nested = statusTextValue(record[key]);
+			if (nested) return nested;
+		}
+		return "";
+	}
+	return String(value);
+}
+
+function compactStatusText(text: unknown, max = 120): string {
+	const compact = statusTextValue(text).replace(/\s+/g, " ").trim();
+	return compact.length > max ? `${compact.slice(0, max - 1)}…` : compact;
+}
+
+function formatAgentStreamStatus(event: any, maxIterations?: number): string | undefined {
+	if (!event || typeof event !== "object") return undefined;
+	const iteration = Number.isFinite(event.iteration) ? Number(event.iteration) : undefined;
+	const iterationPrefix = iteration ? `iter ${iteration}${maxIterations ? `/${maxIterations}` : ""}: ` : "";
+	if (event.type === "toolCall") return `${iterationPrefix}tool: ${event.name || "tool"}`;
+	if (event.type === "text") {
+		const text = compactStatusText(event.message || event.text || "", 120);
+		return text ? `${iterationPrefix}${text}` : undefined;
+	}
+	if (event.type === "raw") {
+		const raw = String(event.line || event.text || "").trim();
+		if (raw.startsWith("{")) {
+			try {
+				const parsed = JSON.parse(raw);
+				const nestedType = parsed.assistantMessageEvent?.type || parsed.type;
+				if (["thinking_start", "message_start", "message_update"].includes(nestedType)) return undefined;
+				const text = compactStatusText(parsed.text || parsed.message || parsed.thinking || parsed.assistantMessageEvent?.text || parsed.delta?.text || parsed, 120);
+				return text ? `${iterationPrefix}${text}` : undefined;
+			} catch {
+				return undefined;
+			}
+		}
+		return `${iterationPrefix}${compactStatusText(raw, 120)}`;
+	}
+	return undefined;
 }
 
 function completionItems(values: Array<string | SelectItem>, prefix: string): SelectItem[] | null {
@@ -2907,6 +3540,7 @@ function isTuiEscape(data: string): boolean {
 function isDefaultableConfigPath(path: string): boolean {
 	const parts = splitConfigPath(path);
 	return (parts.length === 3 && ["roles", "pipelines"].includes(parts[0]) && ["model", "sandbox"].includes(parts[2]))
+		|| (parts[0] === "pipelines" && parts[2] === "nodes" && ["model", "sandbox", "maxIterations"].includes(parts.at(-1)!))
 		|| (parts[0] === "pipelines" && parts[2] === "steps" && ["model", "sandbox", "maxIterations"].includes(parts[4]));
 }
 
@@ -2924,7 +3558,8 @@ function selectableValuesForPath(cfg: SandcastleConfig, path: string): string[] 
 	const values = schemaEnumForPath(path)
 		|| (path === "defaultPipeline" ? ["simple-loop", "sequential-reviewer", "parallel-planner", "parallel-planner-with-review", "archive"] : undefined)
 		|| (path === "defaultAgent" ? ["claude-code", "pi", "codex", "cursor", "opencode", "copilot"] : undefined)
-		|| (path === "workSource" ? ["github-issues", "custom", "beads"] : undefined)
+		|| (path === "workSource" ? ["github-issues", "custom", "beads", "doc-vader"] : undefined)
+		|| (parts[0] === "pipelines" && parts[2] === "nodes" && parts.at(-1) === "role" ? Object.keys(cfg.agents) : undefined)
 		|| (parts[0] === "pipelines" && parts[2] === "steps" && parts[4] === "role" ? Object.keys(cfg.agents) : undefined);
 	const withDefault = isDefaultableConfigPath(path) ? ["default", ...(values || [])] : (values || []);
 	return [...new Set(withDefault)];
@@ -2937,7 +3572,7 @@ function allowsCustomValueForPath(path: string): boolean {
 function coerceConfigValue(path: string, rawValue: string): unknown {
 	const field = splitConfigPath(path).at(-1);
 	if (rawValue === "default" && isDefaultableConfigPath(path)) return rawValue;
-	if (field === "maxIterations") {
+	if (field === "maxIterations" || field === "maxWorkers") {
 		const value = Number(rawValue);
 		if (!Number.isInteger(value) || value < 1) throw new Error(`${path} must be a positive integer.`);
 		return value;
@@ -2959,8 +3594,6 @@ type BacklogConfigAction =
 	| { type: "add-pipeline"; name: string }
 	| { type: "rename-pipeline"; oldName: string; newName: string }
 	| { type: "delete-pipeline"; name: string }
-	| { type: "add-pipeline-step"; pipeline: string }
-	| { type: "delete-pipeline-step"; pipeline: string; index: number }
 	| { type: "replace-config"; config: SandcastleConfig }
 	| { type: "import-config-file" }
 	| { type: "apply-pack"; pack: string }
@@ -2974,10 +3607,12 @@ function friendlyConfigLabel(pathOrField: string): string {
 		defaultModel: "Model",
 		defaultPipeline: "Default Pipeline",
 		defaultAgent: "Default Agent",
+		maxWorkers: "Max Workers",
+		maxIterations: "Max Iterations",
 		workSource: "Work Source",
 		workSourceSetupCommand: "Work Source Setup Command",
-		issueTracker: "Issue Tracker (legacy)",
-		issueTrackerSetupCommand: "Issue Tracker Setup Command (legacy)",
+		issueTracker: "Issue Tracker",
+		issueTrackerSetupCommand: "Issue Tracker Setup Command",
 		imageNamePattern: "Image Name Pattern",
 		description: "Description",
 		model: "Model",
@@ -2999,8 +3634,6 @@ function summarizeValue(value: unknown): string {
 function describeConfigAction(action: BacklogConfigAction, before: SandcastleConfig, after: SandcastleConfig): string {
 	if (action.type === "set-config") return `${friendlyConfigLabel(action.path)}: ${summarizeValue(readConfigValue(before, action.path))} → ${summarizeValue(readConfigValue(after, action.path))}`;
 	if (action.type === "replace-config") return "Replace configuration draft";
-	if (action.type === "add-pipeline-step") return `Add step: ${action.pipeline}`;
-	if (action.type === "delete-pipeline-step") return `Delete step ${action.index + 1}: ${action.pipeline}`;
 	if (action.type.startsWith("rename-")) return `${action.type.replace("rename-", "Rename ")}: ${(action as any).oldName} → ${(action as any).newName}`;
 	if (action.type.startsWith("add-")) return `${action.type.replace("add-", "Add ")}: ${(action as any).name}`;
 	if (action.type.startsWith("delete-")) return `${action.type.replace("delete-", "Delete ")}: ${(action as any).name}`;
@@ -3008,7 +3641,7 @@ function describeConfigAction(action: BacklogConfigAction, before: SandcastleCon
 }
 
 function configActionRequiresImageRebuild(action: BacklogConfigAction): boolean {
-	if (["init", "apply-pack", "replace-config", "add-agent", "rename-agent", "delete-agent", "add-pipeline", "rename-pipeline", "delete-pipeline", "add-pipeline-step", "delete-pipeline-step"].includes(action.type)) return true;
+	if (["init", "apply-pack", "replace-config", "add-agent", "rename-agent", "delete-agent", "add-pipeline", "rename-pipeline", "delete-pipeline"].includes(action.type)) return true;
 	if (action.type === "set-config") return action.path !== "workSourceSetupCommand" && action.path !== "issueTrackerSetupCommand";
 	if (action.type === "batch") return action.actions.some(configActionRequiresImageRebuild);
 	return false;
@@ -3079,7 +3712,7 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 		const defaultsScreen = (): Screen => ({
 			title: "RUNTIME DEFAULTS",
 			subtitle: "User-configurable fallback settings; local environment details live under Actions",
-			items: [field("defaultSandbox"), field("defaultModel"), field("defaultPipeline"), field("defaultAgent"), field("workSource"), field("workSourceSetupCommand"), field("imageNamePattern")],
+			items: [field("defaultSandbox"), field("defaultModel"), field("defaultPipeline"), field("defaultAgent"), field("maxWorkers"), field("maxIterations"), field("workSource"), field("workSourceSetupCommand"), field("imageNamePattern")],
 		});
 
 		const agentsScreen = (): Screen => ({
@@ -3119,8 +3752,8 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 			title: "PIPELINES",
 			subtitle: "Choose a pipeline for detailed inspection/editing",
 			items: [
-				{ value: "text:add-pipeline", label: "New pipeline", description: "Create a simple worker pipeline" },
-				...Object.entries(cfg.pipelines).filter(([name]) => name !== "blank").map(([name, pipeline]) => ({ value: `nav:pipeline:${name}`, label: name, description: pipeline.description || `${pipeline.steps?.length || 0} step(s)` })),
+				{ value: "text:add-pipeline", label: "New pipeline", description: "Create a graph-native worker pipeline" },
+				...Object.entries(cfg.pipelines).filter(([name]) => name !== "blank").map(([name, pipeline]) => ({ value: `nav:pipeline:${name}`, label: name, description: pipeline.description || "graph composite" })),
 			],
 		});
 
@@ -3130,43 +3763,35 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 			return resolved.split(/\n/).find((line) => line.trim())?.trim().slice(0, 100) || "Not set";
 		};
 
+		const graphNodeItems = (pipelineName: string, nodes: Record<string, PipelineNodeDef> | undefined, prefix = `pipelines.${pipelineName}.nodes`, labelPrefix = "Node"): SelectItem[] => {
+			if (!nodes) return [];
+			return Object.entries(nodes).flatMap(([nodeId, node]) => {
+				const nodePrefix = `${prefix}.${nodeId}`;
+				const label = `${labelPrefix} ${nodeId}: ${node.kind || "unknown"}`;
+				return [
+					{ value: `info:${nodePrefix}`, label, description: node.role ? `role ${node.role}` : node.needs?.length ? `needs ${node.needs.join(", ")}` : "Graph node" },
+					...(node.role !== undefined ? [field(`${nodePrefix}.role`, `${nodeId} role`)] : []),
+					...(node.prompt !== undefined ? [field(`${nodePrefix}.prompt`, `${nodeId} prompt`)] : []),
+					...graphNodeItems(pipelineName, node.nodes, `${nodePrefix}.nodes`, `${labelPrefix} ${nodeId}/node`),
+					...(node.node ? graphNodeItems(pipelineName, { node: node.node }, nodePrefix, `${labelPrefix} ${nodeId}`) : []),
+				];
+			});
+		};
+
 		const pipelineScreen = (name: string): Screen => {
 			const pipeline = cfg.pipelines[name];
 			const branch = pipeline?.branchStrategy ? `${pipeline.branchStrategy.type || "branch"}${pipeline.branchStrategy.branch ? ` → ${pipeline.branchStrategy.branch}` : ""}` : "Inherited";
-			const stepItems = (pipeline?.steps || []).map((step, index) => ({
-				value: `nav:pipeline-step:${name}:${index}`,
-				label: `Step ${index + 1}: ${step.role || "No role selected"}`,
-				description: promptSummary(step.prompt),
-			}));
+			const isGraph = Boolean(pipeline?.nodes && Object.keys(pipeline.nodes).length);
 			return {
 				title: `PIPELINE / ${name}`,
-				subtitle: `Branch strategy: ${branch}`,
+				subtitle: `Graph composite · Branch strategy: ${branch}`,
 				items: [
 					{ value: `text:rename-pipeline:${name}`, label: "Rename pipeline", description: name },
 					field(`pipelines.${name}.description`),
 					field(`pipelines.${name}.model`),
 					field(`pipelines.${name}.sandbox`),
-					...stepItems,
-					{ value: `add-pipeline-step:${name}`, label: "Add step", description: "Append a worker step to this pipeline" },
+					...graphNodeItems(name, pipeline?.nodes),
 					{ value: `delete-pipeline:${name}`, label: "Delete pipeline", description: "Remove this pipeline from the config" },
-				],
-			};
-		};
-
-		const pipelineStepScreen = (pipelineName: string, indexText: string): Screen => {
-			const stepIndex = Number(indexText);
-			const step = cfg.pipelines[pipelineName]?.steps?.[stepIndex];
-			return {
-				title: `PIPELINE / ${pipelineName} / STEP ${stepIndex + 1}`,
-				subtitle: "Step settings; leave model/sandbox empty to inherit runtime defaults",
-				items: [
-					field(`pipelines.${pipelineName}.steps.${stepIndex}.role`, "Role"),
-					field(`pipelines.${pipelineName}.steps.${stepIndex}.description`),
-					field(`pipelines.${pipelineName}.steps.${stepIndex}.model`),
-					field(`pipelines.${pipelineName}.steps.${stepIndex}.sandbox`),
-					field(`pipelines.${pipelineName}.steps.${stepIndex}.maxIterations`),
-					field(`pipelines.${pipelineName}.steps.${stepIndex}.prompt`, "Prompt"),
-					{ value: `delete-pipeline-step:${pipelineName}:${stepIndex}`, label: "Delete step", description: `Remove ${step?.role || "this"} step from the pipeline` },
 				],
 			};
 		};
@@ -3194,10 +3819,6 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 			if (key.startsWith("agent:")) return agentScreen(key.slice("agent:".length));
 			if (key === "pipelines") return pipelinesScreen();
 			if (key.startsWith("pipeline:")) return pipelineScreen(key.slice("pipeline:".length));
-			if (key.startsWith("pipeline-step:")) {
-				const [, pipelineName, indexText] = key.split(":");
-				return pipelineStepScreen(pipelineName, indexText);
-			}
 			if (key === "actions") return actionsScreen();
 			if (key === "packs") return { title: "IMPORT BUNDLED TEMPLATE", subtitle: "Built-in templates replace the current draft; save on exit to write it", items: listConfigPacks().map((item) => ({ ...item, value: `pack:${item.value}` })) };
 			if (key === "confirm-pack") return { title: "CONFIRM IMPORT", subtitle: `Pack: ${pendingPack}`, items: [{ value: "action:apply-pack", label: `Import ${pendingPack}`, description: "Replace the current unsaved draft with this configuration" }, { value: "back", label: "Back", description: "Return to configuration imports" }] };
@@ -3244,8 +3865,6 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 			if (action.type === "add-pipeline") model.addPipeline(action.name);
 			if (action.type === "rename-pipeline") model.renamePipeline(action.oldName, action.newName);
 			if (action.type === "delete-pipeline") model.deletePipeline(action.name);
-			if (action.type === "add-pipeline-step") model.addPipelineStep(action.pipeline);
-			if (action.type === "delete-pipeline-step") model.deletePipelineStep(action.pipeline, action.index);
 		};
 
 		const rebuildModelFromPendingActions = () => {
@@ -3325,8 +3944,6 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 			if (value.startsWith("text:rename-pipeline:")) return beginTextAction("rename-pipeline", "RENAME PIPELINE", { oldName: value.slice("text:rename-pipeline:".length) }, value.slice("text:rename-pipeline:".length));
 			if (value.startsWith("delete-agent:")) { const name = value.slice("delete-agent:".length); model.deleteAgent(name); route = ["main", "agents"]; return queueAction({ type: "delete-agent", name }); }
 			if (value.startsWith("delete-pipeline:")) { const name = value.slice("delete-pipeline:".length); model.deletePipeline(name); route = ["main", "pipelines"]; return queueAction({ type: "delete-pipeline", name }); }
-			if (value.startsWith("add-pipeline-step:")) { const pipeline = value.slice("add-pipeline-step:".length); model.addPipelineStep(pipeline); return queueAction({ type: "add-pipeline-step", pipeline }); }
-			if (value.startsWith("delete-pipeline-step:")) { const [, pipeline, indexText] = value.split(":"); const index = Number(indexText); model.deletePipelineStep(pipeline, index); route = ["main", "pipelines", `pipeline:${pipeline}`]; return queueAction({ type: "delete-pipeline-step", pipeline, index }); }
 			if (value.startsWith("pack:")) { pendingPack = value.slice(5); return replace("confirm-pack"); }
 			if (value.startsWith("editor:")) { setPreferredEditor(ctx.cwd, value.slice(7)); route = ["main", "actions"]; selected = 0; ctx.ui.notify(`Preferred Agent Workflows config editor set to: ${value.slice(7)}`, "success"); return tui.requestRender(); }
 			if (value === "action:init") { replaceDraftConfig(DEFAULT_CONFIG); return; }
@@ -3480,6 +4097,7 @@ export default function agentWorkflows(
 	let configImageRebuild: Promise<void> | undefined;
 	const sandcastle = deps.sandcastle ?? createDefaultSandcastleRunCapability();
 	const backlogDeps = deps.work || deps.backlog || {};
+	let widgetRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 	const isConfigImageRebuildInProgress = () => !!configImageRebuild;
 	const startConfigImageRebuild = (ctx: any, cfg: SandcastleConfig) => {
 		const provider = imageProviderForSandbox(cfg.defaultSandbox) || "docker";
@@ -3499,6 +4117,13 @@ export default function agentWorkflows(
 
 	function refreshWidget() {
 		widgetCtx?.ui.setWidget("agent-workflows", renderWidget(runs));
+		if ([...runs.values()].some((run) => run.status === "running") && !widgetRefreshTimer) {
+			widgetRefreshTimer = setTimeout(() => {
+				widgetRefreshTimer = undefined;
+				refreshWidget();
+			}, 1000);
+			widgetRefreshTimer.unref?.();
+		}
 	}
 
 	function helpText(): string {
@@ -3506,7 +4131,10 @@ export default function agentWorkflows(
 
 Setup and configuration:
   /work:config [show|init|edit|editor|get|set|reset|validate]
-    Open the friendly config TUI, or run raw config utility actions when arguments are supplied.
+    Open the friendly graph-aware config TUI, or run config utility subcommands.
+
+  /work:config-raw show|init|edit|editor|get|set|reset|validate
+    Deprecated compatibility alias for /work:config subcommands.
 
 Execution utilities:
   /work:build-image [docker|podman]
@@ -3516,7 +4144,7 @@ Execution utilities:
     Run one configured Role directly.
 
   /work:pipeline <pipeline> [prompt]
-    Run a fixed-domain runtime Pipeline directly.
+    Run a graph-native runtime Pipeline directly.
 
 Work views and processing:
   /work:list [query]
@@ -3532,7 +4160,7 @@ Work views and processing:
     Plan the next Work iteration.
 
   /work:process [query] --pipeline <pipeline>
-    Start durable Work processing through the execution runtime adapter.
+    Start durable Work processing through graph lanes, per-lane worktrees, and the runtime adapter.
 
   /work:runs|status|resume
     Manage durable Work Process runs.`;
@@ -3555,23 +4183,32 @@ Work views and processing:
 	}
 
 
+	function renderReadyWork(plan: BacklogPlanResult): string {
+		const lines = [`Query: ${plan.query || "(none)"}`];
+		for (const [iterationIndex, iteration] of plan.iterations.entries()) {
+			lines.push(`Iteration ${iterationIndex + 1}: ${iteration.supportsParallel ? "parallel" : "sequential"} — ${iteration.rationale}`);
+			for (const item of iteration.items) lines.push(`- ${item.id}: ${item.title}${item.sourcePath ? ` (${item.sourcePath})` : ""}${item.summary ? ` — ${item.summary}` : ""}`);
+		}
+		return lines.join("\n");
+	}
+
+	async function readConfiguredReadyWork(cwd: string, args: string): Promise<string> {
+		if (backlogDeps.ready) return backlogDeps.ready(cwd, args);
+		const cfg = await loadConfig(cwd);
+		if ((cfg.workSource || cfg.issueTracker) === "doc-vader") return (await runProcess(cwd, "dv", ["work", "ready", ...tokenizeCommandArgs(args)])).stdout.trim();
+		return renderReadyWork(await planBacklogProcessing(cwd, args));
+	}
+
 	async function runPlannerPhase(args: string, ctx: any): Promise<any> {
 		const cfg = await loadConfig(ctx.cwd);
 		const agent = selectPlanWorkRoleName(cfg);
-		const readyOutput = backlogDeps.ready
-			? await backlogDeps.ready(ctx.cwd, args)
-			: (await runProcess(ctx.cwd, "dv", ["work", "ready"])).stdout.trim();
-		const snapshotCwd = createPlannerSnapshot(ctx.cwd);
-		try {
-			const task = `Run the Work planning phase for this repository.\n\nGuardrails: you are running inside a disposable planner snapshot. Do not attempt to update the source repository, create branches for execution, or perform Work Source mutations. Any filesystem changes you make are discarded after planning.\n\nRequested plan arguments: ${args || "(none)"}\n\nReady Work input from the configured Work Source:\n${readyOutput}\n\nReturn an authoritative Work Plan JSON object with an iterations array, item ids, dependency/classification/risk rationale, and any HITL constraints. Do not author execution mechanics such as pipeline names or branch names. End with <promise>COMPLETE</promise>.`;
-			if (backlogDeps.runPlanWorkRole) return backlogDeps.runPlanWorkRole({ cwd: ctx.cwd, args, role: agent, task, snapshotCwd, ctx });
-			const run = await dispatch(ctx.cwd, agent, task, ctx, { executionCwd: snapshotCwd, branchPrefix: "agent-workflows/planner" });
-			await new Promise<void>((resolve) => run.proc?.on("close", () => resolve()));
-			if (run.status !== "done") throw new Error(`Planner role failed: ${run.lastLine}`);
-			return JSON.parse(readFileSync(run.resultPath!, "utf8"));
-		} finally {
-			rmSync(snapshotCwd, { recursive: true, force: true });
-		}
+		const readyOutput = await readConfiguredReadyWork(ctx.cwd, args);
+		const task = `Run the Work planning phase for this repository.\n\nGuardrails: you are running inside an isolated planner workspace created through the normal execution engine. Do not attempt to update the source repository, create branches for execution, or perform Work Source mutations. Any filesystem changes you make are discarded after planning.\n\nRequested plan arguments: ${args || "(none)"}\n\nMax workers available for a single parallel iteration: ${cfg.maxWorkers || 5}. When selecting unblocked-ready-AFK work, plan no more than this many independently executable items in one actionable iteration.\n\nReady Work input from the configured Work Source:\n${readyOutput}\n\nReturn one authoritative Work Plan JSON object using kind \"workPlan\" and scope \"forecast\". Include an actionable Work Plan at field actionable with scope \"actionable\" containing only currently executable work from the Ready Work input. The top-level forecast iterations may map future waves that could become unblocked after earlier iterations complete, but forecast waves are advisory only. Each iteration must contain an items array of objects such as {\"id\": \"wi-001\"}; do not return bare string item ids. Each iteration rationale must be a string; if you have dependency/classification/risk rationale, combine it into one readable rationale string or put details in classifications. Include any HITL constraints and blocked/deferred work summaries when relevant. Do not author execution mechanics such as pipeline names or branch names. End with <promise>COMPLETE</promise>.`;
+		if (backlogDeps.runPlanWorkRole) return backlogDeps.runPlanWorkRole({ cwd: ctx.cwd, args, role: agent, task, ctx });
+		const run = await dispatch(ctx.cwd, agent, task, ctx, { branchPrefix: "agent-workflows/planner" });
+		await new Promise<void>((resolve) => run.proc?.on("close", () => resolve()));
+		if (run.status !== "done") throw new Error(`Planner role failed: ${run.lastLine}`);
+		return JSON.parse(readFileSync(run.resultPath!, "utf8"));
 	}
 
 	async function notifyBacklogPlan(args: string, ctx: any, overrides?: { iterations?: number }): Promise<void> {
@@ -3597,16 +4234,15 @@ Work views and processing:
 
 	async function notifyBacklogReady(args: string, ctx: any): Promise<void> {
 		try {
-			const output = backlogDeps.ready
-				? await backlogDeps.ready(ctx.cwd, args)
-				: (await runProcess(ctx.cwd, "dv", ["work", "ready", ...tokenizeCommandArgs(args)])).stdout.trim();
+			const output = await readConfiguredReadyWork(ctx.cwd, args);
 			ctx.ui.notify(output || "No ready work candidates.", "info");
 		} catch (error) {
 			ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 		}
 	}
 
-	async function dispatch(cwd: string, agentName: string, task: string, ctx?: any, options: { executionCwd?: string; branchPrefix?: string } = {}): Promise<RunState> {
+	async function dispatch(cwd: string, agentName: string, task: string, ctx?: any, options: { branchPrefix?: string } = {}): Promise<RunState> {
+		assertSandcastleWorkspaceSource(cwd);
 		ensureScaffold(cwd, { hydrate: false });
 		const cfg = await loadConfig(cwd);
 		const agent = cfg.agents[agentName];
@@ -3617,18 +4253,23 @@ Work views and processing:
 		const branch = agent.branch || `${options.branchPrefix || "sandcastle"}/${agentName}/${id}`;
 		const jobPath = join(cwd, JOBS_DIR, `${id}.json`);
 		const runtime = resolveAgentRuntimeSettings(agent, cfg);
+		const hostPiRuntime = runtime.provider === "pi" ? createHostPiAgentRuntime() : undefined;
 		const job = {
 			id,
 			name: `${agentName}:${id}`,
 			agent: agentName,
-			cwd: options.executionCwd || cwd,
+			cwd,
 			model: runtime.model,
 			provider: runtime.provider,
 			sandbox: runtime.sandbox,
 			imageName: defaultSandcastleImageName(cwd, cfg.imageNamePattern),
+			hostPiConfig: runtime.provider === "pi",
+			hostPiAgentDir: hostPiRuntime?.dir,
+			hostPiFileMounts: hostPiRuntime?.fileMounts,
 			systemPrompt: agent.systemPrompt || "",
 			prompt: task,
-			maxIterations: agent.maxIterations || 1,
+			maxIterations: agent.maxIterations || cfg.maxIterations || 10,
+			outputKind: agent.kind === "planWork" ? "work-plan" : undefined,
 			branch,
 			copyToWorktree: agent.copyToWorktree,
 			logPath,
@@ -3647,6 +4288,7 @@ Work views and processing:
 				refreshWidget();
 			}, cfg);
 		} catch (error) {
+			if (hostPiRuntime?.dir) rmSync(hostPiRuntime.dir, { recursive: true, force: true });
 			state.status = "error";
 			state.lastLine = error instanceof Error ? error.message.slice(0, 120) : String(error).slice(0, 120);
 			refreshWidget();
@@ -3696,19 +4338,6 @@ Work views and processing:
 		return state;
 	}
 
-	async function runChain(cwd: string, chainName: string, original: string, ctx?: any): Promise<void> {
-		const cfg = await loadConfig(cwd);
-		const chain = cfg.chains[chainName];
-		if (!chain) throw new Error(`Unknown chain '${chainName}'. Chains: ${Object.keys(cfg.chains).join(", ")}`);
-		let input = original;
-		for (const step of chain) {
-			const prompt = step.prompt.replace(/\$INPUT/g, input).replace(/\$ORIGINAL/g, original);
-			const run = await dispatch(cwd, step.role, prompt, ctx);
-			await new Promise<void>((resolve) => run.proc?.on("close", () => resolve()));
-			if (run.status !== "done") break;
-			input = `Run ${run.id} completed. Branch: ${run.branch}. Commits: ${(run.commits || []).join(", ") || "none"}. Log: ${run.logPath}. Result: ${run.resultPath}.`;
-		}
-	}
 
 	async function delegateDefault(cwd: string, task: string, ctx?: any): Promise<void> {
 		const cfg = await loadConfig(cwd);
@@ -3807,6 +4436,61 @@ Work views and processing:
 		return results;
 	}
 
+	function pruneTerminalWidgetRows(): void {
+		let changed = false;
+		for (const [id, run] of runs.entries()) {
+			if (run.status === "done" || run.status === "error" || run.status === "cancelled") {
+				runs.delete(id);
+				changed = true;
+			}
+		}
+		if (changed) refreshWidget();
+	}
+
+	async function configuredWorkSourceMutationAdapter(cwd: string): Promise<WorkSourceMutationAdapter | undefined> {
+		if (backlogDeps.workSourceAdapter) return backlogDeps.workSourceAdapter;
+		const cfg = await loadConfig(cwd);
+		if ((cfg.workSource || cfg.issueTracker) === "doc-vader") return createDocVaderWorkSourceAdapter();
+		return undefined;
+	}
+
+	async function runWorkSourceMutations(input: {
+		cwd: string;
+		runId: string;
+		pipeline: string;
+		recordPath: string;
+		items: WorkItem[];
+	}): Promise<{ outcomes: WorkSourceMutationOutcome[]; failed: boolean }> {
+		const adapter = await configuredWorkSourceMutationAdapter(input.cwd);
+		const outcomes: WorkSourceMutationOutcome[] = [];
+		if (!adapter) return { outcomes, failed: false };
+		let failed = false;
+		for (const item of input.items) {
+			const itemId = item.id;
+			const context = { itemId, cwd: input.cwd, runId: input.runId, pipeline: input.pipeline, recordPath: input.recordPath, item };
+			if (adapter.validate) {
+				try {
+					await adapter.validate(context);
+					outcomes.push({ itemId, action: "validate", status: "succeeded" });
+				} catch (error) {
+					failed = true;
+					outcomes.push({ itemId, action: "validate", status: "failed", message: error instanceof Error ? error.message : String(error) });
+					continue;
+				}
+			}
+			if (adapter.close) {
+				try {
+					await adapter.close(context);
+					outcomes.push({ itemId, action: "close", status: "succeeded" });
+				} catch (error) {
+					failed = true;
+					outcomes.push({ itemId, action: "close", status: "failed", message: error instanceof Error ? error.message : String(error) });
+				}
+			}
+		}
+		return { outcomes, failed };
+	}
+
 	async function executeBacklogProcessing(
 		cwd: string,
 		input: {
@@ -3823,6 +4507,7 @@ Work views and processing:
 	): Promise<BacklogExecutionResult> {
 		if (backlogDeps.execute) return backlogDeps.execute(cwd, input);
 
+		pruneTerminalWidgetRows();
 		const contextByItemId = new Map(input.executionContexts.map((context) => [context.itemId, context]));
 		const runtimePrompt = [
 			`Work process ${input.runId}`,
@@ -3839,12 +4524,153 @@ Work views and processing:
 				return `- ${item.id} ${item.title} (${item.sourcePath})${item.summary ? ` — ${item.summary}` : ""}${context ? ` [context ${context.contextId}]` : ""}`;
 			}),
 		].join("\n");
-		const pipelineRun = await executePipeline(cwd, input.pipeline, runtimePrompt, { ...deps.pipeline, image: deps.pipeline?.image || deps.image });
-		return {
-			branches: [pipelineRun.branch].filter((branch): branch is string => !!branch),
-			logs: [pipelineRun.logDir].filter((logPath): logPath is string => !!logPath),
-			status: pipelineRun.status === "completed" ? "done" : "error",
+		const statusRows = new Map<number, RunState[]>();
+		const cfg = await loadConfig(cwd);
+		const processPipeline = cfg.pipelines[input.pipeline];
+		const useGraphStatusRows = Boolean(processPipeline && pipelineHasGraphNodes(processPipeline));
+		if (!useGraphStatusRows) {
+			for (const [index, step] of (processPipeline?.steps || []).entries()) {
+				const parallelSlots = input.parallel && step.role === "implementer" ? Math.max(1, Number(cfg.maxWorkers || 5)) : 1;
+				const rows = Array.from({ length: parallelSlots }, (_, fanoutIndex) => {
+					const item = input.parallel && step.role === "implementer" ? input.items[fanoutIndex] : undefined;
+					const suffix = item ? `-${sanitizePathSegment(item.id)}` : parallelSlots > 1 ? `-slot-${fanoutIndex + 1}` : "";
+					const row: RunState = {
+						id: `${input.runId}-worker-${index + 1}${suffix}`,
+						agent: step.role,
+						task: `Work process ${input.runId} · pipeline ${input.pipeline} · worker ${index + 1}`,
+						status: "queued",
+						startedAt: Date.now(),
+						lastLine: item ? `waiting for ${item.id}` : parallelSlots > 1 ? `waiting for parallel slot ${fanoutIndex + 1}` : `waiting for step ${index + 1}`,
+					};
+					runs.set(row.id, row);
+					return row;
+				});
+				statusRows.set(index, rows);
+			}
+		}
+		if (statusRows.size) refreshWidget();
+		const updateWorkerStatus = (step: PipelineRunStepRecord) => {
+			let rows = statusRows.get(step.index);
+			if (!rows?.length) {
+				const row: RunState = {
+					id: `${input.runId}-worker-${step.index + 1}`,
+					agent: step.role,
+					task: `Work process ${input.runId} · pipeline ${input.pipeline} · worker ${step.index + 1}`,
+					status: "queued",
+					startedAt: Date.now(),
+					lastLine: `waiting for step ${step.index + 1}`,
+				};
+				rows = [row];
+				statusRows.set(step.index, rows);
+				runs.set(row.id, row);
+			}
+			for (const row of rows) {
+				const nextStatus = step.status === "completed" ? "done" : step.status === "failed" ? "error" : "running";
+				const terminal = row.status === "done" || row.status === "error" || row.status === "cancelled";
+				if (terminal && nextStatus === "running") continue;
+				row.agent = step.role;
+				row.status = nextStatus;
+				if ((nextStatus === "done" || nextStatus === "error") && row.endedAt === undefined) row.endedAt = Date.now();
+				if (nextStatus === "running") row.endedAt = undefined;
+				row.branch = step.branch;
+				row.commits = step.commits;
+				row.logPath = step.logPath;
+				row.kind = step.kind;
+				row.nodePath = step.nodePath;
+				row.laneId = step.laneId;
+				row.itemId = step.itemId;
+				if (step.status === "running" && row.lastLine.startsWith("waiting")) row.lastLine = `started${step.maxIterations ? ` · iter 0/${step.maxIterations}` : ""}`;
+				if (step.status === "completed") row.lastLine = step.commits?.length ? `completed · ${step.commits.length} commit(s)` : "completed · no changes";
+				if (step.status === "failed") row.lastLine = step.error ? `failed · ${compactStatusText(step.error, 96)}` : "failed";
+			}
+			refreshWidget();
 		};
+		try {
+			const workSourceHookState: { mutations?: WorkSourceMutationOutcome[] } = {};
+			const pipelineRun = await executePipeline(cwd, input.pipeline, runtimePrompt, {
+				...deps.pipeline,
+				graphInput: {
+					prompt: runtimePrompt,
+					query: input.query,
+					items: input.items,
+					executionContexts: input.executionContexts,
+					executionGroups: input.executionGroups,
+				},
+				image: deps.pipeline?.image || deps.image,
+				graphHookNamespaces: {
+					...(deps.pipeline?.graphHookNamespaces || {}),
+					work: { ...providerNamespaceValue(deps.pipeline?.graphHookNamespaces, "work"), mutations: workSourceHookState.mutations ||= [] },
+				},
+				onStepUpdate: (step, record) => {
+					updateWorkerStatus(step);
+					deps.pipeline?.onStepUpdate?.(step, record);
+				},
+				onStepStreamEvent: (step, event, record) => {
+					updateWorkerStatus(step);
+					const rows = statusRows.get(step.index) || [];
+					const status = formatAgentStreamStatus(event, step.maxIterations);
+					if (status) {
+						for (const row of rows) if (row.status === "running") row.lastLine = status;
+						refreshWidget();
+					}
+					deps.pipeline?.onStepStreamEvent?.(step, event, record);
+				},
+			});
+			let executionResult: BacklogExecutionResult;
+			if (pipelineRun.executor === "graph") {
+				const nodeBranches = Array.from(new Set((pipelineRun.nodes || []).map((node) => node.branch).filter((branch): branch is string => !!branch)));
+				const nodeLogs = Array.from(new Set([
+					...pipelineRun.steps.map((step) => step.logPath),
+					...(pipelineRun.nodes || []).map((node) => node.logPath),
+				].filter((logPath): logPath is string => !!logPath)));
+				executionResult = {
+					branches: nodeBranches,
+					logs: nodeLogs,
+					workerStatuses: (pipelineRun.nodes || []).map((node, index) => ({
+						index,
+						role: node.role || node.kind,
+						status: node.status,
+						branch: node.branch,
+						commits: node.commits || [],
+						logPath: node.logPath,
+						error: undefined,
+						nodePath: node.nodePath,
+						kind: node.kind,
+						laneId: node.laneId,
+						itemId: node.itemId,
+					})),
+					status: pipelineRun.status === "completed" ? "done" : "error",
+				};
+			} else {
+				executionResult = {
+					branches: [pipelineRun.branch].filter((branch): branch is string => !!branch),
+					logs: pipelineRun.steps.map((step) => step.logPath).filter((logPath): logPath is string => !!logPath),
+					workerStatuses: pipelineRun.steps.map((step) => ({ index: step.index, role: step.role, status: step.status, branch: step.branch, commits: step.commits, logPath: step.logPath, error: step.error })),
+					status: pipelineRun.status === "completed" ? "done" : "error",
+				};
+			}
+			if (workSourceHookState.mutations?.length) {
+				executionResult.workSourceMutations = workSourceHookState.mutations;
+				if (workSourceHookState.mutations.some((mutation) => mutation.status === "failed")) executionResult.status = "error";
+			} else if (executionResult.status === "done") {
+				const mutationResult = await runWorkSourceMutations({ cwd, runId: input.runId, pipeline: input.pipeline, recordPath: input.recordPath, items: input.items });
+				if (mutationResult.outcomes.length) executionResult.workSourceMutations = mutationResult.outcomes;
+				if (mutationResult.failed) executionResult.status = "error";
+			}
+			return executionResult;
+		} catch (error) {
+			for (const rows of statusRows.values()) {
+				for (const row of rows) {
+					if (row.status === "running") {
+						row.status = "error";
+						row.endedAt = Date.now();
+						row.lastLine = error instanceof Error ? error.message.slice(0, 120) : String(error).slice(0, 120);
+					}
+				}
+			}
+			if (statusRows.size) refreshWidget();
+			throw error;
+		}
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -3884,7 +4710,7 @@ Work views and processing:
 				return;
 			}
 			const providerArg = args.trim().split(/\s+/).filter(Boolean)[0] as "docker" | "podman" | undefined;
-			const cfg = await loadConfig(ctx.cwd).catch(() => ({ defaultSandbox: DEFAULT_SANDBOX, prompts: {}, agents: {}, chains: {}, pipelines: {} }) as SandcastleConfig);
+			const cfg = await loadConfig(ctx.cwd).catch(() => ({ defaultSandbox: DEFAULT_SANDBOX, prompts: {}, agents: {}, pipelines: {} }) as SandcastleConfig);
 			const provider = providerArg || imageProviderForSandbox(cfg.defaultSandbox) || "docker";
 			if (provider !== "docker" && provider !== "podman") {
 				ctx.ui.notify("Usage: /work:build-image [docker|podman]", "error");
@@ -3903,11 +4729,137 @@ Work views and processing:
 		},
 	});
 
+	async function runConfigSubcommand(args: string, ctx: any, commandName = "/work:config"): Promise<void> {
+		const input = args.trim();
+			const [subcommand = "show", ...rest] = input ? input.split(/\s+/) : ["show"];
+			try {
+				switch (subcommand) {
+					case "show": {
+						const cfg = await loadConfig(ctx.cwd);
+						ctx.ui.notify(JSON.stringify(configForPresentation(cfg), null, 2), "info");
+						break;
+					}
+					case "init": {
+						const overwrite = rest.includes("--force") || rest.includes("--overwrite");
+						if (existsSync(join(ctx.cwd, CONFIG_PATH)) && !overwrite) {
+							ensureScaffold(ctx.cwd, { hydrate: false });
+							ctx.ui.notify(`${CONFIG_PATH} already exists. Use ${commandName} init --force to overwrite it with defaults.`, "warning");
+							break;
+						}
+						const result = ensureScaffold(ctx.cwd, { overwrite, hydrate: false });
+						const changeSummary = result.changes.length ? result.changes.join("; ") : "no changes needed";
+						const overwriteSummary = result.overwritten.length ? ` Overwrote: ${result.overwritten.join(", ")}.` : "";
+						ctx.ui.notify(`Agent Workflows config init complete: ${changeSummary}.${overwriteSummary} Rebuild the sandbox image separately when needed.`, "success");
+						break;
+					}
+					case "edit": {
+						const configPath = ensureScaffoldPath(ctx.cwd);
+						const editor = rest.join(" ").trim() || undefined;
+						if (ctx.mode === "tui" && ctx.ui?.custom) {
+							const exitCode = await ctx.ui.custom<number | null>((tui: any, _theme: any, _kb: any, done: (value: number | null) => void) => {
+								tui.stop();
+								process.stdout.write("\x1b[2J\x1b[H");
+								const status = runTerminalEditor(ctx.cwd, configPath, editor);
+								tui.start();
+								tui.requestRender(true);
+								done(status);
+								return { render: () => [], invalidate: () => {} };
+							});
+							ctx.ui.notify(exitCode === 0 ? `Edited ${CONFIG_PATH}.` : `Editor exited with code ${exitCode}.`, exitCode === 0 ? "success" : "error");
+						} else {
+							ctx.ui.notify(`Open ${configPath} in your editor, or run in TUI mode for /work:config edit.`, "info");
+						}
+						break;
+					}
+					case "editor": {
+						const editor = rest.join(" ").trim();
+						if (!editor) {
+							ctx.ui.notify(getPreferredEditor(ctx.cwd), "info");
+							break;
+						}
+						setPreferredEditor(ctx.cwd, editor);
+						ctx.ui.notify(`Preferred Agent Workflows config editor set to: ${editor}`, "success");
+						break;
+					}
+					case "get": {
+						const path = rest.shift();
+						if (!path) {
+							ctx.ui.notify("Usage: /work:config get <path>", "error");
+							break;
+						}
+						const cfg = configForPresentation(await loadConfig(ctx.cwd));
+						const value = readConfigValue(cfg, path);
+						if (value === undefined) {
+							ctx.ui.notify(`Unknown or unset config path '${path}'.`, "error");
+							break;
+						}
+						ctx.ui.notify(formatConfigValue(value), "info");
+						break;
+					}
+					case "set": {
+						const path = rest.shift();
+						const rawValue = rest.join(" ");
+						if (!path || !rawValue) {
+							ctx.ui.notify("Usage: /work:config set <path> <value>", "error");
+							break;
+						}
+						if (!supportedConfigPath(path)) {
+							ctx.ui.notify(`Unsupported config path '${path}'.`, "error");
+							break;
+						}
+						const current = readConfigText(ctx.cwd);
+						const updated = setConfigValueInText(current, path, parseScalar(rawValue));
+						writeConfigText(ctx.cwd, updated);
+						ctx.ui.notify(`Updated ${path}. Rebuild the sandbox image separately when needed.`, "success");
+						break;
+					}
+					case "reset": {
+						const path = rest.shift();
+						if (path && !supportedConfigPath(path)) {
+							ctx.ui.notify(`Unsupported config path '${path}'.`, "error");
+							break;
+						}
+						if (path && defaultConfigValue(path) === undefined) {
+							ctx.ui.notify(`Unsupported config path '${path}'.`, "error");
+							break;
+						}
+						const current = readConfigText(ctx.cwd);
+						const updated = resetConfigText(current, path);
+						writeConfigText(ctx.cwd, updated);
+						ctx.ui.notify(path ? `Reset ${path} to defaults. Rebuild the sandbox image separately when needed.` : "Reset supported config paths to defaults. Rebuild the sandbox image separately when needed.", "success");
+						break;
+					}
+					case "validate": {
+						let cfg: SandcastleConfig;
+						try {
+							cfg = await loadExistingConfig(ctx.cwd);
+						} catch {
+							cfg = { prompts: {}, agents: {}, pipelines: {} };
+						}
+						const issues = validateConfig(ctx.cwd, cfg);
+						if (issues.length) ctx.ui.notify(`Agent Workflows config validation failed:\n- ${issues.join("\n- ")}`, "error");
+						else ctx.ui.notify("Agent Workflows config validation passed.", "success");
+						break;
+					}
+					default:
+						ctx.ui.notify(`Unknown /work:config subcommand '${subcommand}'. Use show, init, edit, editor, get, set, reset, or validate.`, "error");
+				}
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			}
+			refreshWidget();
+	}
+
 	pi.registerCommand("work:config", {
-		description: "Open the friendly Agent Workflows configuration BIOS",
-		handler: async (_args, ctx) => {
+		description: "Configure Agent Workflows: /work:config [show|init|edit|editor|get|set|reset|validate]",
+		getArgumentCompletions: (prefix: string) => scConfigCompletionItems(prefix),
+		handler: async (args, ctx) => {
+			if (args.trim()) {
+				await runConfigSubcommand(args, ctx, "/work:config");
+				return;
+			}
 			if (ctx.mode !== "tui" || !ctx.ui?.custom) {
-				ctx.ui.notify("/work:config requires TUI mode. Use /work:config-raw for terminal commands.", "error");
+				await runConfigSubcommand("show", ctx, "/work:config");
 				return;
 			}
 			const action = await showBacklogConfigTui(ctx);
@@ -3971,7 +4923,7 @@ Work views and processing:
 						ctx.ui.notify(issues.length ? `Agent Workflows config validation failed:\n- ${issues.join("\n- ")}` : "Agent Workflows config validation passed.", issues.length ? "error" : "success");
 					}
 					if (action.type === "build-image") {
-						const cfg = await loadConfig(ctx.cwd).catch(() => ({ defaultSandbox: DEFAULT_SANDBOX, prompts: {}, agents: {}, chains: {}, pipelines: {} }) as SandcastleConfig);
+						const cfg = await loadConfig(ctx.cwd).catch(() => ({ defaultSandbox: DEFAULT_SANDBOX, prompts: {}, agents: {}, pipelines: {} }) as SandcastleConfig);
 						const provider = imageProviderForSandbox(cfg.defaultSandbox) || "docker";
 						const imageName = defaultSandcastleImageName(ctx.cwd, cfg.imageNamePattern);
 						await ensureScaffoldForImageBuild(ctx.cwd, cfg, provider, (message, type) => ctx.ui.notify(message, type));
@@ -3995,132 +4947,15 @@ Work views and processing:
 	});
 
 	pi.registerCommand("work:config-raw", {
-		description: "Show, init, edit, reset, or validate Agent Workflows config",
+		description: "Deprecated alias for /work:config show|init|edit|editor|get|set|reset|validate",
 		getArgumentCompletions: (prefix: string) => scConfigCompletionItems(prefix),
 		handler: async (args, ctx) => {
-			const input = args.trim();
-			const [subcommand = "show", ...rest] = input ? input.split(/\s+/) : ["show"];
-			try {
-				switch (subcommand) {
-					case "show": {
-						const cfg = await loadConfig(ctx.cwd);
-						ctx.ui.notify(JSON.stringify(cfg, null, 2), "info");
-						break;
-					}
-					case "init": {
-						const overwrite = rest.includes("--force") || rest.includes("--overwrite");
-						if (existsSync(join(ctx.cwd, CONFIG_PATH)) && !overwrite) {
-							ensureScaffold(ctx.cwd, { hydrate: false });
-							ctx.ui.notify(`${CONFIG_PATH} already exists. Use /work:config-raw init --force to overwrite it with defaults.`, "warning");
-							break;
-						}
-						const result = ensureScaffold(ctx.cwd, { overwrite, hydrate: false });
-						const changeSummary = result.changes.length ? result.changes.join("; ") : "no changes needed";
-						const overwriteSummary = result.overwritten.length ? ` Overwrote: ${result.overwritten.join(", ")}.` : "";
-						ctx.ui.notify(`Agent Workflows config init complete: ${changeSummary}.${overwriteSummary} Rebuild the sandbox image separately when needed.`, "success");
-						break;
-					}
-					case "edit": {
-						const configPath = ensureScaffoldPath(ctx.cwd);
-						const editor = rest.join(" ").trim() || undefined;
-						if (ctx.mode === "tui" && ctx.ui?.custom) {
-							const exitCode = await ctx.ui.custom<number | null>((tui: any, _theme: any, _kb: any, done: (value: number | null) => void) => {
-								tui.stop();
-								process.stdout.write("\x1b[2J\x1b[H");
-								const status = runTerminalEditor(ctx.cwd, configPath, editor);
-								tui.start();
-								tui.requestRender(true);
-								done(status);
-								return { render: () => [], invalidate: () => {} };
-							});
-							ctx.ui.notify(exitCode === 0 ? `Edited ${CONFIG_PATH}.` : `Editor exited with code ${exitCode}.`, exitCode === 0 ? "success" : "error");
-						} else {
-							ctx.ui.notify(`Open ${configPath} in your editor, or run in TUI mode for /work:config edit.`, "info");
-						}
-						break;
-					}
-					case "editor": {
-						const editor = rest.join(" ").trim();
-						if (!editor) {
-							ctx.ui.notify(getPreferredEditor(ctx.cwd), "info");
-							break;
-						}
-						setPreferredEditor(ctx.cwd, editor);
-						ctx.ui.notify(`Preferred Agent Workflows config editor set to: ${editor}`, "success");
-						break;
-					}
-					case "get": {
-						const path = rest.shift();
-						if (!path) {
-							ctx.ui.notify("Usage: /work:config get <path>", "error");
-							break;
-						}
-						const cfg = await loadConfig(ctx.cwd);
-						const value = readConfigValue(cfg, path);
-						if (value === undefined) {
-							ctx.ui.notify(`Unknown or unset config path '${path}'.`, "error");
-							break;
-						}
-						ctx.ui.notify(formatConfigValue(value), "info");
-						break;
-					}
-					case "set": {
-						const path = rest.shift();
-						const rawValue = rest.join(" ");
-						if (!path || !rawValue) {
-							ctx.ui.notify("Usage: /work:config set <path> <value>", "error");
-							break;
-						}
-						if (!supportedConfigPath(path)) {
-							ctx.ui.notify(`Unsupported config path '${path}'.`, "error");
-							break;
-						}
-						const current = readConfigText(ctx.cwd);
-						const updated = setConfigValueInText(current, path, parseScalar(rawValue));
-						writeConfigText(ctx.cwd, updated);
-						ctx.ui.notify(`Updated ${path}. Rebuild the sandbox image separately when needed.`, "success");
-						break;
-					}
-					case "reset": {
-						const path = rest.shift();
-						if (path && !supportedConfigPath(path)) {
-							ctx.ui.notify(`Unsupported config path '${path}'.`, "error");
-							break;
-						}
-						if (path && defaultConfigValue(path) === undefined) {
-							ctx.ui.notify(`Unsupported config path '${path}'.`, "error");
-							break;
-						}
-						const current = readConfigText(ctx.cwd);
-						const updated = resetConfigText(current, path);
-						writeConfigText(ctx.cwd, updated);
-						ctx.ui.notify(path ? `Reset ${path} to defaults. Rebuild the sandbox image separately when needed.` : "Reset supported config paths to defaults. Rebuild the sandbox image separately when needed.", "success");
-						break;
-					}
-					case "validate": {
-						let cfg: SandcastleConfig;
-						try {
-							cfg = await loadExistingConfig(ctx.cwd);
-						} catch {
-							cfg = { prompts: {}, agents: {}, chains: {}, pipelines: {} };
-						}
-						const issues = validateConfig(ctx.cwd, cfg);
-						if (issues.length) ctx.ui.notify(`Agent Workflows config validation failed:\n- ${issues.join("\n- ")}`, "error");
-						else ctx.ui.notify("Agent Workflows config validation passed.", "success");
-						break;
-					}
-					default:
-						ctx.ui.notify(`Unknown /work:config subcommand '${subcommand}'. Use show, init, edit, editor, get, set, reset, or validate.`, "error");
-				}
-			} catch (error) {
-				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
-			}
-			refreshWidget();
+			await runConfigSubcommand(args, ctx, "/work:config-raw");
 		},
 	});
 
 	pi.registerCommand("work:pipeline", {
-		description: "Run a fixed-domain pipeline: /work:pipeline <pipeline> [prompt]",
+		description: "Run a graph-native pipeline: /work:pipeline <pipeline> [prompt]",
 		getArgumentCompletions: (prefix: string) => pipelineCompletionItems(tokenAfterLastSpace(prefix)),
 		handler: async (args, ctx) => {
 			if (isConfigImageRebuildInProgress()) {
@@ -4146,7 +4981,7 @@ Work views and processing:
 	});
 
 	pi.registerCommand("work:process", {
-		description: "Start durable Work processing: /work:process [query] --pipeline <pipeline>",
+		description: "Start durable graph Work processing: /work:process [query] --pipeline <pipeline>",
 		getArgumentCompletions: (prefix: string) => {
 			const pipelineMatch = prefix.match(/(?:^|\s)(?:--pipeline\s+|-p\s+)(\S*)$/);
 			if (pipelineMatch) return pipelineCompletionItems(pipelineMatch[1] || "");
@@ -4160,7 +4995,7 @@ Work views and processing:
 			try {
 				const { query, pipeline: explicitPipeline, planId } = parseBacklogProcessArgs(args);
 				const cfg = await loadConfig(ctx.cwd);
-				const { record: finalRecord, recordPath } = await runWorkProcess(
+				const { record: finalRecord, recordPath, advisoryNotes = [] } = await runWorkProcess(
 					{
 						cwd: ctx.cwd,
 						query,
@@ -4178,7 +5013,7 @@ Work views and processing:
 					},
 				);
 				ctx.ui.notify(
-					`Work process ${finalRecord.status}: ${finalRecord.id} · pipeline ${finalRecord.pipeline} · items ${finalRecord.resolvedItems.length} · record ${recordPath}${finalRecord.branches.length ? ` · branches ${finalRecord.branches.join(", ")}` : ""}${finalRecord.logs.length ? ` · logs ${finalRecord.logs.join(", ")}` : ""}`,
+					formatWorkProcessSummary({ record: finalRecord, recordPath, advisoryNotes }),
 					finalRecord.status === "done" ? "success" : "error",
 				);
 			} catch (error) {

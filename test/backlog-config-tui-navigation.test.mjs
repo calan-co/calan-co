@@ -37,10 +37,15 @@ function runTuiScript(body) {
       'pipelines:',
       '  simple-loop:',
       '    description: Simple loop',
-      '    steps:',
-      '      - role: worker',
-      '        prompt: |',
-      '          Do work.',
+      '    kind: composite',
+      '    nodes:',
+      '      workspace:',
+      '        kind: git.worktree',
+      '        nodes:',
+      '          run:',
+      '            kind: agent.pi',
+      '            role: worker',
+      '            prompt: simple-loop',
     ].join('\n'));
     writeFileSync(join(configDir, 'run-job.mjs'), '');
 
