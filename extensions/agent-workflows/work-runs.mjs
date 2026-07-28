@@ -373,6 +373,20 @@ function workerKey(worker) {
   return worker.laneId || worker.itemId || worker.branch;
 }
 
+function laneDepth(value) {
+  const nodeDepth = ((value.nodePath || "").match(/\.iterations\.\d+/g) || []).length;
+  const contextDepth = (value.laneId || "").split("/").filter((part) => /^\d+-\d+$/.test(part)).length;
+  return Math.max(0, Math.max(nodeDepth, contextDepth) - 1);
+}
+
+function laneIndent(value) {
+  return "  ".repeat(laneDepth(value));
+}
+
+function laneSortKey(value) {
+  return `${String(laneDepth(value)).padStart(3, "0")}:${value.nodePath || value.laneId || ""}`;
+}
+
 function formatWorkRunDetail(record) {
   const lines = [
     `Work process ${record.id}`,
@@ -399,7 +413,7 @@ function formatWorkRunDetail(record) {
   const displayWorkers = laneGroups.size
     ? [...laneGroups.values()].map((group) => group.find((worker) => worker.role === "reviewer") || group.find((worker) => worker.role === "implementer") || group.at(-1))
     : workers;
-  const rows = [...displayWorkers, ...nonLaneWorkers];
+  const rows = [...displayWorkers, ...nonLaneWorkers].sort((left, right) => laneSortKey(left).localeCompare(laneSortKey(right)));
   lines.push(`Execution workers: ${rows.length}`);
   for (const worker of rows) {
     const details = [
@@ -419,7 +433,7 @@ function formatWorkRunDetail(record) {
           : worker.status === "failed"
             ? worker.error ? `failed · ${String(worker.error).slice(0, 96)}` : "failed"
             : "running";
-    lines.push(`${String(worker.status || "").padEnd(9)} ${String(worker.role || "worker").padEnd(12)} 0s · ${details ? `${details}; ` : ""}${statusText}`);
+    lines.push(`${laneIndent(worker)}${String(worker.status || "").padEnd(9)} ${String(worker.role || "worker").padEnd(12)} 0s · ${details ? `${details}; ` : ""}${statusText}`);
   }
   if (record.branches?.length) lines.push("Approved changes merged:", ...record.branches.map((branch) => `  - ${branch}`));
   if (record.logs?.length) lines.push("Logs:", ...record.logs.map((log) => `  - ${log}`));

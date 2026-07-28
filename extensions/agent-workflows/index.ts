@@ -2209,6 +2209,20 @@ function workerKey(worker: { laneId?: string; itemId?: string; branch?: string }
 	return worker.laneId || worker.itemId || worker.branch;
 }
 
+function laneDepth(value: { nodePath?: string; laneId?: string }): number {
+	const nodeDepth = ((value.nodePath || "").match(/\.iterations\.\d+/g) || []).length;
+	const laneDepth = (value.laneId || "").split("/").filter((part) => /^\d+-\d+$/.test(part)).length;
+	return Math.max(0, Math.max(nodeDepth, laneDepth) - 1);
+}
+
+function laneIndent(value: { nodePath?: string; laneId?: string }): string {
+	return "  ".repeat(laneDepth(value));
+}
+
+function laneSortKey(value: { nodePath?: string; laneId?: string; startedAt?: number }): string {
+	return `${String(laneDepth(value)).padStart(3, "0")}:${value.nodePath || value.laneId || String(value.startedAt || 0)}`;
+}
+
 function formatWorkerStatusText(step: WorkProcessRunRecord["workerStatuses"][number], capturedCommits: number): string {
 	const review = step.role === "reviewer" ? extractReviewOutcome(step.logPath) : {};
 	if (review.decision === "rejected") return `rejected${capturedCommits ? ` · captured ${capturedCommits} commit(s) on lane branch` : ""}${review.summary ? ` · ${review.summary}` : ""}`;
@@ -2237,7 +2251,9 @@ function formatPipelineWorkerRows(record: Pick<WorkProcessRunRecord, "workerStat
 	const displayWorkers = laneGroups.size
 		? [...laneGroups.values()].map((group) => group.find((worker) => worker.role === "reviewer") || group.find((worker) => worker.role === "implementer") || group.at(-1)!)
 		: workers;
-	return [...displayWorkers, ...nonLaneWorkers].map((step) => {
+	return [...displayWorkers, ...nonLaneWorkers]
+		.sort((left, right) => laneSortKey(left).localeCompare(laneSortKey(right)))
+		.map((step) => {
 		const details = [
 			step.itemId ? `item ${step.itemId}` : undefined,
 			step.nodePath ? `node ${step.nodePath}` : undefined,
@@ -2245,7 +2261,7 @@ function formatPipelineWorkerRows(record: Pick<WorkProcessRunRecord, "workerStat
 		].filter(Boolean).join("; ");
 		const key = workerKey(step);
 		const capturedCommits = key ? laneCommits.get(key) || 0 : 0;
-		return `${step.status.padEnd(9)} ${step.role.padEnd(12)} 0s · ${details ? `${details}; ` : ""}${formatWorkerStatusText(step, capturedCommits)}`;
+		return `${laneIndent(step)}${step.status.padEnd(9)} ${step.role.padEnd(12)} 0s · ${details ? `${details}; ` : ""}${formatWorkerStatusText(step, capturedCommits)}`;
 	});
 }
 
@@ -3490,13 +3506,13 @@ function renderWidget(runs: Map<string, RunState>): string[] {
 	const active = [...grouped.values()].map((group) => {
 		const running = group.filter((run) => run.status === "running").sort((a, b) => b.startedAt - a.startedAt)[0];
 		return running || group.sort((a, b) => b.startedAt - a.startedAt)[0];
-	}).sort((a, b) => b.startedAt - a.startedAt).slice(0, 8);
+	}).sort((a, b) => laneSortKey(a).localeCompare(laneSortKey(b))).slice(0, 8);
 	const lines = [`Execution workers: ${grouped.size}`];
 	for (const run of active) {
 		const ageSource = run.endedAt || Date.now();
 		const age = Math.max(0, Math.round((ageSource - run.startedAt) / 1000));
 		const commits = run.commits?.length ? ` · ${run.commits.length} commit(s)` : "";
-		lines.push(`${run.status.padEnd(9)} ${run.agent.padEnd(12)} ${age}s · ${formatRunStateLine(run)}${commits}`);
+		lines.push(`${laneIndent(run)}${run.status.padEnd(9)} ${run.agent.padEnd(12)} ${age}s · ${formatRunStateLine(run)}${commits}`);
 	}
 	return lines;
 }
