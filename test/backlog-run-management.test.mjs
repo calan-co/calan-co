@@ -187,21 +187,25 @@ test('status shows lane-captured commits and rejected review reason', async () =
   });
 });
 
-test('status indents nested parallel lanes beneath parent lanes', async () => {
+test('status indents nested parallel lanes beneath parent lanes without overwriting parent', async () => {
   const record = backlogRun({
     status: 'running',
     workerStatuses: [
-      { index: 0, role: 'reviewer', kind: 'agent.pi', status: 'running', itemId: 'parent', laneId: 'run/parent/0-0', nodePath: 'root.nodes.outer.iterations.0.nodes.review', commits: [] },
-      { index: 1, role: 'implementer', kind: 'agent.pi', status: 'running', itemId: 'child', laneId: 'run/parent/0-0/child/0-0', nodePath: 'root.nodes.outer.iterations.0.nodes.inner.iterations.0.nodes.implement', commits: [] },
+      { index: 0, role: 'planner', kind: 'agent.pi', status: 'completed', itemId: 'wi-parent', laneId: 'run/wi-parent/0-0', nodePath: 'root.nodes.plan.iterations.0.nodes.plan', commits: [] },
+      { index: 1, role: 'implementer', kind: 'agent.pi', status: 'running', itemId: 'wi-parent', laneId: 'run/wi-parent/0-0', nodePath: 'root.nodes.plan.iterations.0.nodes.implement.iterations.0.nodes.implement', commits: [] },
+      { index: 2, role: 'merger', kind: 'git.merge', status: 'running', nodePath: 'root.nodes.merge', commits: [] },
     ],
   });
   const lines = formatStatusSelection({ kind: 'record', record, inference: 'latest' }).split('\n');
-  const parentIndex = lines.findIndex((line) => /item parent/.test(line));
-  const childIndex = lines.findIndex((line) => /item child/.test(line));
-  assert.ok(parentIndex > -1, 'missing parent lane row');
-  assert.ok(childIndex > parentIndex, 'nested lane should appear beneath parent lane');
-  assert.match(lines[parentIndex], /^running\s+reviewer/);
-  assert.match(lines[childIndex], /^  running\s+implementer/);
+  const plannerIndex = lines.findIndex((line) => /planner/.test(line));
+  const implementerIndex = lines.findIndex((line) => /implementer/.test(line));
+  const mergerIndex = lines.findIndex((line) => /merger/.test(line));
+  assert.ok(plannerIndex > -1, 'missing parent planner lane row');
+  assert.ok(implementerIndex > plannerIndex, 'nested implementer lane should appear beneath planner lane');
+  assert.ok(mergerIndex > implementerIndex, 'merger should appear beneath child lanes');
+  assert.match(lines[plannerIndex], /^completed\s+planner/);
+  assert.match(lines[implementerIndex], /^  running\s+implementer/);
+  assert.match(lines[mergerIndex], /^running\s+merger/);
 });
 
 test('selects resumable backlog runs and rejects non-resumable ones', async () => {

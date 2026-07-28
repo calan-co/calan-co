@@ -384,7 +384,13 @@ function laneIndent(value) {
 }
 
 function laneSortKey(value) {
-  return `${String(laneDepth(value)).padStart(3, "0")}:${value.nodePath || value.laneId || ""}`;
+  const order = Number.isFinite(value.index) ? Number(value.index) : Number(value.startedAt || 0);
+  return `${String(order).padStart(12, "0")}:${value.nodePath || value.laneId || ""}`;
+}
+
+function displayLaneKey(worker) {
+  const key = workerKey(worker);
+  return key ? `${key}|depth:${laneDepth(worker)}` : undefined;
 }
 
 function formatWorkRunDetail(record) {
@@ -406,7 +412,7 @@ function formatWorkRunDetail(record) {
   const laneGroups = new Map();
   const nonLaneWorkers = [];
   for (const worker of workers) {
-    const key = workerKey(worker);
+    const key = displayLaneKey(worker);
     if (key) laneGroups.set(key, [...(laneGroups.get(key) || []), worker]);
     else if (!["composite", "loop"].includes(worker.kind || "")) nonLaneWorkers.push(worker);
   }
