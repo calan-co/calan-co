@@ -6,7 +6,7 @@ import test from 'node:test';
 
 import agentWorkflows from '../extensions/agent-workflows/index.ts';
 
-async function setupProcessGraphRepo({ noEffects = false, includeLegacySyntheticStep = false, actualRole = 'implementer' } = {}) {
+async function setupProcessGraphRepo({ noEffects = false, actualRole = 'implementer' } = {}) {
   const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-process-graph-'));
   await fs.mkdir(path.join(repoRoot, '.pi/sandcastle'), { recursive: true });
   await fs.writeFile(path.join(repoRoot, '.pi/sandcastle/config.yaml'), [
@@ -29,11 +29,6 @@ async function setupProcessGraphRepo({ noEffects = false, includeLegacySynthetic
     '    branchStrategy:',
     '      type: branch',
     '      branch: sandcastle/graph-process',
-    ...(includeLegacySyntheticStep ? [
-    '    steps:',
-    '      - role: implementer',
-    '        prompt: $INPUT',
-    ] : []),
     '    nodes:',
     '      work:',
     '        kind: loop',
@@ -169,8 +164,8 @@ test('work:process executes graph pipelines and records context-bound lane statu
     }
 
     const message = notifications.at(-1).message;
-    assert.match(message, /Worker \d+: implementer completed; item wi-1; node root\.nodes\.work\.iterations\.0\.nodes\.implement; lane [^;]+; branch agent-workflows\/graph-process\/[^\s;]+\/wi-1; commits sha-1; log /);
-    assert.match(message, /Worker \d+: implementer completed; item wi-2; node root\.nodes\.work\.iterations\.1\.nodes\.implement; lane [^;]+; branch agent-workflows\/graph-process\/[^\s;]+\/wi-2; commits sha-2; log /);
+    assert.match(message, /✓ Worker \d+: implementer completed — item wi-1 · node root\.nodes\.work\.iterations\.0\.nodes\.implement · lane [^·]+ · branch agent-workflows\/graph-process\/[^\s·]+\/wi-1 · commits sha-1 · log /);
+    assert.match(message, /✓ Worker \d+: implementer completed — item wi-2 · node root\.nodes\.work\.iterations\.1\.nodes\.implement · lane [^·]+ · branch agent-workflows\/graph-process\/[^\s·]+\/wi-2 · commits sha-2 · log /);
 
     const [pipelineRecord] = await readPipelineRecords(repoRoot);
     assert.equal(pipelineRecord.executor, 'graph');
@@ -183,14 +178,14 @@ test('work:process executes graph pipelines and records context-bound lane statu
 });
 
 test('work:process graph status rows use actual graph lane agents instead of synthetic step roles', async () => {
-  const { repoRoot, commands, ctx, notifications, widgets } = await setupProcessGraphRepo({ includeLegacySyntheticStep: true, actualRole: 'worker' });
+  const { repoRoot, commands, ctx, notifications, widgets } = await setupProcessGraphRepo({ actualRole: 'worker' });
   try {
     await commands.get('work:process').handler('graph', ctx);
 
     const message = notifications.at(-1).message;
-    assert.match(message, /Worker \d+: worker completed; item wi-1; node root\.nodes\.work\.iterations\.0\.nodes\.implement; lane [^;]+; branch agent-workflows\/graph-process\/[^\s;]+\/wi-1; commits sha-1; log /);
-    assert.match(message, /Worker \d+: worker completed; item wi-2; node root\.nodes\.work\.iterations\.1\.nodes\.implement; lane [^;]+; branch agent-workflows\/graph-process\/[^\s;]+\/wi-2; commits sha-2; log /);
-    assert.doesNotMatch(message, /Worker \d+: implementer /, 'graph summary must not include stale legacy implementer rows');
+    assert.match(message, /✓ Worker \d+: worker completed — item wi-1 · node root\.nodes\.work\.iterations\.0\.nodes\.implement · lane [^·]+ · branch agent-workflows\/graph-process\/[^\s·]+\/wi-1 · commits sha-1 · log /);
+    assert.match(message, /✓ Worker \d+: worker completed — item wi-2 · node root\.nodes\.work\.iterations\.1\.nodes\.implement · lane [^·]+ · branch agent-workflows\/graph-process\/[^\s·]+\/wi-2 · commits sha-2 · log /);
+    assert.doesNotMatch(message, /Worker \d+: implementer /, 'graph summary must not include stale synthetic implementer rows');
 
     const allWidgetLines = widgets.flatMap((entry) => entry.lines);
     assert.ok(allWidgetLines.some((line) => /\bworker\s+\d+s · item wi-1; node root\.nodes\.work\.iterations\.0\.nodes\.implement; lane [^;]+; /.test(line)), 'graph widget should show actual wi-1 worker lane');

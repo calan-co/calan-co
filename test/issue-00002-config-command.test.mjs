@@ -55,12 +55,6 @@ test('issue 00002 registers /work:config-raw and manages repo-local config', () 
         '',
         '  default: [researcher]',
         '',
-        'chains:',
-        '  explore-plan-review:',
-        '    - role: researcher',
-        '      prompt: |',
-        '        Keep this too.',
-        '',
         'extraRoot: keep-me',
       ].join('\n'),
     );

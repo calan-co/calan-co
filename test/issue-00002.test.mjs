@@ -6,37 +6,37 @@ const configCommandUserStoryPattern =
   /1\.\s+As a Pi user, I want one Sandcastle config command, so that init, viewing, getting, setting, resetting, and validating config are organized consistently\./;
 const configAcceptanceCriteriaChecks = [
   {
-    criterion: 'After reload, /work:config-raw is registered by the dev extension and /work:config-raw show displays effective repo config.',
+    criterion: 'After reload, /work:config is registered by the dev extension and /work:config show displays effective repo config.',
     message: 'issue 00002 should require command registration and default show behavior',
   },
   {
-    criterion: '/work:config-raw init creates missing .pi/sandcastle scaffold files and does not overwrite existing edited files without an explicit reset/force path.',
+    criterion: '/work:config init creates missing .pi/sandcastle scaffold files and does not overwrite existing edited files without an explicit reset/force path.',
     message: 'issue 00002 should require init idempotency',
   },
   {
-    criterion: '/work:config-raw get <path> returns one value, and missing/unsupported paths return clear user-facing errors.',
+    criterion: '/work:config get <path> returns one value, and missing/unsupported paths return clear user-facing errors.',
     message: 'issue 00002 should require get behavior and errors',
   },
   {
-    criterion: '/work:config-raw set <path> <value> persists supported scalar values and leaves unrelated YAML content intact.',
+    criterion: '/work:config set <path> <value> persists supported scalar values and leaves unrelated YAML content intact.',
     message: 'issue 00002 should require safe set behavior',
   },
   {
-    criterion: '/work:config-raw reset restores supported paths to repo defaults without deleting unrelated project files.',
+    criterion: '/work:config reset restores supported paths to repo defaults without deleting unrelated project files.',
     message: 'issue 00002 should require bounded reset behavior',
   },
   {
-    criterion: '/work:config-raw validate reports invalid agents, prompts, pipelines, models, sandbox providers, and missing runner/config files through the command response.',
+    criterion: '/work:config validate reports invalid agents, prompts, pipelines, models, sandbox providers, and missing runner/config files through the command response.',
     message: 'issue 00002 should require validation diagnostics',
   },
   {
-    criterion: 'Tests instantiate the extension through a fake ExtensionAPI and fail if /work:config-raw is not registered.',
+    criterion: 'Tests instantiate the extension through a fake ExtensionAPI and fail if /work:config is not registered.',
     message: 'issue 00002 should require fake ExtensionAPI registration tests',
   },
 ];
 
 defineIssueDocumentTest({
-  commandSurface: '/work:config-raw',
+  commandSurface: '/work:config',
   acceptanceCriteriaChecks: configAcceptanceCriteriaChecks,
   issueId: 'issue 00002',
   issueFileUrl,

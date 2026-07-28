@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { executeGraphWorkflow } from '../extensions/agent-workflows/graph-executor.ts';
+import { discoverHooksByCapability, sortHooksForPhase } from '../extensions/agent-workflows/hooks.ts';
 
 test('executes composite concrete-node DAGs by sibling needs and aggregates typed results', async () => {
   const seen = [];
@@ -406,4 +407,102 @@ test('rejects spoofed mergeable handler results and ambiguous loop child shape',
     }),
     /root\.nodes\.ambiguous loop must define exactly one of node or nodes/,
   );
+});
+
+test('graph node hooks wrap node execution and receive well-known plus provider namespaces', async () => {
+  const events = [];
+  const contexts = [];
+  const hooks = [
+    {
+      id: 'before',
+      phase: 'beforeNode',
+      capabilities: ['git'],
+      async run(context) {
+        if (context.node.path === 'root.nodes.run') {
+          events.push(`before:${context.node.path}`);
+          contexts.push(context);
+        }
+      },
+    },
+    {
+      id: 'after',
+      phase: 'afterNode',
+      capabilities: ['git'],
+      async run(context) {
+        if (context.node.path === 'root.nodes.run') events.push(`after:${context.runtime.result.type}:${context.runtime.result.output}`);
+      },
+    },
+  ];
+
+  await executeGraphWorkflow({
+    kind: 'composite',
+    nodes: {
+      run: { kind: 'agent.pi', role: 'implementer', capabilities: ['git'] },
+    },
+  }, {
+    input: { task: 'demo' },
+    hooks,
+    hookContext: {
+      global: { cwd: '/repo' },
+      runtime: { runId: 'run-1' },
+      providers: { git: { branch: 'feature/demo' } },
+    },
+    handlers: {
+      'agent.pi': async (context) => {
+        events.push(`handler:${context.path}`);
+        return 'done';
+      },
+    },
+  });
+
+  assert.deepEqual(events, ['before:root.nodes.run', 'handler:root.nodes.run', 'after:AgentResult:done']);
+  assert.equal(contexts[0].global.cwd, '/repo');
+  assert.deepEqual(contexts[0].global.input, { task: 'demo' });
+  assert.equal(contexts[0].runtime.runId, 'run-1');
+  assert.equal(contexts[0].node.path, 'root.nodes.run');
+  assert.equal(contexts[0].node.kind, 'agent.pi');
+  assert.equal(contexts[0].role.id, 'implementer');
+  assert.equal(contexts[0].git.branch, 'feature/demo');
+});
+
+test('graph node error hooks run without after hooks and preserve original node errors', async () => {
+  const events = [];
+  const hookFailure = new Error('error hook should not mask original');
+  await assert.rejects(
+    executeGraphWorkflow({
+      kind: 'composite',
+      nodes: {
+        run: { kind: 'script', capabilities: ['work'] },
+      },
+    }, {
+      hooks: [
+        { id: 'before', phase: 'beforeNode', capabilities: ['work'], run: (context) => events.push(`before:${context.node.path}`) },
+        { id: 'after', phase: 'afterNode', capabilities: ['work'], run: () => events.push('after') },
+        { id: 'error-a', phase: 'onNodeError', capabilities: ['work'], run: (context) => events.push(`error:${context.runtime.error.message}`) },
+        { id: 'error-b', phase: 'onNodeError', capabilities: ['work'], run: () => { throw hookFailure; } },
+      ],
+      handlers: {
+        script: async () => { throw new Error('original node failed'); },
+      },
+    }),
+    /original node failed/,
+  );
+
+  assert.deepEqual(events, ['before:root.nodes.run', 'error:original node failed']);
+});
+
+test('hook discovery and ordering ignore capability declaration order', () => {
+  const sequence = [];
+  const hooks = [
+    { id: 'same-registration-first', phase: 'beforeNode', order: 0, capabilities: ['b', 'a'], run: () => sequence.push('same-registration-first') },
+    { id: 'subtree', phase: 'beforeNode', topology: 'subtree', order: -10, capabilities: ['a'], run: () => sequence.push('subtree') },
+    { id: 'early', phase: 'beforeNode', order: -1, capabilities: ['a'], run: () => sequence.push('early') },
+    { id: 'missing', phase: 'beforeNode', order: -100, capabilities: ['missing'], run: () => sequence.push('missing') },
+    { id: 'same-registration-second', phase: 'beforeNode', order: 0, capabilities: ['a'], run: () => sequence.push('same-registration-second') },
+  ];
+
+  const discoveredA = discoverHooksByCapability(hooks, ['a', 'b']);
+  const discoveredB = discoverHooksByCapability(hooks, ['b', 'a']);
+  assert.deepEqual(sortHooksForPhase(discoveredA, 'beforeNode').map((hook) => hook.id), ['early', 'same-registration-first', 'same-registration-second', 'subtree']);
+  assert.deepEqual(sortHooksForPhase(discoveredB, 'beforeNode').map((hook) => hook.id), ['early', 'same-registration-first', 'same-registration-second', 'subtree']);
 });

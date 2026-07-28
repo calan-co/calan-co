@@ -330,12 +330,52 @@ export function isBacklogRunResumable(record) {
   return isResumableRun(record);
 }
 
+function statusGlyph(status) {
+  if (["done", "completed", "succeeded"].includes(status)) return "✓";
+  if (["error", "failed"].includes(status)) return "✗";
+  if (status === "running") return "▶";
+  return "•";
+}
+
 export function summarizeBacklogRun(record) {
   const itemText = record.itemIds?.length ? ` items=${record.itemIds.join(",")}` : "";
   const branchText = record.branches?.length ? ` branches=${record.branches.join(",")}` : "";
   const statusText = `status=${record.status}`;
   const queryText = record.query ? ` query=${JSON.stringify(record.query)}` : "";
   return `${record.id} ${statusText} pipeline=${record.pipeline}${itemText}${branchText}${queryText}`.trim();
+}
+
+function formatWorkRunDetail(record) {
+  const lines = [
+    `Work process ${record.id}`,
+    `Status: ${statusGlyph(record.status)} ${record.status}`,
+    `Pipeline: ${record.pipeline || "unknown"}`,
+  ];
+  const itemCount = Array.isArray(record.resolvedItems) ? record.resolvedItems.length : Array.isArray(record.itemIds) ? record.itemIds.length : 0;
+  lines.push(`Items: ${itemCount}`);
+  if (record.query) lines.push(`Query: ${JSON.stringify(record.query)}`);
+  const workers = Array.isArray(record.workerStatuses) ? record.workerStatuses : [];
+  if (workers.length) {
+    lines.push("Workers:");
+    for (const [index, worker] of workers.entries()) {
+      const details = [
+        worker.itemId ? `item ${worker.itemId}` : undefined,
+        worker.nodePath ? `node ${worker.nodePath}` : undefined,
+        worker.laneId ? `lane ${worker.laneId}` : undefined,
+        worker.branch ? `branch ${worker.branch}` : undefined,
+        worker.commits?.length ? `commits ${worker.commits.join(", ")}` : undefined,
+        worker.logPath ? `log ${worker.logPath}` : undefined,
+      ].filter(Boolean).join(" · ");
+      lines.push(`  ${statusGlyph(worker.status)} Worker ${Number.isFinite(worker.index) ? worker.index + 1 : index + 1}: ${worker.role || "worker"} ${worker.status}${details ? ` — ${details}` : ""}`);
+    }
+  }
+  if (record.branches?.length) lines.push("Approved changes merged:", ...record.branches.map((branch) => `  - ${branch}`));
+  if (record.logs?.length) lines.push("Logs:", ...record.logs.map((log) => `  - ${log}`));
+  if (record.workSourceMutations?.length) {
+    lines.push("Work Source:");
+    for (const mutation of record.workSourceMutations) lines.push(`  ${statusGlyph(mutation.status)} ${mutation.itemId}: ${mutation.action} ${mutation.status}${mutation.message ? ` — ${mutation.message}` : ""}`);
+  }
+  return lines.join("\n");
 }
 
 export function formatBacklogRunList(runs) {
@@ -367,7 +407,7 @@ export function formatStatusSelection(selection) {
     return formatAmbiguousSelection("work run", selection.candidates);
   }
 
-  return `${formatStatusPrefix(selection.inference)}: ${summarizeBacklogRun(selection.record)}`;
+  return `${formatStatusPrefix(selection.inference)}:\n${formatWorkRunDetail(selection.record)}`;
 }
 
 export function formatResumeSelection(selection) {

@@ -113,7 +113,7 @@ test('executePipeline uses graph executor for generated default runtime config',
   assert.match(calls[0], /Pick the next open Work Item/);
 });
 
-test('executePipeline upgrades stale generated legacy default pipeline config to graph executor', async () => {
+test('executePipeline rejects pipeline config that fails current graph schema', async () => {
   const repoRoot = await createGraphRepo([
     'defaultAgent: pi',
     'defaultSandbox: no-sandbox',
@@ -139,39 +139,16 @@ test('executePipeline upgrades stale generated legacy default pipeline config to
     '        prompt: merge-work',
     '        maxIterations: 1',
   ]);
-  const contexts = [
-    { contextId: 'run/wi-001/0-0', branch: 'agent-workflows/parallel/run/wi-001', itemId: 'wi-001' },
-    { contextId: 'run/wi-002/0-1', branch: 'agent-workflows/parallel/run/wi-002', itemId: 'wi-002' },
-  ];
-  const runs = [];
 
-  const record = await executePipeline(repoRoot, 'parallel-planner-with-review', 'process stale defaults', {
-    now: () => 1700000003500,
-    graphInput: { prompt: 'process stale defaults', executionContexts: contexts },
-    createWorktree: async (options) => {
-      const branch = options.branchStrategy.branch;
-      return fakeWorktree(repoRoot, async (runOptions) => {
-        const role = /Review/.test(runOptions.prompt) ? 'reviewer' : 'implementer';
-        runs.push({ branch, role, prompt: runOptions.prompt });
-        return {
-          iterations: [],
-          commits: role === 'implementer' ? [{ sha: `commit-${branch.split('/').at(-1)}` }] : [],
-          branch,
-          stdout: '',
-          logFilePath: runOptions.logging.path,
-        };
-      }, { branch, worktreePath: path.join(repoRoot, '.pi/sandcastle/worktrees', branch.replaceAll('/', '-')) });
-    },
-    loadSandboxProvider: async (kind) => ({ kind }),
-    makeAgent: (model, provider) => ({ model, provider }),
-    runGit: fakeSuccessfulGit(),
-  });
-
-  assert.equal(record.executor, 'graph');
-  assert.equal(record.status, 'completed');
-  assert.deepEqual(runs.filter((run) => run.role === 'implementer').map((run) => run.branch).sort(), contexts.map((context) => context.branch).sort());
-  assert.deepEqual(runs.filter((run) => run.role === 'reviewer').map((run) => run.branch).sort(), contexts.map((context) => context.branch).sort());
-  assert.ok(record.nodes.some((node) => node.resultType === 'GitMergeResult' && node.mergedBranches?.length));
+  await assert.rejects(
+    executePipeline(repoRoot, 'parallel-planner-with-review', 'process stale defaults', {
+      now: () => 1700000003500,
+      createWorktree: async () => { throw new Error('must not create worktree for invalid config'); },
+      loadSandboxProvider: async (kind) => ({ kind }),
+      makeAgent: (model, provider) => ({ model, provider }),
+    }),
+    /Invalid Agent Workflows configuration[\s\S]*config\.pipelines\.parallel-planner-with-review\.kind is required[\s\S]*config\.pipelines\.parallel-planner-with-review\.nodes is required[\s\S]*config\.pipelines\.parallel-planner-with-review\.steps is not supported/,
+  );
 });
 
 test('executePipeline runs composite graph nodes by needs and records graph node summaries', async () => {
@@ -345,6 +322,81 @@ test('executePipeline closes graph lane worktree when a child agent fails', asyn
   const durable = JSON.parse(await fs.readFile(path.join(repoRoot, '.pi/sandcastle/runs', runId, 'record.json'), 'utf8'));
   assert.equal(durable.status, 'failed');
   assert.match(durable.error, /agent failed in lane/);
+});
+
+test('executePipeline graph git.merge accepted-only merges only review-approved branches', async () => {
+  const repoRoot = await createGraphRepo(baseGraphConfig([
+    '  graph:',
+    '    kind: composite',
+    '    nodes:',
+    '      implement:',
+    '        kind: loop',
+    '        mode: parallel',
+    '        each: $.executionContexts',
+    '        node:',
+    '          kind: git.worktree',
+    '          nodes:',
+    '            implement:',
+    '              kind: agent.pi',
+    '              role: implementer',
+    '              prompt: Implement $INPUT',
+    '      review:',
+    '        kind: loop',
+    '        mode: parallel',
+    '        each: $.executionContexts',
+    '        needs: [implement]',
+    '        node:',
+    '          kind: git.worktree',
+    '          nodes:',
+    '            review:',
+    '              kind: agent.pi',
+    '              role: reviewer',
+    '              prompt: Review $INPUT',
+    '      merge:',
+    '        kind: git.merge',
+    '        needs: [implement, review]',
+    '        inputs: [implement]',
+    '        strategy: accepted-only',
+  ]));
+  const contexts = [
+    { contextId: 'run/item-a/0-0', branch: 'feature/item-a', groupIndex: 0, itemIndex: 0, itemId: 'item-a' },
+    { contextId: 'run/item-b/0-1', branch: 'feature/item-b', groupIndex: 0, itemIndex: 1, itemId: 'item-b' },
+  ];
+  const merged = [];
+  let head = 'base-head';
+
+  const record = await executePipeline(repoRoot, 'graph', 'review gated merge', {
+    now: () => 1700000004400,
+    graphInput: { prompt: 'review gated merge', executionContexts: contexts },
+    createWorktree: async (options) => fakeWorktree(repoRoot, async (runOptions) => {
+      const branch = options.branchStrategy.branch;
+      const isReview = /Review/.test(runOptions.prompt);
+      return {
+        iterations: [],
+        commits: isReview ? [] : [{ sha: `commit-${branch.split('/').at(-1)}` }],
+        branch,
+        stdout: isReview ? (branch.endsWith('item-a') ? 'Accepted: no blockers, safe to merge.' : 'Rejected: blocker found, do not merge.') : '',
+        logFilePath: runOptions.logging.path,
+      };
+    }, { branch: options.branchStrategy.branch, worktreePath: path.join(repoRoot, '.pi/sandcastle/worktrees', options.branchStrategy.branch.replaceAll('/', '-')) }),
+    loadSandboxProvider: async (kind) => ({ kind }),
+    makeAgent: (model, provider) => ({ model, provider }),
+    runGit: async (args) => {
+      if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return { status: 0, stdout: 'main\n', stderr: '' };
+      if (args[0] === 'rev-parse' && args[1] === 'HEAD') return { status: 0, stdout: `${head}\n`, stderr: '' };
+      if (args[0] === 'merge') {
+        merged.push(args.at(-1));
+        head = `merge-${merged.length}`;
+        return { status: 0, stdout: 'merged\n', stderr: '' };
+      }
+      if (args[0] === 'status') return { status: 0, stdout: '', stderr: '' };
+      return { status: 0, stdout: '', stderr: '' };
+    },
+  });
+
+  assert.equal(record.status, 'completed');
+  assert.deepEqual(merged, ['feature/item-a']);
+  assert.deepEqual(record.nodes.find((node) => node.nodePath === 'root.nodes.merge').mergedBranches, ['feature/item-a']);
 });
 
 test('executePipeline graph git.merge merges accepted workspace branch content into the target worktree', async () => {
@@ -539,6 +591,57 @@ test('executePipeline fails graph git.merge when worktree children produce no co
   assert.match(durable.error, /requires effectful mergeable needs|no effects/);
 });
 
+test('executePipeline auto-commits dirty graph worktree changes before git.merge', async () => {
+  const repoRoot = await createGraphRepo(baseGraphConfig([
+    '  graph:',
+    '    kind: composite',
+    '    nodes:',
+    '      workspace:',
+    '        kind: git.worktree',
+    '        nodes:',
+    '          implement:',
+    '            kind: agent.pi',
+    '            role: implementer',
+    '            prompt: Implement $INPUT',
+    '      merge:',
+    '        kind: git.merge',
+    '        needs: [workspace]',
+  ]), { git: true });
+  const worktreePath = path.join(repoRoot, '.pi/sandcastle/worktrees/auto-commit');
+
+  const record = await executePipeline(repoRoot, 'graph', 'dirty work', {
+    now: () => 1700000005500,
+    createWorktree: async (options) => {
+      const branch = options.branchStrategy.branch || 'sandcastle/graph';
+      await fs.mkdir(path.dirname(worktreePath), { recursive: true });
+      await runGit(repoRoot, ['worktree', 'add', '-B', branch, worktreePath, 'main']);
+      return {
+        branch,
+        worktreePath,
+        close: async () => { await runGit(repoRoot, ['worktree', 'remove', '--force', worktreePath]); },
+        run: async (runOptions) => {
+          await fs.writeFile(path.join(worktreePath, 'dirty.txt'), 'auto committed\n', 'utf8');
+          return {
+            iterations: [],
+            commits: [],
+            branch,
+            stdout: '',
+            logFilePath: runOptions.logging.path,
+          };
+        },
+      };
+    },
+    loadSandboxProvider: async (kind) => ({ kind }),
+    makeAgent: (model, provider) => ({ model, provider }),
+  });
+
+  assert.equal(record.status, 'completed');
+  assert.equal(await fs.readFile(path.join(repoRoot, 'dirty.txt'), 'utf8'), 'auto committed\n');
+  const workspaceNode = record.nodes.find((node) => node.nodePath === 'root.nodes.workspace');
+  assert.ok(workspaceNode.commits?.length, 'dirty changes should be captured as a commit');
+  assert.ok(record.nodes.find((node) => node.nodePath === 'root.nodes.merge')?.effects?.some((effect) => effect.startsWith('merge:')));
+});
+
 test('executePipeline fails graph completion when no node produced commits but returns a log path', async () => {
   const repoRoot = await createGraphRepo(baseGraphConfig([
     '  graph:',
@@ -574,4 +677,65 @@ test('executePipeline fails graph completion when no node produced commits but r
   assert.equal(durable.status, 'failed');
   assert.equal(durable.executor, 'graph');
   assert.match(durable.error, /without effects/);
+});
+
+test('executePipeline discovers adapter graph hooks by capability and seeds hook namespaces', async () => {
+  const repoRoot = await createGraphRepo(configToYaml(packsToConfig()).split('\n'));
+  const seen = [];
+  const skipped = [];
+  const hooks = [
+    {
+      id: 'matching-sandcastle-hook',
+      phase: 'beforeNode',
+      capabilities: ['sandcastle'],
+      run(context) {
+        if (context.node.path === 'root.nodes.workspace.nodes.run') {
+          seen.push({
+            cwd: context.global.cwd,
+            pipeline: context.runtime.pipeline,
+            path: context.node.path,
+            role: context.role.id,
+            branchStrategy: context.git.branchStrategy.type,
+            customGit: context.git.branchStrategyNote,
+            workQuery: context.work.graphInput.query,
+          });
+        }
+      },
+    },
+    {
+      id: 'missing-capability-hook',
+      phase: 'beforeNode',
+      capabilities: ['not-present'],
+      run() { skipped.push('ran'); },
+    },
+  ];
+
+  const record = await executePipeline(repoRoot, 'simple-loop', 'hooked run', {
+    now: () => 1700000003100,
+    graphInput: { query: 'ready work' },
+    graphHooks: hooks,
+    graphHookCapabilities: ['sandcastle'],
+    graphHookNamespaces: { git: { branchStrategyNote: 'seeded' } },
+    createWorktree: async () => fakeWorktree(repoRoot, async (options) => ({
+      iterations: [],
+      commits: [{ sha: 'commit-hooked' }],
+      branch: 'sandcastle/simple-loop',
+      stdout: '',
+      logFilePath: options.logging.path,
+    })),
+    loadSandboxProvider: async (kind) => ({ kind }),
+    makeAgent: (model, provider) => ({ model, provider }),
+  });
+
+  assert.equal(record.status, 'completed');
+  assert.equal(skipped.length, 0);
+  assert.deepEqual(seen, [{
+    cwd: repoRoot,
+    pipeline: 'simple-loop',
+    path: 'root.nodes.workspace.nodes.run',
+    role: 'worker',
+    branchStrategy: 'merge-to-head',
+    customGit: 'seeded',
+    workQuery: 'ready work',
+  }]);
 });

@@ -36,8 +36,6 @@ function createTempRepoConfig() {
     '',
     '  default: [researcher, builder]',
     '',
-    'chains:',
-    '',
     'pipelines:',
     '  implement:',
     '    description: Fixed-domain implementation pipeline.',
@@ -46,16 +44,25 @@ function createTempRepoConfig() {
     '      branch: sandcastle/implement',
     '    sandbox: docker',
     '    model: claude-opus-4-8',
-    '    steps:',
-    '      - role: researcher',
-    '        prompt: |',
-    '          Research the requested work and identify the relevant files.',
-    '          $INPUT',
-    '      - role: builder',
-    '        prompt: |',
-    '          Implement the requested work.',
-    '          Original request: $ORIGINAL',
-    '          Research: $INPUT',
+    '    kind: composite',
+    '    nodes:',
+    '      workspace:',
+    '        kind: git.worktree',
+    '        nodes:',
+    '          research:',
+    '            kind: agent.pi',
+    '            role: researcher',
+    '            prompt: |',
+    '              Research the requested work and identify the relevant files.',
+    '              $INPUT',
+    '          build:',
+    '            kind: agent.pi',
+    '            needs: [research]',
+    '            role: builder',
+    '            prompt: |',
+    '              Implement the requested work.',
+    '              Original request: $ORIGINAL',
+    '              Research: $INPUT',
     '',
     '  broken:',
     '    description: Pipeline that fails on the first step.',
@@ -63,10 +70,16 @@ function createTempRepoConfig() {
     '      type: branch',
     '      branch: sandcastle/broken',
     '    sandbox: docker',
-    '    steps:',
-    '      - role: researcher',
-    '        prompt: |',
-    '          Trigger a failure.',
+    '    kind: composite',
+    '    nodes:',
+    '      workspace:',
+    '        kind: git.worktree',
+    '        nodes:',
+    '          fail:',
+    '            kind: agent.pi',
+    '            role: researcher',
+    '            prompt: |',
+    '              Trigger a failure.',
   ].join('\n');
 }
 
@@ -77,36 +90,29 @@ async function createRepo() {
   return repoRoot;
 }
 
-test('parseSimpleYaml keeps chain and pipeline step indentation rules aligned with the sample config', () => {
+test('parseSimpleYaml keeps graph pipeline indentation rules aligned with the sample config', () => {
   const parsed = parseSimpleYaml([
-    'chains:',
-    '  review-flow:',
-    '    - role: reviewer',
-    '      prompt: |',
-    '        Review the branch.',
-    '        $INPUT',
-    '',
     'pipelines:',
     '  implement:',
     '    branchStrategy:',
     '      type: branch',
     '      branch: sandcastle/implement',
-    '    steps:',
-    '      - role: builder',
+    '    kind: composite',
+    '    nodes:',
+    '      run:',
+    '        kind: agent.pi',
+    '        role: builder',
     '        prompt: |',
     '          Implement the requested work.',
     '          $INPUT',
   ].join('\n'));
 
-  assert.equal(parsed.chains['review-flow'].length, 1);
-  assert.equal(parsed.chains['review-flow'][0].role, 'reviewer');
-  assert.match(parsed.chains['review-flow'][0].prompt, /Review the branch\.\n\$INPUT/);
-  assert.equal(parsed.pipelines.implement.steps.length, 1);
+  assert.equal(parsed.pipelines.implement.nodes.run.role, 'builder');
   assert.equal(parsed.pipelines.implement.branchStrategy.branch, 'sandcastle/implement');
-  assert.match(parsed.pipelines.implement.steps[0].prompt, /Implement the requested work\.\n\$INPUT/);
+  assert.match(parsed.pipelines.implement.nodes.run.prompt, /Implement the requested work\.\n\$INPUT/);
 });
 
-test('parseSimpleYaml preserves unsupported pipeline step keys for validation', () => {
+test('parseSimpleYaml preserves unsupported graph node keys for validation', () => {
   const parsed = parseSimpleYaml([
     'roles:',
     '  worker:',
@@ -115,14 +121,17 @@ test('parseSimpleYaml preserves unsupported pipeline step keys for validation', 
     '',
     'pipelines:',
     '  simple-loop:',
-    '    steps:',
-    '      - agent: worker',
+    '    kind: composite',
+    '    nodes:',
+    '      run:',
+    '        kind: agent.pi',
+    '        agent: worker',
     '        prompt: do work',
   ].join('\n'));
 
   assert.equal(parsed.agents.worker.systemPrompt, 'Worker system prompt.');
-  assert.equal(parsed.pipelines['simple-loop'].steps[0].agent, 'worker');
-  assert.equal(parsed.pipelines['simple-loop'].steps[0].role, '');
+  assert.equal(parsed.pipelines['simple-loop'].nodes.run.agent, 'worker');
+  assert.equal(parsed.pipelines['simple-loop'].nodes.run.role, undefined);
 });
 
 test('/work:config-raw validate rejects agent terminology where role is required', async () => {
@@ -140,8 +149,11 @@ test('/work:config-raw validate rejects agent terminology where role is required
     '',
     'pipelines:',
     '  simple-loop:',
-    '    steps:',
-    '      - agent: worker',
+    '    kind: composite',
+    '    nodes:',
+    '      run:',
+    '        kind: agent.pi',
+    '        agent: worker',
     '        prompt: do work',
   ].join('\n'), 'utf8');
 
@@ -155,7 +167,7 @@ test('/work:config-raw validate rejects agent terminology where role is required
 
   assert.equal(notifications[0].type, 'error');
   assert.match(notifications[0].message, /config\.agents is not supported/);
-  assert.match(notifications[0].message, /config\.pipelines\.simple-loop\.steps\[0\]\.agent is not supported/);
+  assert.match(notifications[0].message, /config\.pipelines\.simple-loop\.nodes\.run\.agent is not supported/);
 });
 
 test('/work:pipeline registers and parses prompt text deterministically', async () => {
@@ -244,9 +256,15 @@ test('executePipeline propagates host pi provider defaults when pipeline config 
       '  simple-loop:',
       '    sandbox: no-sandbox',
       '    model: Agent Default',
-      '    steps:',
-      '      - role: worker',
-      '        prompt: $INPUT',
+      '    kind: composite',
+      '    nodes:',
+      '      workspace:',
+      '        kind: git.worktree',
+      '        nodes:',
+      '          run:',
+      '            kind: agent.pi',
+      '            role: worker',
+      '            prompt: $INPUT',
     ].join('\n'), 'utf8');
 
     const commands = [];
@@ -260,7 +278,7 @@ test('executePipeline propagates host pi provider defaults when pipeline config 
           commands.push(options.agent.buildPrintCommand({ prompt: options.prompt }).command);
           return {
             iterations: [],
-            commits: [],
+            commits: [{ sha: 'host-default-commit' }],
             branch: 'sandcastle/simple-loop',
             stdout: '',
             logFilePath: options.logging.path,
@@ -302,9 +320,15 @@ test('executePipeline gives pi pipeline steps the same host agent directory moun
       '  simple-loop:',
       '    sandbox: docker',
       '    model: Agent Default',
-      '    steps:',
-      '      - role: worker',
-      '        prompt: $INPUT',
+      '    kind: composite',
+      '    nodes:',
+      '      workspace:',
+      '        kind: git.worktree',
+      '        nodes:',
+      '          run:',
+      '            kind: agent.pi',
+      '            role: worker',
+      '            prompt: $INPUT',
     ].join('\n'), 'utf8');
 
     const sandboxCalls = [];
@@ -317,7 +341,7 @@ test('executePipeline gives pi pipeline steps the same host agent directory moun
         close: async () => ({}),
         run: async (options) => {
           runCalls.push(options);
-          return { iterations: [], commits: [], branch: 'sandcastle/simple-loop', stdout: '' };
+          return { iterations: [], commits: [{ sha: 'host-mount-commit' }], branch: 'sandcastle/simple-loop', stdout: '' };
         },
       }),
       loadSandboxProvider: async (kind, options) => {

@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  compileRuntimeSteps,
   listRuntimeAgents,
   listRuntimePipelines,
   loadExecutionRuntimePack,
@@ -11,7 +10,7 @@ import {
 import { readFileSync } from 'node:fs';
 import { configToYaml, packsToConfig } from '../extensions/agent-workflows/pipeline-packs.mjs';
 
-test('execution runtime pack ports prompts, roles, and pipelines', () => {
+test('execution runtime pack ports prompts, roles, and graph-native pipelines', () => {
   const pack = loadExecutionRuntimePack();
   assert.equal(pack.runtimeVersion, 1);
   assert.ok(pack.prompts['simple-loop'].template.includes('$INPUT'));
@@ -19,8 +18,7 @@ test('execution runtime pack ports prompts, roles, and pipelines', () => {
   assert.equal(pack.pipelines['parallel-planner-with-review'].kind, 'composite');
   assert.equal(pack.pipelines['parallel-planner-with-review'].nodes.implement.kind, 'loop');
   assert.equal(pack.pipelines['parallel-planner-with-review'].nodes.implement.each, '$.executionContexts');
-  assert.equal(pack.pipelines['parallel-planner-with-review'].steps[0].kind, 'fanOut');
-  assert.equal(pack.pipelines['parallel-planner-with-review'].steps[1].kind, 'fanOut');
+  assert.equal(pack.pipelines['parallel-planner-with-review'].steps, undefined);
   assert.ok(listRuntimeAgents(pack).some((agent) => agent.name === 'reviewer'));
   assert.ok(listRuntimePipelines(pack).some((pipeline) => pipeline.name === 'archive'));
 });
@@ -35,42 +33,7 @@ test('execution runtime validates negative fixtures with useful diagnostics', ()
       prompts: { bad: { format: 'markdown' } },
       pipelines: { p: { steps: [{ id: 's', kind: 'runRole', foo: 'missing', prompt: 'bad' }] } },
     }),
-    /prompt 'bad' must define template or file.*must reference a role/s,
-  );
-  assert.throws(
-    () => validateExecutionRuntimePack({
-      runtimeVersion: 1,
-      roles: { worker: {} },
-      prompts: { ok: { format: 'markdown', template: 'x' } },
-      pipelines: { p: { steps: [{ id: 'fan', kind: 'fanOut' }] } },
-    }),
-    /fanOut must define over.*fanOut must define nested step/s,
-  );
-  assert.throws(
-    () => validateExecutionRuntimePack({
-      runtimeVersion: 1,
-      roles: { worker: {}, reviewer: { kind: 'review' } },
-      prompts: { implement: { format: 'markdown', template: 'x' }, review: { format: 'markdown', template: 'x' } },
-      pipelines: {
-        p: {
-          kind: 'composite',
-          nodes: {
-            fan: {
-              kind: 'loop',
-              each: '$.items',
-              node: {
-                kind: 'git.worktree',
-                nodes: {
-                  implement: { kind: 'agent.pi', role: 'worker', prompt: 'implement' },
-                  review: { kind: 'agent.pi', role: 'reviewer', prompt: 'review', needs: ['implement'] },
-                },
-              },
-            },
-          },
-        },
-      },
-    }),
-    /loop compiles to 2 nested legacy steps.*legacy fanOut supports exactly one nested step/s,
+    /prompt 'bad' must define template or file.*must define graph-native nodes/s,
   );
   assert.throws(
     () => validateExecutionRuntimePack({
@@ -85,45 +48,13 @@ test('execution runtime validates negative fixtures with useful diagnostics', ()
               kind: 'loop',
               each: '$.items',
               node: { kind: 'agent.pi', role: 'worker', prompt: 'ok' },
-              nodes: {
-                other: { kind: 'agent.pi', role: 'worker', prompt: 'ok' },
-              },
+              nodes: { other: { kind: 'agent.pi', role: 'worker', prompt: 'ok' } },
             },
           },
         },
       },
     }),
     /loop must define exactly one of node or nodes/s,
-  );
-  assert.throws(
-    () => validateExecutionRuntimePack({
-      runtimeVersion: 1,
-      roles: { worker: {} },
-      prompts: { ok: { format: 'markdown', template: 'x' } },
-      pipelines: {
-        p: {
-          kind: 'composite',
-          nodes: {
-            fan: {
-              kind: 'loop',
-              each: '$.items',
-              node: { kind: 'agent.pi', role: 'worker', prompt: 'ok' },
-              nodes: {},
-            },
-          },
-        },
-      },
-    }),
-    /loop must define exactly one of node or nodes/s,
-  );
-  assert.throws(
-    () => validateExecutionRuntimePack({
-      runtimeVersion: 1,
-      roles: { planner: { kind: 'planWork' }, otherPlanner: { kind: 'planWork' } },
-      prompts: { ok: { format: 'markdown', template: 'x' } },
-      pipelines: { p: { steps: [{ id: 'plan', kind: 'planWork', role: 'planner', prompt: 'ok' }] } },
-    }),
-    /planWork must not reference a role.*exactly one role with kind planWork/s,
   );
   assert.throws(
     () => validateExecutionRuntimePack({
@@ -136,7 +67,7 @@ test('execution runtime validates negative fixtures with useful diagnostics', ()
   );
 });
 
-test('runtime compiler preserves map-form concrete-node pipelines and legacy-compatible steps', () => {
+test('runtime compiler preserves map-form concrete-node pipelines only', () => {
   const pack = validateExecutionRuntimePack({
     runtimeVersion: 1,
     defaults: { branchPolicy: 'merge-to-head' },
@@ -160,30 +91,19 @@ test('runtime compiler preserves map-form concrete-node pipelines and legacy-com
           merge: { kind: 'git.merge', needs: ['review'], prompt: 'merge' },
         },
       },
-      legacy: {
-        description: 'Legacy step pipeline',
-        steps: [{ id: 'run', kind: 'runRole', role: 'worker', prompt: 'blank' }],
-      },
     },
   });
   assert.equal(pack.pipelines.map.kind, 'composite');
   assert.equal(pack.pipelines.map.nodes.run.kind, 'agent.pi');
-  assert.deepEqual(pack.pipelines.map.steps.map((step) => step.id), ['run', 'review', 'merge']);
-  assert.equal(pack.pipelines.map.steps[0].kind, 'runRole');
-  assert.equal(pack.pipelines.map.steps[1].kind, 'review');
-  assert.equal(pack.pipelines.map.steps[2].kind, 'merge');
-  assert.equal(pack.pipelines.legacy.kind, 'composite');
-  assert.equal(pack.pipelines.legacy.nodes.run.kind, 'agent.pi');
+  assert.equal(pack.pipelines.map.steps, undefined);
   const cfg = runtimeToSandcastleConfig(pack);
   assert.equal(cfg.pipelines.map.kind, 'composite');
   assert.equal(cfg.pipelines.map.nodes.run.kind, 'agent.pi');
   assert.equal(cfg.pipelines.map.nodes.merge.kind, 'git.merge');
-  assert.equal(cfg.pipelines.map.steps[0].role, 'worker');
-  assert.equal(cfg.pipelines.map.steps[1].role, 'reviewer');
-  assert.equal(cfg.pipelines.map.steps[2].role, 'merger');
+  assert.equal(cfg.pipelines.map.steps, undefined);
 });
 
-test('runtime compiler preserves all git.worktree child agent nodes in legacy DAG order', () => {
+test('runtime compiler preserves all git.worktree child agent nodes', () => {
   const pack = validateExecutionRuntimePack({
     runtimeVersion: 1,
     defaults: {},
@@ -211,20 +131,24 @@ test('runtime compiler preserves all git.worktree child agent nodes in legacy DA
     },
   });
 
-  assert.deepEqual(pack.pipelines.worktree.steps.map((step) => step.id), ['branch.implement', 'branch.review']);
-  assert.deepEqual(pack.pipelines.worktree.steps.map((step) => step.role), ['worker', 'reviewer']);
-  assert.deepEqual(pack.pipelines.worktree.steps.map((step) => step.prompt), ['implement', 'review']);
+  assert.equal(pack.pipelines.worktree.nodes.branch.nodes.implement.role, 'worker');
+  assert.equal(pack.pipelines.worktree.nodes.branch.nodes.review.role, 'reviewer');
   const cfg = runtimeToSandcastleConfig(pack);
-  assert.deepEqual(cfg.pipelines.worktree.steps.map((step) => step.role), ['worker', 'reviewer']);
+  assert.equal(cfg.pipelines.worktree.nodes.branch.nodes.implement.role, 'worker');
+  assert.equal(cfg.pipelines.worktree.steps, undefined);
 });
 
-test('execution runtime schema supports composite map nodes and concrete container image requirements', () => {
+test('execution runtime schema requires graph-native composite map nodes', () => {
   const schema = JSON.parse(readFileSync(new URL('../extensions/agent-workflows/schema/execution-runtime.schema.json', import.meta.url), 'utf8'));
   const configSchema = JSON.parse(readFileSync(new URL('../extensions/agent-workflows/schema/config.schema.json', import.meta.url), 'utf8'));
   assert.deepEqual(schema.required, ['runtimeVersion', 'defaults', 'roles', 'prompts', 'pipelines']);
   assert.ok(schema.properties.pipelines, 'repo root schema keeps pipelines key');
   assert.ok(schema.$defs.pipeline.properties.kind, 'pipeline values support kind');
   assert.ok(schema.$defs.pipeline.properties.nodes, 'pipeline values support map-form nodes');
+  assert.equal(schema.$defs.pipeline.properties.steps, undefined);
+  assert.deepEqual(schema.$defs.pipeline.required, ['kind', 'nodes']);
+  assert.equal(configSchema.$defs.pipeline.properties.steps, undefined);
+  assert.deepEqual(configSchema.$defs.pipeline.required, ['kind', 'nodes']);
   assert.match(JSON.stringify(schema.$defs.concreteNode.properties.kind), /git\.worktree/);
   assert.match(JSON.stringify(schema.$defs.concreteNode.properties.kind), /git\.merge/);
   assert.match(JSON.stringify(schema.$defs.concreteNode.allOf), /oneOf/);
@@ -251,16 +175,11 @@ test('runtime compiler converts deterministic runtime pipelines to graph-native 
   assert.equal(cfg.pipelines['parallel-planner'].nodes.implement.each, '$.executionContexts');
   assert.equal(cfg.pipelines['parallel-planner'].nodes.implement.node.kind, 'git.worktree');
   assert.equal(cfg.pipelines['parallel-planner'].nodes.merge.kind, 'git.merge');
-  assert.equal(cfg.pipelines['parallel-planner'].steps[0].kind, 'runRole');
-  assert.equal(cfg.pipelines['parallel-planner'].steps[0].role, 'implementer');
-  assert.equal(cfg.pipelines['parallel-planner'].steps[0].maxIterations, undefined);
-  assert.equal(cfg.pipelines['parallel-planner'].steps[0].concurrency, undefined);
+  assert.equal(cfg.pipelines['parallel-planner'].steps, undefined);
   assert.equal(cfg.pipelines['parallel-planner-with-review'].nodes.merge.kind, 'git.merge');
   assert.deepEqual(cfg.pipelines['parallel-planner-with-review'].nodes.merge.needs, ['implement', 'review']);
   assert.deepEqual(cfg.pipelines['parallel-planner-with-review'].nodes.merge.inputs, ['implement']);
-  assert.equal(cfg.pipelines['parallel-planner-with-review'].steps.at(-1).role, 'merger');
-  assert.equal(compileRuntimeSteps([{ id: 'plan', kind: 'planWork', prompt: 'plan-work' }], pack)[0].role, 'planner');
-  assert.equal(compileRuntimeSteps([{ id: 'noop', kind: 'gate' }], pack)[0].prompt, '$INPUT');
+  assert.equal(cfg.pipelines['parallel-planner-with-review'].steps, undefined);
 });
 
 test('configToYaml renders graph-native runtime roles and pipelines', () => {

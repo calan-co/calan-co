@@ -63,6 +63,13 @@ export interface WorkProcessWorkerStatus {
 	itemId?: string;
 }
 
+export interface WorkSourceMutationOutcome {
+	itemId: string;
+	action: "validate" | "close";
+	status: "succeeded" | "failed";
+	message?: string;
+}
+
 export interface WorkProcessRunRecord {
 	id: string;
 	kind?: "work-process";
@@ -74,6 +81,7 @@ export interface WorkProcessRunRecord {
 	branches: string[];
 	logs: string[];
 	workerStatuses?: WorkProcessWorkerStatus[];
+	workSourceMutations?: WorkSourceMutationOutcome[];
 	executionContexts: WorkExecutionContext[];
 	executionGroups: WorkExecutionGroup[];
 	startedAt: number;
@@ -96,6 +104,7 @@ export interface WorkProcessExecutionResult {
 	branches?: string[];
 	logs?: string[];
 	workerStatuses?: WorkProcessWorkerStatus[];
+	workSourceMutations?: WorkSourceMutationOutcome[];
 	status?: WorkProcessStatus;
 }
 
@@ -293,6 +302,63 @@ export function planIterationSupportsParallel(iteration: any): boolean {
 	return (iteration?.items || []).length > 1;
 }
 
+function workItemStringArray(item: WorkItem, key: string): string[] {
+	const value = item[key];
+	return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0) : [];
+}
+
+function isHitlWorkItem(item: WorkItem, iteration: WorkPlanIteration): boolean {
+	const tags = workItemStringArray(item, "tags").map((tag) => tag.toLowerCase());
+	if (tags.some((tag) => tag === "hitl" || tag === "human-in-the-loop" || tag === "human")) return true;
+	const iterationHitl = Array.isArray(iteration.hitl) ? iteration.hitl : [];
+	return typeof item.id === "string" && iterationHitl.includes(item.id);
+}
+
+function isExplicitlyDependencyBlockedWorkItem(item: WorkItem): boolean {
+	const status = typeof item.status === "string" ? item.status.toLowerCase() : "";
+	const readiness = typeof item.readiness === "string" ? item.readiness.toLowerCase() : "";
+	const dependencyState = isRecord(item.dependencyState) && typeof item.dependencyState.status === "string" ? item.dependencyState.status.toLowerCase() : "";
+	const classifications = isRecord(item.classifications) && typeof item.classifications.dependencyState === "string" ? item.classifications.dependencyState.toLowerCase() : "";
+	return [status, readiness, dependencyState, classifications].some((value) => value === "blocked" || value === "dependency-blocked" || value === "has-dependencies");
+}
+
+function normalizeDependencyToken(value: string): string {
+	return value.trim().toLowerCase().replace(/^\[\[/, "").replace(/\]\]$/, "").replace(/^backlog\//, "").replace(/\.md$/, "");
+}
+
+function workItemReferenceTokens(item: WorkItem): Set<string> {
+	const tokens = new Set<string>();
+	for (const key of ["id", "sourcePath", "relativePath", "filePath", "title"] as const) {
+		const value = item[key];
+		if (typeof value === "string" && value.trim()) tokens.add(normalizeDependencyToken(value));
+	}
+	for (const token of Array.from(tokens)) {
+		const numeric = token.match(/(?:^|[^0-9])(\d{3,5})(?:[^0-9]|$)/)?.[1];
+		if (numeric) tokens.add(numeric.replace(/^0+/, "") || numeric);
+	}
+	return tokens;
+}
+
+function dependsOnSelectedWorkItem(item: WorkItem, selectedTokens: Set<string>): boolean {
+	const dependencies = [...workItemStringArray(item, "dependsOn"), ...workItemStringArray(item, "dependencies")];
+	return dependencies.some((dependency) => {
+		const normalized = normalizeDependencyToken(dependency);
+		const numeric = normalized.match(/(?:^|[^0-9])(\d{3,5})(?:[^0-9]|$)/)?.[1];
+		return selectedTokens.has(normalized) || Boolean(numeric && selectedTokens.has(numeric.replace(/^0+/, "") || numeric));
+	});
+}
+
+function filterExecutableIteration(iteration: WorkPlanIteration): { iteration: WorkPlanIteration; omittedIds: string[] } {
+	const items = Array.isArray(iteration.items) ? iteration.items : [];
+	const selectedTokens = new Set(items.flatMap((item) => Array.from(workItemReferenceTokens(item))));
+	const executable = items.filter((item) => !isExplicitlyDependencyBlockedWorkItem(item) && !dependsOnSelectedWorkItem(item, selectedTokens) && !isHitlWorkItem(item, iteration));
+	const executableIds = new Set(executable.map((item) => item.id));
+	return {
+		iteration: { ...iteration, items: executable },
+		omittedIds: items.filter((item) => !executableIds.has(item.id)).map((item) => item.id).filter((id): id is string => typeof id === "string" && id.length > 0),
+	};
+}
+
 export function buildExecutionGroups(input: { runId: string; pipeline: string; iteration: WorkPlanIteration }): WorkExecutionGroup[] {
 	const items = Array.isArray(input.iteration.items) ? input.iteration.items : [];
 	const parallel = planIterationSupportsParallel(input.iteration);
@@ -389,6 +455,7 @@ export function applyWorkProcessResult(record: WorkProcessRunRecord, execution: 
 		branches: execution.branches || record.branches,
 		logs: execution.logs || [],
 		workerStatuses: execution.workerStatuses || record.workerStatuses,
+		workSourceMutations: execution.workSourceMutations || record.workSourceMutations,
 		updatedAt: endedAt,
 		endedAt,
 	};
@@ -427,6 +494,10 @@ export async function runWorkProcess(input: RunWorkProcessInput, deps: RunWorkPr
 		const currentPlan = await deps.plan(input.cwd, planResult.query || input.query);
 		iteration = revalidateCachedPlanIteration({ planId: input.planId, plannedIteration: iteration, currentPlan, advisoryNotes });
 	}
+	const filtered = filterExecutableIteration(iteration);
+	iteration = filtered.iteration;
+	if (filtered.omittedIds.length) advisoryNotes.push(`Work readiness was revalidated before execution; omitted non-executable Work Items: ${filtered.omittedIds.join(", ")}.`);
+	if (!iteration.items?.length) throw new Error(`No currently executable Work Items were selected for processing. Omitted non-executable Work Items: ${filtered.omittedIds.join(", ") || "none"}.`);
 
 	const pipeline = selectWorkProcessPipeline({ explicitPipeline: input.explicitPipeline, defaultPipeline: input.defaultPipeline });
 	const startedAt = now();

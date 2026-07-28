@@ -46,8 +46,21 @@ import { buildSandcastleImage } from "./build-image.ts";
 import { registerWorkCommands } from "./work-source.mjs";
 import { buildDefaultConfigText, configToYaml, packsToConfig } from "./pipeline-packs.mjs";
 import { renderWorkBrief } from "./work-brief.mjs";
-import { loadExecutionRuntimePack, listRuntimeAgents, listRuntimePipelines } from "./execution-runtime.ts";
+import { collectRuntimeAdapterCapabilities, loadExecutionRuntimePack, listRuntimeAgents, listRuntimePipelines } from "./execution-runtime.ts";
 import { executeGraphWorkflow, type CompositeResult, type GitMergeResult, type GraphNodeExecutionContext, type GraphWorkflowNode, type NodeResult } from "./graph-executor.ts";
+import { discoverHooksByCapability, type GraphNodeHook, type HookContext } from "./hooks.ts";
+export {
+	HOOK_PHASES,
+	HOOK_TOPOLOGIES,
+	WELL_KNOWN_HOOK_CONTEXT_NAMESPACES,
+	discoverHooksByCapability,
+	runHooksForPhase,
+	sortHooksForPhase,
+	type GraphNodeHook,
+	type HookContext,
+	type HookPhase,
+	type HookTopology,
+} from "./hooks.ts";
 import {
 	runWorkProcess,
 	validateExecutablePlanArtifact,
@@ -56,6 +69,7 @@ import {
 	type WorkExecutionGroup,
 	type WorkItem,
 	type WorkProcessRunRecord,
+	type WorkSourceMutationOutcome,
 } from "./orchestrator.ts";
 import {
 	formatStatusSelection,
@@ -64,6 +78,8 @@ import {
 	resumeWorkRun,
 	selectWorkRunForStatus,
 } from "./work-runs.mjs";
+import { createDocVaderWorkSourceAdapter, createDocVaderWorkSourceHooks } from "./work-source-adapters.mjs";
+export { createDocVaderWorkSourceAdapter, createDocVaderWorkSourceHooks } from "./work-source-adapters.mjs";
 
 const ToolType = {
 	Object(schema: Record<string, unknown>) {
@@ -92,11 +108,6 @@ interface AgentDef {
 
 type SandcastleSandbox = NonNullable<AgentDef["sandbox"]>;
 
-interface ChainStep {
-	role: string;
-	prompt: string;
-}
-
 interface PipelineStep {
 	role: string;
 	description?: string;
@@ -113,6 +124,7 @@ interface PipelineStep {
 interface PipelineNodeDef {
 	kind?: string;
 	needs?: string[];
+	capabilities?: string[];
 	role?: string;
 	prompt?: string;
 	promptOverride?: string;
@@ -135,7 +147,7 @@ interface PipelineDef {
 	model?: string;
 	copyToWorktree?: string[];
 	nodes?: Record<string, PipelineNodeDef>;
-	steps: PipelineStep[];
+	steps?: PipelineStep[];
 	[key: string]: unknown;
 }
 
@@ -160,7 +172,6 @@ interface SandcastleConfig {
 	imageNamePattern?: string;
 	prompts: Record<string, PromptDef>;
 	agents: Record<string, AgentDef>;
-	chains: Record<string, ChainStep[]>;
 	pipelines: Record<string, PipelineDef>;
 }
 
@@ -397,6 +408,8 @@ type BacklogProcessStatus = BacklogProcessRecord["status"];
 interface BacklogExecutionResult {
 	branches: string[];
 	logs: string[];
+	workerStatuses?: WorkProcessRunRecord["workerStatuses"];
+	workSourceMutations?: WorkSourceMutationOutcome[];
 	status: BacklogProcessStatus;
 }
 
@@ -414,10 +427,16 @@ interface RunPlanWorkRoleInput {
 	ctx?: any;
 }
 
+interface WorkSourceMutationAdapter {
+	validate?: (input: { itemId: string; cwd: string; runId: string; pipeline: string; recordPath: string; item?: WorkItem }) => Promise<unknown> | unknown;
+	close?: (input: { itemId: string; cwd: string; runId: string; pipeline: string; recordPath: string; item?: WorkItem }) => Promise<unknown> | unknown;
+}
+
 interface BacklogProcessPlanDeps {
 	ready?: (cwd: string, args: string) => Promise<string>;
 	runPlanWorkRole?: (input: RunPlanWorkRoleInput) => Promise<any>;
 	plan?: (cwd: string, query: string) => Promise<BacklogPlanResult>;
+	workSourceAdapter?: WorkSourceMutationAdapter;
 	execute?: (
 		cwd: string,
 		input: {
@@ -430,7 +449,7 @@ interface BacklogProcessPlanDeps {
 			executionGroups: WorkExecutionGroup[];
 			recordPath: string;
 		},
-	) => Promise<{ branches?: string[]; logs?: string[]; workerStatuses?: Array<{ index: number; role: string; status: "running" | "completed" | "failed"; branch?: string; commits?: string[]; logPath?: string; error?: string }>; status?: BacklogProcessRecord["status"] }>;
+	) => Promise<{ branches?: string[]; logs?: string[]; workerStatuses?: Array<{ index: number; role: string; status: "running" | "completed" | "failed"; branch?: string; commits?: string[]; logPath?: string; error?: string }>; workSourceMutations?: WorkSourceMutationOutcome[]; status?: BacklogProcessRecord["status"] }>;
 	now?: () => number;
 }
 
@@ -473,7 +492,6 @@ type EditableAgentField = "description" | "kind" | "model" | "sandbox" | "maxIte
 
 const CONFIG_DIR = ".pi/sandcastle";
 const CONFIG_PATH = `${CONFIG_DIR}/config.yaml`;
-const LEGACY_CONFIG_PATH = `${CONFIG_DIR}/agents.yaml`;
 const RUNNER_PATH = `${CONFIG_DIR}/run-job.mjs`;
 const JOBS_DIR = `${CONFIG_DIR}/jobs`;
 const RESULTS_DIR = `${CONFIG_DIR}/results`;
@@ -513,8 +531,9 @@ function shellEscape(value) {
   return "'" + String(value).replace(/'/g, "'\\''") + "'";
 }
 
-function sandboxOptions(imageName, hostPiAgentDir, hostPiFileMounts) {
+function sandboxOptions(imageName, hostPiAgentDir, hostPiFileMounts, sandboxKind) {
   const options = imageName ? { imageName } : {};
+  if (sandboxKind === "podman") options.userns = false;
   if (hostPiAgentDir) {
     options.mounts = [
       { hostPath: hostPiAgentDir, sandboxPath: "/home/agent/.pi-host-agent", readonly: false },
@@ -706,10 +725,11 @@ function extractPlanObject(assistantTexts, stdout) {
 }
 
 async function loadSandbox(kind, imageName, _hostPiConfig, hostPiAgentDir, hostPiFileMounts) {
-  if (kind === "podman") return (await import("@ai-hero/sandcastle/sandboxes/podman")).podman(sandboxOptions(imageName, hostPiAgentDir, hostPiFileMounts));
+  const options = sandboxOptions(imageName, hostPiAgentDir, hostPiFileMounts, kind);
+  if (kind === "podman") return (await import("@ai-hero/sandcastle/sandboxes/podman")).podman(options);
   if (kind === "vercel") return (await import("@ai-hero/sandcastle/sandboxes/vercel")).vercel();
   if (kind === "no-sandbox") return (await import("@ai-hero/sandcastle/sandboxes/no-sandbox")).noSandbox();
-  return (await import("@ai-hero/sandcastle/sandboxes/docker")).docker(sandboxOptions(imageName, hostPiAgentDir, hostPiFileMounts));
+  return (await import("@ai-hero/sandcastle/sandboxes/docker")).docker(options);
 }
 
 try {
@@ -793,612 +813,6 @@ try {
 } finally {
   if (job?.hostPiAgentDir) rmSync(job.hostPiAgentDir, { recursive: true, force: true });
 }
-`;
-
-const LEGACY_SAMPLE_CONFIG = `# Agent Workflows delegation config.
-# Mirrors the out-of-the-box @ai-hero/sandcastle templates.
-# Install runtime once with: npm install --save-dev @ai-hero/sandcastle
-# Optional first-time Sandcastle setup: npx @ai-hero/sandcastle init
-
-defaultSandbox: docker
-defaultModel: Agent Default
-defaultPipeline: simple-loop
-defaultAgent: claude-code
-maxWorkers: 5
-maxIterations: 10
-workSource: github-issues
-# Optional command to configure a custom Work Source after Sandcastle init.
-# workSourceSetupCommand: pi "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"
-imageNamePattern: sandcastle:<repo-dir-name>
-
-agents:
-  planner:
-    description: Deep-reasoning planner for dependency analysis and work selection.
-    model: claude-opus-4-8
-    sandbox: docker
-    maxIterations: 1
-    systemPrompt: |
-      You are the Sandcastle planner agent.
-  worker:
-    description: Simple-loop worker that picks and closes one open task at a time.
-    model: claude-sonnet-4-6
-    sandbox: docker
-    maxIterations: 3
-    systemPrompt: |
-      You are the Sandcastle worker agent.
-  implementer:
-    description: Implementation agent for a selected task or branch.
-    model: claude-sonnet-4-6
-    sandbox: docker
-    maxIterations: 100
-    systemPrompt: |
-      You are the Sandcastle implementer agent.
-  reviewer:
-    description: Reviewer for branch diffs, correctness, tests, and merge blockers.
-    model: claude-sonnet-4-6
-    sandbox: docker
-    maxIterations: 1
-    systemPrompt: |
-      You are the Sandcastle reviewer agent.
-  merger:
-    description: Merger that combines completed branches and resolves conflicts.
-    model: claude-sonnet-4-6
-    sandbox: docker
-    maxIterations: 1
-    systemPrompt: |
-      You are the Sandcastle merger agent.
-
-
-pipelines:
-  simple-loop:
-    description: Sandcastle simple-loop template: one worker picks open issues and closes them.
-    branchStrategy:
-      type: merge-to-head
-    sandbox: docker
-    model: claude-sonnet-4-6
-    copyToWorktree: [node_modules]
-    steps:
-      - role: worker
-        prompt: |
-          # Context
-          
-          ## Open issues
-          
-          !\`{{LIST_TASKS_COMMAND}}\`
-          
-          The list above has already been filtered to issues ready for work and is the sole source of truth for what work exists. Do not run your own unfiltered query to find more issues — if the list is empty, there is nothing to do.
-          
-          ## Recent RALPH commits (last 10)
-          
-          !\`git log --oneline --grep="RALPH" -10\`
-          
-          # Task
-          
-          You are RALPH — an autonomous coding agent working through issues one at a time.
-          
-          ## Priority order
-          
-          Work on issues in this order:
-          
-          1. **Bug fixes** — broken behaviour affecting users
-          2. **Tracer bullets** — thin end-to-end slices that prove an approach works
-          3. **Polish** — improving existing functionality (error messages, UX, docs)
-          4. **Refactors** — internal cleanups with no user-visible change
-          
-          Pick the highest-priority open issue that is not blocked by another open issue.
-          
-          ## Workflow
-          
-          1. **Explore** — read the issue carefully. Pull in the parent PRD if referenced. Read the relevant source files and tests before writing any code.
-          2. **Plan** — decide what to change and why. Keep the change as small as possible.
-          3. **Execute** — use RGR (Red → Green → Repeat → Refactor): write a failing test first, then write the implementation to pass it.
-          4. **Verify** — run \`npm run typecheck\` and \`npm run test\` before committing. Fix any failures before proceeding.
-          5. **Commit** — make a single git commit. The message MUST:
-             - Start with \`RALPH:\` prefix
-             - Include the task completed and any PRD reference
-             - List key decisions made
-             - List files changed
-             - Note any blockers for the next iteration
-          6. **Close** — close the issue with \`{{CLOSE_TASK_COMMAND}}\` explaining what was done.
-          
-          ## Rules
-          
-          - Work on **one issue per iteration**. Do not attempt multiple issues in a single iteration.
-          - Do not close an issue until you have committed the fix and verified tests pass.
-          - Do not leave commented-out code or TODO comments in committed code.
-          - If you are blocked (missing context, failing tests you cannot fix, external dependency), leave a comment on the issue and move on — do not close it.
-          
-          # Done
-          
-          When all actionable issues are complete (or you are blocked on all remaining ones), or the open-issues block at the top of this prompt is empty, output the completion signal:
-          
-          <promise>COMPLETE</promise>
-        maxIterations: 3
-
-  sequential-reviewer:
-    description: Sandcastle sequential-reviewer template: implement one issue, then review the branch.
-    branchStrategy:
-      type: branch
-      branch: sandcastle/sequential-reviewer
-    sandbox: docker
-    model: claude-sonnet-4-6
-    copyToWorktree: [node_modules]
-    steps:
-      - role: implementer
-        prompt: |
-          # Context
-          
-          ## Open issues
-          
-          !\`{{LIST_TASKS_COMMAND}}\`
-          
-          The list above has already been filtered to issues ready for work and is the sole source of truth for what work exists. Do not run your own unfiltered query to find more issues — if the list is empty, there is nothing to do.
-          
-          ## Recent RALPH commits (last 10)
-          
-          !\`git log --oneline --grep="RALPH" -10\`
-          
-          # Task
-          
-          You are RALPH — an autonomous coding agent working through issues one at a time.
-          
-          ## Priority order
-          
-          Work on issues in this order:
-          
-          1. **Bug fixes** — broken behaviour affecting users
-          2. **Tracer bullets** — thin end-to-end slices that prove an approach works
-          3. **Polish** — improving existing functionality (error messages, UX, docs)
-          4. **Refactors** — internal cleanups with no user-visible change
-          
-          Pick the highest-priority open issue that is not blocked by another open issue.
-          
-          ## Workflow
-          
-          1. **Explore** — read the issue carefully. Pull in the parent PRD if referenced. Read the relevant source files and tests before writing any code.
-          2. **Plan** — decide what to change and why. Keep the change as small as possible.
-          3. **Execute** — use RGR (Red → Green → Repeat → Refactor): write a failing test first, then write the implementation to pass it.
-          4. **Verify** — run \`npm run typecheck\` and \`npm run test\` before committing. Fix any failures before proceeding.
-          5. **Commit** — make a single git commit. The message MUST:
-             - Start with \`RALPH:\` prefix
-             - Include the task completed and any PRD reference
-             - List key decisions made
-             - List files changed
-             - Note any blockers for the next iteration
-          6. **Close** — close the issue with \`{{CLOSE_TASK_COMMAND}}\` explaining what was done.
-          
-          ## Rules
-          
-          - Work on **one issue per iteration**. Do not attempt multiple issues in a single iteration.
-          - Do not close an issue until you have committed the fix and verified tests pass.
-          - Do not leave commented-out code or TODO comments in committed code.
-          - If you are blocked (missing context, failing tests you cannot fix, external dependency), leave a comment on the issue and move on — do not close it.
-          
-          # Done
-          
-          When all actionable issues are complete (or you are blocked on all remaining ones), or the open-issues block at the top of this prompt is empty, output the completion signal:
-          
-          <promise>COMPLETE</promise>
-        maxIterations: 1
-      - role: reviewer
-        prompt: |
-          # TASK
-          
-          Review the code changes on branch \`{{BRANCH}}\` and improve code clarity, consistency, and maintainability while preserving exact functionality.
-          
-          # CONTEXT
-          
-          ## Branch diff
-          
-          !\`git diff {{TARGET_BRANCH}}...{{BRANCH}}\`
-          
-          ## Commits on this branch
-          
-          !\`git log {{TARGET_BRANCH}}..{{BRANCH}} --oneline\`
-          
-          # REVIEW PROCESS
-          
-          1. **Understand the change**: Read the diff and commits above to understand the intent.
-          
-          2. **Analyze for improvements**: Look for opportunities to:
-             - Reduce unnecessary complexity and nesting
-             - Eliminate redundant code and abstractions
-             - Improve readability through clear variable and function names
-             - Consolidate related logic
-             - Remove unnecessary comments that describe obvious code
-             - Avoid nested ternary operators - prefer switch statements or if/else chains
-             - Choose clarity over brevity - explicit code is often better than overly compact code
-          
-          3. **Check correctness**:
-             - Does the implementation match the intent? Are edge cases handled?
-             - Are new/changed behaviours covered by tests?
-             - Are there unsafe casts, \`any\` types, or unchecked assumptions?
-             - Does the change introduce injection vulnerabilities, credential leaks, or other security issues?
-          
-          4. **Maintain balance**: Avoid over-simplification that could:
-             - Reduce code clarity or maintainability
-             - Create overly clever solutions that are hard to understand
-             - Combine too many concerns into single functions or components
-             - Remove helpful abstractions that improve code organization
-             - Make the code harder to debug or extend
-          
-          5. **Apply project standards**: Follow the coding standards defined in @.sandcastle/CODING_STANDARDS.md
-          
-          6. **Preserve functionality**: Never change what the code does - only how it does it. All original features, outputs, and behaviors must remain intact.
-          
-          # EXECUTION
-          
-          If you find improvements to make:
-          
-          1. Make the changes directly on this branch
-          2. Run tests and type checking to ensure nothing is broken
-          3. Commit describing the refinements
-          
-          If the code is already clean and well-structured, do nothing.
-          
-          Once complete, output <promise>COMPLETE</promise>.
-        maxIterations: 1
-
-  parallel-planner:
-    description: Sandcastle parallel-planner template: plan unblocked work, implement branches, then merge.
-    branchStrategy:
-      type: branch
-      branch: sandcastle/parallel-planner
-    sandbox: docker
-    model: claude-sonnet-4-6
-    copyToWorktree: [node_modules]
-    steps:
-      - role: planner
-        prompt: |
-          # ISSUES
-          
-          Here are the open issues in the repo:
-          
-          <issues-json>
-          
-          !\`{{LIST_TASKS_COMMAND}}\`
-          
-          </issues-json>
-          
-          The list above has already been filtered to issues ready for work.
-          
-          # TASK
-          
-          Analyze the open issues and build a dependency graph. For each issue, determine whether it **blocks** or **is blocked by** any other open issue.
-          
-          An issue B is **blocked by** issue A if:
-          
-          - B requires code or infrastructure that A introduces
-          - B and A modify overlapping files or modules, making concurrent work likely to produce merge conflicts
-          - B's requirements depend on a decision or API shape that A will establish
-          
-          An issue is **unblocked** if it has zero blocking dependencies on other open issues.
-          
-          For each unblocked issue, assign a branch name using the exact format \`sandcastle/issue-{id}\` (no slug or other suffix). This must be deterministic so that re-planning the same issue always produces the same branch name and accumulated progress is preserved.
-          
-          # OUTPUT
-          
-          Output your plan as a JSON object wrapped in \`<plan>\` tags:
-          
-          <plan>
-          {"issues": [{"id": "42", "title": "Fix auth bug", "branch": "sandcastle/issue-42"}]}
-          </plan>
-          
-          Include only unblocked issues. If every issue is blocked, include the single highest-priority candidate (the one with the fewest or weakest dependencies).
-          
-          Always emit the \`<plan>\` tags, even when there is nothing to do. If there are no issues to work on at all, output \`<plan>{"issues": []}</plan>\` so the run can exit cleanly.
-        maxIterations: 1
-      - role: implementer
-        prompt: |
-          # TASK
-          
-          Fix issue {{TASK_ID}}: {{ISSUE_TITLE}}
-          
-          Pull in the issue using \`{{VIEW_TASK_COMMAND}}\`. If it has a parent PRD, pull that in too.
-          
-          Only work on the issue specified.
-          
-          Work on branch {{BRANCH}}. Make commits and run tests.
-          
-          # CONTEXT
-          
-          Here are the last 10 commits:
-          
-          <recent-commits>
-          
-          !\`git log -n 10 --format="%H%n%ad%n%B---" --date=short\`
-          
-          </recent-commits>
-          
-          # EXPLORATION
-          
-          Explore the repo and fill your context window with relevant information that will allow you to complete the task.
-          
-          Pay extra attention to test files that touch the relevant parts of the code.
-          
-          # EXECUTION
-          
-          If applicable, use RGR to complete the task.
-          
-          1. RED: write one test
-          2. GREEN: write the implementation to pass that test
-          3. REPEAT until done
-          4. REFACTOR the code
-          
-          # FEEDBACK LOOPS
-          
-          Before committing, run \`npm run typecheck\` and \`npm run test\` to ensure the tests pass.
-          
-          # COMMIT
-          
-          Make a git commit. The commit message must:
-          
-          1. Start with \`RALPH:\` prefix
-          2. Include task completed + PRD reference
-          3. Key decisions made
-          4. Files changed
-          5. Blockers or notes for next iteration
-          
-          Keep it concise.
-          
-          # THE ISSUE
-          
-          If the task is not complete, leave a comment on the issue with what was done.
-          
-          Do not close the issue - this will be done later.
-          
-          Once complete, output <promise>COMPLETE</promise>.
-          
-          # FINAL RULES
-          
-          ONLY WORK ON A SINGLE TASK.
-        maxIterations: 100
-      - role: merger
-        prompt: |
-          # TASK
-          
-          Merge the following branches into the current branch:
-          
-          {{BRANCHES}}
-          
-          For each branch:
-          
-          1. Run \`git merge <branch> --no-edit\`
-          2. If there are merge conflicts, resolve them intelligently by reading both sides and choosing the correct resolution
-          3. After resolving conflicts, run \`npm run typecheck\` and \`npm run test\` to verify everything works
-          4. If tests fail, fix the issues before proceeding to the next branch
-          
-          After all branches are merged, make a single commit summarizing the merge.
-          
-          # CLOSE ISSUES
-          
-          For each branch that was merged, close its issue using the following command:
-          
-          \`{{CLOSE_TASK_COMMAND}}\`
-          
-          Here are all the issues:
-          
-          {{ISSUES}}
-          
-          Once you've merged everything you can, output <promise>COMPLETE</promise>.
-        maxIterations: 1
-
-  parallel-planner-with-review:
-    description: Sandcastle parallel-planner-with-review template: plan, implement, review, then merge.
-    branchStrategy:
-      type: branch
-      branch: sandcastle/parallel-planner-with-review
-    sandbox: docker
-    model: claude-sonnet-4-6
-    copyToWorktree: [node_modules]
-    steps:
-      - role: planner
-        prompt: |
-          # ISSUES
-          
-          Here are the open issues in the repo:
-          
-          <issues-json>
-          
-          !\`{{LIST_TASKS_COMMAND}}\`
-          
-          </issues-json>
-          
-          The list above has already been filtered to issues ready for work.
-          
-          # TASK
-          
-          Analyze the open issues and build a dependency graph. For each issue, determine whether it **blocks** or **is blocked by** any other open issue.
-          
-          An issue B is **blocked by** issue A if:
-          
-          - B requires code or infrastructure that A introduces
-          - B and A modify overlapping files or modules, making concurrent work likely to produce merge conflicts
-          - B's requirements depend on a decision or API shape that A will establish
-          
-          An issue is **unblocked** if it has zero blocking dependencies on other open issues.
-          
-          For each unblocked issue, assign a branch name using the exact format \`sandcastle/issue-{id}\` (no slug or other suffix). This must be deterministic so that re-planning the same issue always produces the same branch name and accumulated progress is preserved.
-          
-          # OUTPUT
-          
-          Output your plan as a JSON object wrapped in \`<plan>\` tags:
-          
-          <plan>
-          {"issues": [{"id": "42", "title": "Fix auth bug", "branch": "sandcastle/issue-42"}]}
-          </plan>
-          
-          Include only unblocked issues. If every issue is blocked, include the single highest-priority candidate (the one with the fewest or weakest dependencies).
-          
-          Always emit the \`<plan>\` tags, even when there is nothing to do. If there are no issues to work on at all, output \`<plan>{"issues": []}</plan>\` so the run can exit cleanly.
-        maxIterations: 1
-      - role: implementer
-        prompt: |
-          # TASK
-          
-          Fix issue {{TASK_ID}}: {{ISSUE_TITLE}}
-          
-          Pull in the issue using \`{{VIEW_TASK_COMMAND}}\`. If it has a parent PRD, pull that in too.
-          
-          Only work on the issue specified.
-          
-          Work on branch {{BRANCH}}. Make commits and run tests.
-          
-          # CONTEXT
-          
-          Here are the last 10 commits:
-          
-          <recent-commits>
-          
-          !\`git log -n 10 --format="%H%n%ad%n%B---" --date=short\`
-          
-          </recent-commits>
-          
-          # EXPLORATION
-          
-          Explore the repo and fill your context window with relevant information that will allow you to complete the task.
-          
-          Pay extra attention to test files that touch the relevant parts of the code.
-          
-          # EXECUTION
-          
-          If applicable, use RGR to complete the task.
-          
-          1. RED: write one test
-          2. GREEN: write the implementation to pass that test
-          3. REPEAT until done
-          4. REFACTOR the code
-          
-          # FEEDBACK LOOPS
-          
-          Before committing, run \`npm run typecheck\` and \`npm run test\` to ensure the tests pass.
-          
-          # COMMIT
-          
-          Make a git commit. The commit message must:
-          
-          1. Start with \`RALPH:\` prefix
-          2. Include task completed + PRD reference
-          3. Key decisions made
-          4. Files changed
-          5. Blockers or notes for next iteration
-          
-          Keep it concise.
-          
-          # THE ISSUE
-          
-          If the task is not complete, leave a comment on the issue with what was done.
-          
-          Do not close the issue - this will be done later.
-          
-          Once complete, output <promise>COMPLETE</promise>.
-          
-          # FINAL RULES
-          
-          ONLY WORK ON A SINGLE TASK.
-        maxIterations: 100
-      - role: reviewer
-        prompt: |
-          # TASK
-          
-          Review the code changes on branch \`{{BRANCH}}\` and improve code clarity, consistency, and maintainability while preserving exact functionality.
-          
-          # CONTEXT
-          
-          ## Branch diff
-          
-          !\`git diff {{TARGET_BRANCH}}...{{BRANCH}}\`
-          
-          ## Commits on this branch
-          
-          !\`git log {{TARGET_BRANCH}}..{{BRANCH}} --oneline\`
-          
-          # REVIEW PROCESS
-          
-          1. **Understand the change**: Read the diff and commits above to understand the intent.
-          
-          2. **Analyze for improvements**: Look for opportunities to:
-             - Reduce unnecessary complexity and nesting
-             - Eliminate redundant code and abstractions
-             - Improve readability through clear variable and function names
-             - Consolidate related logic
-             - Remove unnecessary comments that describe obvious code
-             - Avoid nested ternary operators - prefer switch statements or if/else chains
-             - Choose clarity over brevity - explicit code is often better than overly compact code
-          
-          3. **Check correctness**:
-             - Does the implementation match the intent? Are edge cases handled?
-             - Are new/changed behaviours covered by tests?
-             - Are there unsafe casts, \`any\` types, or unchecked assumptions?
-             - Does the change introduce injection vulnerabilities, credential leaks, or other security issues?
-          
-          4. **Maintain balance**: Avoid over-simplification that could:
-             - Reduce code clarity or maintainability
-             - Create overly clever solutions that are hard to understand
-             - Combine too many concerns into single functions or components
-             - Remove helpful abstractions that improve code organization
-             - Make the code harder to debug or extend
-          
-          5. **Apply project standards**: Follow the coding standards defined in @.sandcastle/CODING_STANDARDS.md
-          
-          6. **Preserve functionality**: Never change what the code does - only how it does it. All original features, outputs, and behaviors must remain intact.
-          
-          # EXECUTION
-          
-          If you find improvements to make:
-          
-          1. Make the changes directly on this branch
-          2. Run tests and type checking to ensure nothing is broken
-          3. Commit describing the refinements
-          
-          If the code is already clean and well-structured, do nothing.
-          
-          Once complete, output <promise>COMPLETE</promise>.
-        maxIterations: 1
-      - role: merger
-        prompt: |
-          # TASK
-          
-          Merge the following branches into the current branch:
-          
-          {{BRANCHES}}
-          
-          For each branch:
-          
-          1. Run \`git merge <branch> --no-edit\`
-          2. If there are merge conflicts, resolve them intelligently by reading both sides and choosing the correct resolution
-          3. After resolving conflicts, run \`npm run typecheck\` and \`npm run test\` to verify everything works
-          4. If tests fail, fix the issues before proceeding to the next branch
-          
-          After all branches are merged, make a single commit summarizing the merge.
-          
-          # CLOSE ISSUES
-          
-          For each branch that was merged, close its issue using the following command:
-          
-          \`{{CLOSE_TASK_COMMAND}}\`
-          
-          Here are all the issues:
-          
-          {{ISSUES}}
-          
-          Once you've merged everything you can, output <promise>COMPLETE</promise>.
-        maxIterations: 1
-
-  archive:
-    description: Doc-Vader archive helper for terminal-state backlog reconciliation.
-    branchStrategy:
-      type: branch
-      branch: sandcastle/archive
-    sandbox: docker
-    model: claude-sonnet-4-6
-    steps:
-      - role: reviewer
-        prompt: |
-          Inspect terminal-state backlog work and identify safe archive/reconciliation actions.
-
-$INPUT
-        maxIterations: 1
 `;
 
 function tokenizeCommandArgs(raw: string): string[] {
@@ -1660,6 +1074,7 @@ function readWorkItems(cwd: string): WorkItem[] {
 
 const readBacklogItems = readWorkItems;
 
+
 const SAMPLE_CONFIG = configToYaml(packsToConfig());
 
 function matchesWorkQuery(item: WorkItem, query: string): boolean {
@@ -1734,11 +1149,6 @@ function ensureScaffold(cwd: string, options: { overwrite?: boolean; hydrate?: b
 	const changes: string[] = [];
 	const overwritten: string[] = [];
 	const configPath = join(cwd, CONFIG_PATH);
-	const legacyConfigPath = join(cwd, LEGACY_CONFIG_PATH);
-	if (!existsSync(configPath) && existsSync(legacyConfigPath) && !options.overwrite) {
-		writeFileSync(configPath, readFileSync(legacyConfigPath, "utf8"));
-		changes.push(`migrated ${LEGACY_CONFIG_PATH} to ${CONFIG_PATH}`);
-	}
 	const hadConfig = existsSync(configPath);
 	if (!hadConfig || options.overwrite) {
 		if (hadConfig && options.overwrite) overwritten.push(CONFIG_PATH);
@@ -1777,11 +1187,7 @@ function ensureScaffoldPath(cwd: string): string {
 }
 
 function existingConfigPath(cwd: string): string {
-	const configPath = join(cwd, CONFIG_PATH);
-	if (existsSync(configPath)) return configPath;
-	const legacyConfigPath = join(cwd, LEGACY_CONFIG_PATH);
-	if (existsSync(legacyConfigPath)) return legacyConfigPath;
-	return configPath;
+	return join(cwd, CONFIG_PATH);
 }
 
 function readConfigText(cwd: string): string {
@@ -1877,7 +1283,6 @@ function configForPresentation(cfg: SandcastleConfig): SandcastleConfig {
 		pipelines: Object.fromEntries(Object.entries(cfg.pipelines).map(([name, pipeline]) => [name, {
 			...pipeline,
 			model: presentModelSetting(pipeline.model) as string,
-			steps: (pipeline.steps || []).map((step) => ({ ...step, model: presentModelSetting(step.model) as string })),
 		}])) as Record<string, PipelineDef>,
 	};
 }
@@ -1895,8 +1300,6 @@ function readConfigValue(cfg: SandcastleConfig, path: string): unknown {
 	}
 	if (parts[0] === "pipelines" && parts.length === 3) return (cfg.pipelines[parts[1]] as any)?.[parts[2]];
 	if (parts[0] === "pipelines" && parts[2] === "nodes" && parts.length >= 5) return parts.slice(2).reduce((current: any, part) => current?.[part], cfg.pipelines[parts[1]] as any);
-	if (parts[0] === "pipelines" && parts[2] === "steps" && parts.length === 5) return (cfg.pipelines[parts[1]]?.steps?.[Number(parts[3])] as any)?.[parts[4]];
-	if (parts[0] === "chains" && parts.length === 2) return cfg.chains[parts[1]];
 	return undefined;
 }
 
@@ -1906,7 +1309,6 @@ function supportedConfigPath(path: string): boolean {
 	if (parts[0] === "roles" && parts.length === 3 && isEditableAgentField(parts[2])) return true;
 	if (parts[0] === "pipelines" && parts.length === 3 && ["description", "model", "sandbox"].includes(parts[2])) return true;
 	if (parts[0] === "pipelines" && parts[2] === "nodes" && parts.length >= 5 && ["role", "prompt", "promptOverride", "model", "sandbox", "maxIterations"].includes(parts.at(-1)!)) return true;
-	if (parts[0] === "pipelines" && parts[2] === "steps" && parts.length === 5 && ["role", "prompt", "model", "sandbox", "maxIterations"].includes(parts[4])) return true;
 	return false;
 }
 
@@ -1957,7 +1359,7 @@ function setConfigValueInText(raw: string, path: string, value: unknown): string
 				lines[i] = replacement;
 				return lines.join("\n");
 			}
-			if (/^(roles|prompts|chains|pipelines):\s*$/.test(lines[i])) {
+			if (/^(roles|prompts|pipelines):\s*$/.test(lines[i])) {
 				lines.splice(i, 0, replacement);
 				return lines.join("\n");
 			}
@@ -2093,13 +1495,7 @@ function appendPipelineText(raw: string, name: string): string {
 }
 
 function resetConfigText(raw: string, path?: string): string {
-	if (!path) {
-		let updated = raw;
-		for (const name of ROOT_CONFIG_KEYS) {
-			updated = setConfigValueInText(updated, name, defaultConfigValue(name));
-		}
-		return updated;
-	}
+	if (!path) return SAMPLE_CONFIG;
 	return setConfigValueInText(raw, path, defaultConfigValue(path));
 }
 
@@ -2200,7 +1596,7 @@ function validateAgainstSchema(value: any, schema: any, root: any = schema, path
 }
 
 function validateRawConfigText(raw: string): string[] {
-	const allowedTopLevel = new Set(["runtimeVersion", ...ROOT_CONFIG_KEYS, "issueTracker", "issueTrackerSetupCommand", "roles", "prompts", "policies", "pipelines", "chains"]);
+	const allowedTopLevel = new Set(["runtimeVersion", ...ROOT_CONFIG_KEYS, "issueTracker", "issueTrackerSetupCommand", "roles", "prompts", "policies", "pipelines"]);
 	const issues: string[] = [];
 	for (const line of raw.replace(/\r/g, "").split("\n")) {
 		const match = line.match(/^([A-Za-z0-9_-]+):\s*/);
@@ -2225,13 +1621,12 @@ function configForSchemaValidation(cfg: SandcastleConfig): Record<string, unknow
 	delete value.agents;
 	delete value.issueTracker;
 	delete value.issueTrackerSetupCommand;
-	const stripped = stripUndefinedAndInternalKeys(value) as Record<string, unknown>;
-	if (isRecord(stripped.pipelines)) {
-		for (const pipeline of Object.values(stripped.pipelines)) {
-			if (isRecord(pipeline) && (pipeline.kind !== undefined || pipeline.nodes !== undefined) && Array.isArray(pipeline.steps) && pipeline.steps.length === 0) delete pipeline.steps;
-		}
-	}
-	return stripped;
+	return stripUndefinedAndInternalKeys(value) as Record<string, unknown>;
+}
+
+function assertGraphNativeConfig(cwd: string, cfg: SandcastleConfig): void {
+	const issues = validateAgainstSchema(configForSchemaValidation(cfg), loadConfigSchema());
+	if (issues.length) throw new Error(`Invalid Agent Workflows configuration in ${join(cwd, CONFIG_PATH)}:\n- ${issues.join("\n- ")}`);
 }
 
 function validateConfig(cwd: string, cfg: SandcastleConfig): string[] {
@@ -2257,16 +1652,6 @@ function validateConfig(cwd: string, cfg: SandcastleConfig): string[] {
 	}
 	const planWorkRoles = Object.entries(cfg.agents).filter(([, agent]) => agent.kind === "planWork").map(([name]) => name);
 	if (planWorkRoles.length > 1) issues.push(`Exactly one role may have kind 'planWork'; found ${planWorkRoles.join(", ")}.`);
-	for (const [chainName, steps] of Object.entries(cfg.chains)) {
-		if (!Array.isArray(steps) || !steps.length) {
-			issues.push(`Chain '${chainName}' has no steps.`);
-			continue;
-		}
-		for (const step of steps) {
-			if (!cfg.agents[step.role]) issues.push(`Chain '${chainName}' references unknown role '${step.role}'.`);
-			if (!step.prompt || !step.prompt.trim()) issues.push(`Chain '${chainName}' has an empty prompt step.`);
-		}
-	}
 	if (cfg.defaultSandbox && !SUPPORTED_SANDBOXES.has(cfg.defaultSandbox)) {
 		issues.push(`Default sandbox provider '${cfg.defaultSandbox}' is unsupported.`);
 	}
@@ -2282,15 +1667,10 @@ function normalizeAgentConfig(agent: AgentDef): AgentDef {
 	return { ...agent, model: normalizeModelSetting(agent.model) };
 }
 
-function normalizePipelineStepConfig(step: PipelineStep): PipelineStep {
-	return { ...step, model: normalizeModelSetting(step.model) };
-}
-
 function normalizePipelineConfig(pipeline: PipelineDef): PipelineDef {
 	return {
 		...pipeline,
 		model: normalizeModelSetting(pipeline.model),
-		steps: (pipeline.steps || []).map(normalizePipelineStepConfig),
 	};
 }
 
@@ -2309,7 +1689,6 @@ function normalizeConfig(cfg: Partial<SandcastleConfig>): SandcastleConfig {
 		imageNamePattern: cfg.imageNamePattern ?? "sandcastle:<repo-dir-name>",
 		prompts: cfg.prompts || {},
 		agents: Object.fromEntries(Object.entries(cfg.agents || {}).map(([name, agent]) => [name, normalizeAgentConfig(agent)])),
-		chains: cfg.chains || {},
 		pipelines: Object.fromEntries(Object.entries(cfg.pipelines || {}).map(([name, pipeline]) => [name, normalizePipelineConfig(pipeline)])),
 	};
 }
@@ -2327,53 +1706,19 @@ function resolvePromptText(cfg: SandcastleConfig, promptRef: string): string {
 	return cfg.prompts[promptRef]?.template || promptRef;
 }
 
-function stepsMatchRolePromptShape(steps: PipelineStep[], expected: Array<{ role: string; prompt: string }>): boolean {
-	return steps.length === expected.length && steps.every((step, index) => step.role === expected[index]?.role && step.prompt === expected[index]?.prompt);
-}
-
-function pipelineStepsMatchDefaultLegacyShape(name: string, pipeline: PipelineDef, defaultPipeline: PipelineDef): boolean {
-	const steps = pipeline.steps || [];
-	const defaultSteps = defaultPipeline.steps || [];
-	if (!steps.length) return false;
-	if (stepsMatchRolePromptShape(steps, defaultSteps.map((step) => ({ role: step.role, prompt: step.prompt })))) return true;
-	const staleGeneratedShapes: Record<string, Array<{ role: string; prompt: string }>> = {
-		"parallel-planner": [
-			{ role: "planner", prompt: "plan-work" },
-			{ role: "implementer", prompt: "implement-work" },
-			{ role: "merger", prompt: "merge-work" },
-		],
-		"parallel-planner-with-review": [
-			{ role: "planner", prompt: "plan-work" },
-			{ role: "implementer", prompt: "implement-work" },
-			{ role: "reviewer", prompt: "review-work" },
-			{ role: "merger", prompt: "merge-work" },
-		],
-	};
-	return staleGeneratedShapes[name] ? stepsMatchRolePromptShape(steps, staleGeneratedShapes[name]) : false;
-}
-
 function mergeWithPackDefaults(cfg: SandcastleConfig): SandcastleConfig {
 	const agents = { ...DEFAULT_CONFIG.agents } as Record<string, AgentDef>;
 	for (const [name, agent] of Object.entries(cfg.agents || {})) agents[name] = { ...(DEFAULT_CONFIG.agents[name] || { name }), ...agent, name };
 	const pipelines = { ...DEFAULT_CONFIG.pipelines } as Record<string, PipelineDef>;
 	for (const [name, pipeline] of Object.entries(cfg.pipelines || {})) {
-		const defaultPipeline = DEFAULT_CONFIG.pipelines[name] || { steps: [] };
-		const userDefinesLegacySteps = Array.isArray(pipeline.steps) && pipeline.steps.length > 0 && !pipeline.nodes;
-		const staleGeneratedLegacyDefault = userDefinesLegacySteps && pipelineStepsMatchDefaultLegacyShape(name, pipeline, defaultPipeline);
-		pipelines[name] = {
-			...defaultPipeline,
-			...pipeline,
-			kind: pipeline.kind ?? (userDefinesLegacySteps && !staleGeneratedLegacyDefault ? undefined : defaultPipeline.kind),
-			nodes: pipeline.nodes ?? (userDefinesLegacySteps && !staleGeneratedLegacyDefault ? undefined : defaultPipeline.nodes),
-			steps: pipeline.steps || defaultPipeline.steps || [],
-		};
+		const defaultPipeline = DEFAULT_CONFIG.pipelines[name] || {};
+		pipelines[name] = { ...defaultPipeline, ...pipeline };
 	}
 	return {
 		...DEFAULT_CONFIG,
 		...cfg,
 		prompts: { ...DEFAULT_CONFIG.prompts, ...cfg.prompts },
 		agents,
-		chains: { ...DEFAULT_CONFIG.chains, ...cfg.chains },
 		pipelines,
 	};
 }
@@ -2587,7 +1932,7 @@ function normalizeParsedPipelineNode(value: Record<string, unknown>): PipelineNo
 }
 
 function normalizeParsedMapPipeline(value: Record<string, unknown>, fallback?: PipelineDef): PipelineDef {
-	const pipeline: PipelineDef = { ...(fallback || { steps: [] }), steps: fallback?.steps || [] };
+	const pipeline: PipelineDef = { ...(fallback || {}) };
 	for (const [key, entry] of Object.entries(value)) {
 		if (key === "nodes" && isRecord(entry)) pipeline.nodes = normalizeParsedPipelineNodes(entry);
 		else if (key === "steps" && Array.isArray(entry)) pipeline.steps = entry as PipelineStep[];
@@ -2608,15 +1953,13 @@ function mergeMapFormPipelines(raw: string, pipelines: Record<string, PipelineDe
 }
 
 export function parseSimpleYaml(raw: string): SandcastleConfig {
-	const cfg: SandcastleConfig = { prompts: {}, agents: {}, chains: {}, pipelines: {} };
+	const cfg: SandcastleConfig = { prompts: {}, agents: {}, pipelines: {} };
 	const lines = raw.replace(/\r/g, "").split("\n");
 	let section = "";
 	let currentAgent = "";
 	let currentPrompt = "";
-	let currentChain = "";
 	let currentPipeline = "";
 	let currentPipelineStep: PipelineStep | null = null;
-	let currentStep: ChainStep | null = null;
 	let currentBranchStrategy: PipelineBranchStrategyConfig | null = null;
 	let blockTarget: YamlBlockTarget | null = null;
 
@@ -2641,12 +1984,11 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 			setField(cfg, key, parseScalar(top[2]) as SandcastleConfig[typeof key]);
 			continue;
 		}
-		const sectionMatch = line.match(/^(roles|prompts|chains|pipelines):\s*$/);
+		const sectionMatch = line.match(/^(roles|prompts|pipelines):\s*$/);
 		if (sectionMatch) {
 			section = sectionMatch[1];
 			currentAgent = "";
 			currentPrompt = "";
-			currentChain = "";
 			currentPipeline = "";
 			currentPipelineStep = null;
 			currentBranchStrategy = null;
@@ -2686,32 +2028,11 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 			}
 			continue;
 		}
-		if (section === "chains") {
-			const chain = line.match(/^  (\S.*):\s*$/);
-			if (chain) {
-				currentChain = parseYamlMapKey(chain[1]);
-				cfg.chains[currentChain] = [];
-				continue;
-			}
-			const step = line.match(/^\s{4}-\s+role:\s*(.+)$/);
-			if (step && currentChain) {
-				currentStep = { role: parseScalar(step[1]), prompt: DEFAULT_STEP_PROMPT };
-				cfg.chains[currentChain].push(currentStep);
-				continue;
-			}
-			const prompt = line.match(/^\s{6}prompt:\s*(.*)$/);
-			if (prompt && currentStep) {
-				blockTarget = assignBlockOrScalar(prompt[1], 6, (value) => {
-					currentStep!.prompt = value;
-				});
-			}
-			continue;
-		}
 		if (section === "pipelines") {
 			const pipeline = line.match(/^  (\S.*):\s*$/);
 			if (pipeline) {
 				currentPipeline = parseYamlMapKey(pipeline[1]);
-				cfg.pipelines[currentPipeline] = { steps: [] };
+				cfg.pipelines[currentPipeline] = {};
 				currentPipelineStep = null;
 				currentBranchStrategy = null;
 				continue;
@@ -2741,20 +2062,20 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 			const roleStep = line.match(/^\s{6}-\s+role:\s*(.+)$/);
 			if (roleStep) {
 				currentPipelineStep = { kind: "runRole", role: parseScalar(roleStep[1]), prompt: DEFAULT_STEP_PROMPT };
-				cfg.pipelines[currentPipeline].steps.push(currentPipelineStep);
+				(cfg.pipelines[currentPipeline].steps ||= []).push(currentPipelineStep);
 				continue;
 			}
 			const unknownStep = line.match(/^\s{6}-\s+([A-Za-z0-9_-]+):\s*(.*)$/);
 			if (unknownStep) {
 				currentPipelineStep = { kind: "runRole", role: "", prompt: DEFAULT_STEP_PROMPT } as any;
 				setField(currentPipelineStep as any, unknownStep[1] as any, parseScalar(unknownStep[2]) as any);
-				cfg.pipelines[currentPipeline].steps.push(currentPipelineStep);
+				(cfg.pipelines[currentPipeline].steps ||= []).push(currentPipelineStep);
 				continue;
 			}
 			const kindStep = line.match(/^\s{6}-\s+kind:\s*(.+)$/);
 			if (kindStep) {
 				currentPipelineStep = { kind: parseScalar(kindStep[1]), role: "", prompt: DEFAULT_STEP_PROMPT };
-				cfg.pipelines[currentPipeline].steps.push(currentPipelineStep);
+				(cfg.pipelines[currentPipeline].steps ||= []).push(currentPipelineStep);
 				continue;
 			}
 			const pipelineStepField = line.match(/^\s{8}([A-Za-z0-9_-]+):\s*(.*)$/);
@@ -2773,12 +2094,15 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 
 async function loadConfig(cwd: string): Promise<SandcastleConfig> {
 	const raw = readConfigText(cwd);
-	return mergeWithPackDefaults(normalizeConfig(parseSimpleYaml(raw)));
+	const parsed = normalizeConfig(parseSimpleYaml(raw));
+	assertGraphNativeConfig(cwd, parsed);
+	return mergeWithPackDefaults(parsed);
 }
 
 async function loadExistingConfig(cwd: string): Promise<SandcastleConfig> {
 	const raw = readExistingConfigText(cwd);
-	return mergeWithPackDefaults(normalizeConfig(parseSimpleYaml(raw)));
+	const parsed = normalizeConfig(parseSimpleYaml(raw));
+	return mergeWithPackDefaults(parsed);
 }
 
 function resolveDefaultRunAgentName(cfg: SandcastleConfig): string | undefined {
@@ -2850,29 +2174,53 @@ function buildRunSummary(record: ScRunRecord): string {
 	return `Run ${record.id} ${record.status}: agent ${record.agent}; branch ${record.branch || "(pending)"}; commits ${commits}; log ${record.logPath || "(pending)"}`;
 }
 
+function statusGlyph(status: string | undefined): string {
+	if (status === "done" || status === "completed" || status === "succeeded") return "✓";
+	if (status === "error" || status === "failed") return "✗";
+	if (status === "running") return "▶";
+	return "•";
+}
+
 function formatPipelineWorkerRows(record: Pick<WorkProcessRunRecord, "workerStatuses"> | undefined): string[] {
-	return (record?.workerStatuses || []).map((step) => {
-		const item = step.itemId ? `; item ${step.itemId}` : "";
-		const node = step.nodePath ? `; node ${step.nodePath}` : "";
-		const lane = step.laneId ? `; lane ${step.laneId}` : "";
-		const branch = step.branch ? `; branch ${step.branch}` : "";
-		const commits = step.commits?.length ? `; commits ${step.commits.join(", ")}` : "";
-		const log = step.logPath ? `; log ${step.logPath}` : "";
-		return `Worker ${step.index + 1}: ${step.role} ${step.status}${item}${node}${lane}${branch}${commits}${log}`;
+	const workers = record?.workerStatuses || [];
+	if (!workers.length) return ["  (no worker details recorded)"];
+	return workers.map((step) => {
+		const details = [
+			step.itemId ? `item ${step.itemId}` : undefined,
+			step.nodePath ? `node ${step.nodePath}` : undefined,
+			step.laneId ? `lane ${step.laneId}` : undefined,
+			step.branch ? `branch ${step.branch}` : undefined,
+			step.commits?.length ? `commits ${step.commits.join(", ")}` : undefined,
+			step.logPath ? `log ${step.logPath}` : undefined,
+		].filter(Boolean).join(" · ");
+		return `  ${statusGlyph(step.status)} Worker ${step.index + 1}: ${step.role} ${step.status}${details ? ` — ${details}` : ""}`;
 	});
 }
 
-function formatWorkProcessSummary(input: { record: WorkProcessRunRecord; recordPath: string; advisoryNotes?: string[] }): string {
-	const lines = [
-		`Work process ${input.record.status}: ${input.record.id} · pipeline ${input.record.pipeline}`,
-		`Pipeline: ${input.record.pipeline}`,
-		`Items: ${input.record.resolvedItems.length}`,
-		...formatPipelineWorkerRows(input.record),
-		`Record: ${input.recordPath}`,
+function formatWorkSourceMutationRows(record: Pick<WorkProcessRunRecord, "workSourceMutations">): string[] {
+	const mutations = record.workSourceMutations || [];
+	if (!mutations.length) return [];
+	return [
+		"Work Source:",
+		...mutations.map((mutation) => `  ${statusGlyph(mutation.status)} ${mutation.itemId}: ${mutation.action} ${mutation.status}${mutation.message ? ` — ${mutation.message}` : ""}`),
 	];
-	if (input.record.branches.length) lines.push(`Branches: ${input.record.branches.join(", ")}`);
-	if (input.record.logs.length) lines.push(`Logs: ${input.record.logs.join(", ")}`);
-	if (input.advisoryNotes?.length) lines.push(...input.advisoryNotes);
+}
+
+function formatWorkProcessSummary(input: { record: WorkProcessRunRecord; recordPath: string; advisoryNotes?: string[] }): string {
+	const record = input.record;
+	const lines = [
+		`Work process ${record.id}`,
+		`Status: ${statusGlyph(record.status)} ${record.status}`,
+		`Pipeline: ${record.pipeline}`,
+		`Items: ${record.resolvedItems.length}`,
+		"Workers:",
+		...formatPipelineWorkerRows(record),
+	];
+	if (record.branches.length) lines.push("Approved changes merged:", ...record.branches.map((branch) => `  - ${branch}`));
+	lines.push("Artifacts:", `  Record: ${input.recordPath}`);
+	if (record.logs.length) lines.push(...record.logs.map((log) => `  Log: ${log}`));
+	lines.push(...formatWorkSourceMutationRows(record));
+	if (input.advisoryNotes?.length) lines.push("Notes:", ...input.advisoryNotes.map((note) => `  - ${note}`));
 	return lines.join("\n");
 }
 
@@ -2959,16 +2307,44 @@ function piAgentEnvironment(hostPiRuntime: HostPiAgentRuntime | undefined, sandb
 	};
 }
 
-function hostPiSandboxOptions(cwd: string, cfg: Partial<SandcastleConfig>, hostPiRuntime: HostPiAgentRuntime | undefined): Record<string, unknown> | undefined {
+function withSandboxRuntimeOptions(kind: AgentDef["sandbox"] | undefined, options: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+	const next = { ...(options || {}) };
+	if (kind === "podman" && next.userns === undefined) next.userns = false;
+	return Object.keys(next).length ? next : undefined;
+}
+
+function cleanupCreatedPodmanSandcastleContainers(): void {
+	const result = spawnSync("podman", ["ps", "-a", "--filter", "name=sandcastle-", "--filter", "status=created", "--format", "{{.Names}}"], { encoding: "utf8", env: process.env });
+	if (result.status !== 0) return;
+	const names = (result.stdout || "").split(/\r?\n/).map((entry) => entry.trim()).filter((entry) => /^sandcastle-[0-9a-f-]+$/i.test(entry));
+	if (names.length) spawnSync("podman", ["rm", "-f", ...names], { stdio: "ignore", env: process.env });
+}
+
+function withPodmanCreateCleanup<T extends Record<string, any>>(provider: T, kind: AgentDef["sandbox"] | undefined): T {
+	if (kind !== "podman" || typeof provider?.create !== "function") return provider;
+	return {
+		...provider,
+		async create(...args: unknown[]) {
+			try {
+				return await provider.create(...args);
+			} catch (error) {
+				cleanupCreatedPodmanSandcastleContainers();
+				throw error;
+			}
+		},
+	};
+}
+
+function hostPiSandboxOptions(cwd: string, cfg: Partial<SandcastleConfig>, hostPiRuntime: HostPiAgentRuntime | undefined, sandbox: AgentDef["sandbox"] | undefined = "docker"): Record<string, unknown> | undefined {
 	const options: Record<string, unknown> = { imageName: defaultSandcastleImageName(cwd, cfg.imageNamePattern) };
 	if (hostPiRuntime) {
 		options.mounts = [
 			{ hostPath: hostPiRuntime.dir, sandboxPath: HOST_PI_SANDBOX_DIR, readonly: false },
 			...hostPiRuntime.fileMounts,
 		];
-		options.env = piAgentEnvironment(hostPiRuntime, "docker");
+		options.env = piAgentEnvironment(hostPiRuntime, sandbox);
 	}
-	return options;
+	return withSandboxRuntimeOptions(sandbox, options);
 }
 
 function createPiAgentWithHostDefaults(model: string | undefined, hostPiRuntime: HostPiAgentRuntime | undefined, sandbox: AgentDef["sandbox"] | undefined, piFactory = piAgent): any {
@@ -3021,10 +2397,11 @@ function resolveAgentRuntimeSettings(agent: AgentDef, cfg: SandcastleConfig): Ag
 }
 
 function resolveSandboxProvider(kind: SandcastleSandbox, options?: Record<string, unknown>): SandboxProvider {
-	if (kind === "podman") return podman(options as any);
+	const runtimeOptions = withSandboxRuntimeOptions(kind, options);
+	if (kind === "podman") return withPodmanCreateCleanup(podman(runtimeOptions as any), kind);
 	if (kind === "vercel") return vercel();
 	if (kind === "no-sandbox") return noSandbox();
-	return docker(options as any);
+	return docker(runtimeOptions as any);
 }
 
 const createDefaultSandcastleRunCapability = (): SandcastleRunCapability => ({
@@ -3315,7 +2692,7 @@ function registerScRunCommand(
 				}, cfg);
 				const result = await sandcastle.run({
 					agent: hostPiRuntime ? createAgentProviderForRuntime(runSettings.model, runSettings.provider, { hostPiRuntime, sandbox: runSettings.sandbox }) : sandcastle.makeAgent(runSettings.model, runSettings.provider),
-					sandbox: hostPiRuntime ? resolveSandboxProvider(runSettings.sandbox, hostPiSandboxOptions(ctx.cwd, cfg, hostPiRuntime)) : sandcastle.makeSandbox(runSettings.sandbox),
+					sandbox: hostPiRuntime ? resolveSandboxProvider(runSettings.sandbox, hostPiSandboxOptions(ctx.cwd, cfg, hostPiRuntime, runSettings.sandbox)) : sandcastle.makeSandbox(runSettings.sandbox),
 					cwd: ctx.cwd,
 					prompt,
 					maxIterations: 1,
@@ -3389,7 +2766,7 @@ interface PipelineRunRecord {
 	prompt: string;
 	status: "running" | "completed" | "failed";
 	branchStrategy: PipelineBranchStrategy;
-	executor?: "legacy-steps" | "graph";
+	executor?: "graph";
 	branch?: string;
 	worktreePath?: string;
 	logDir: string;
@@ -3420,8 +2797,10 @@ interface PipelineExecutionDeps {
 	onStepStreamEvent?: (step: PipelineRunStepRecord, event: unknown, record: PipelineRunRecord) => void;
 	image?: SandboxImageDeps;
 	now?: () => number;
-	forceLegacy?: boolean;
 	graphInput?: unknown;
+	graphHooks?: GraphNodeHook[];
+	graphHookCapabilities?: string[];
+	graphHookNamespaces?: Record<string, unknown>;
 }
 
 function sanitizePathSegment(value: string): string {
@@ -3448,22 +2827,6 @@ function getPipelineCommitShas(commits: Array<{ sha: string }> | undefined): str
 	return (commits || []).map((commit) => commit.sha);
 }
 
-function summarizePipelineStepResult(
-	pipelineName: string,
-	agent: string,
-	branch: string | undefined,
-	commits: string[],
-	logPath: string,
-): string {
-	return [
-		`Pipeline: ${pipelineName}`,
-		`Step: ${agent}`,
-		`Branch: ${branch}`,
-		`Commits: ${commits.join(", ") || "none"}`,
-		`Log: ${logPath}`,
-	].join("\n");
-}
-
 function resolvePipelineBranchStrategy(pipelineName: string, pipeline: PipelineDef): PipelineBranchStrategy {
 	const branch = `sandcastle/${sanitizePathSegment(pipelineName)}`;
 	const branchStrategy = pipeline.branchStrategy;
@@ -3477,10 +2840,11 @@ function resolvePipelineBranchStrategy(pipelineName: string, pipeline: PipelineD
 }
 
 async function loadPipelineSandboxProvider(kind: AgentDef["sandbox"] | undefined, options?: Record<string, unknown>): Promise<any> {
-	if (kind === "podman") return (await import("../../node_modules/@ai-hero/sandcastle/dist/sandboxes/podman.js")).podman(options as any);
+	const runtimeOptions = withSandboxRuntimeOptions(kind, options);
+	if (kind === "podman") return withPodmanCreateCleanup((await import("../../node_modules/@ai-hero/sandcastle/dist/sandboxes/podman.js")).podman(runtimeOptions as any), kind);
 	if (kind === "vercel") return (await import("../../node_modules/@ai-hero/sandcastle/dist/sandboxes/vercel.js")).vercel();
 	if (kind === "no-sandbox") return (await import("../../node_modules/@ai-hero/sandcastle/dist/sandboxes/no-sandbox.js")).noSandbox();
-	return (await import("../../node_modules/@ai-hero/sandcastle/dist/sandboxes/docker.js")).docker(options as any);
+	return (await import("../../node_modules/@ai-hero/sandcastle/dist/sandboxes/docker.js")).docker(runtimeOptions as any);
 }
 
 async function writePipelineRunRecord(record: PipelineRunRecord): Promise<void> {
@@ -3490,6 +2854,38 @@ async function writePipelineRunRecord(record: PipelineRunRecord): Promise<void> 
 
 function pipelineHasGraphNodes(pipeline: PipelineDef): boolean {
 	return pipeline.kind === "composite" && Boolean(pipeline.nodes && Object.keys(pipeline.nodes).length > 0);
+}
+
+function collectPipelineNodeCapabilities(nodes: Record<string, PipelineNodeDef> | undefined): string[] {
+	const capabilities = new Set<string>();
+	const visit = (node: PipelineNodeDef | undefined) => {
+		if (!node || typeof node !== "object") return;
+		if (typeof node.kind === "string" && node.kind.length) {
+			capabilities.add(node.kind);
+			capabilities.add(`node.kind:${node.kind}`);
+		}
+		if (Array.isArray((node as any).capabilities)) {
+			for (const capability of (node as any).capabilities) if (typeof capability === "string" && capability.length) capabilities.add(capability);
+		}
+		if (node.node) visit(node.node as PipelineNodeDef);
+		for (const child of Object.values(node.nodes || {})) visit(child as PipelineNodeDef);
+	};
+	for (const node of Object.values(nodes || {})) visit(node as PipelineNodeDef);
+	return [...capabilities];
+}
+
+function buildGraphHookCapabilities(pipeline: PipelineDef, deps: PipelineExecutionDeps): string[] {
+	const pack = loadExecutionRuntimePack();
+	return [...new Set([
+		...collectRuntimeAdapterCapabilities(pack, ["sandcastle"]),
+		...collectPipelineNodeCapabilities(pipeline.nodes),
+		...(deps.graphHookCapabilities || []).filter((entry): entry is string => typeof entry === "string" && entry.length > 0),
+	])];
+}
+
+function providerNamespaceValue(namespaces: Record<string, unknown> | undefined, key: string): Record<string, unknown> {
+	const value = namespaces?.[key];
+	return isRecord(value) ? value as Record<string, unknown> : {};
 }
 
 function nodeResultStringArray(result: NodeResult, key: "commits" | "effects"): string[] {
@@ -3627,6 +3023,22 @@ async function assertGraphGit(deps: PipelineExecutionDeps, cwd: string, args: st
 	return result.stdout.trim();
 }
 
+async function graphWorktreeDirtyStatus(deps: PipelineExecutionDeps, cwd: string): Promise<string> {
+	const result = await runGraphGit(deps, cwd, ["status", "--porcelain"]);
+	return result.status === 0 ? result.stdout.trim() : "";
+}
+
+async function commitGraphWorktreeChanges(deps: PipelineExecutionDeps, cwd: string, message: string): Promise<string[]> {
+	const dirty = await graphWorktreeDirtyStatus(deps, cwd);
+	if (!dirty) return [];
+	await assertGraphGit(deps, cwd, ["add", "-A"], "graph worktree stage changes");
+	const staged = await runGraphGit(deps, cwd, ["diff", "--cached", "--quiet"]);
+	if (staged.status === 0) return [];
+	await assertGraphGit(deps, cwd, ["commit", "-m", message], "graph worktree commit changes");
+	const sha = await assertGraphGit(deps, cwd, ["rev-parse", "HEAD"], "graph worktree commit HEAD");
+	return sha ? [sha] : [];
+}
+
 function collectWorkspaceMergeCandidates(needs: Record<string, NodeResult>, inputNames?: string[]): GraphMergeCandidate[] {
 	const candidates: GraphMergeCandidate[] = [];
 	const entries = inputNames?.length ? inputNames.map((name) => [name, needs[name]] as const) : Object.entries(needs);
@@ -3649,13 +3061,39 @@ function collectWorkspaceMergeCandidatesFromResult(need: string, result: NodeRes
 	}
 }
 
+function isAcceptedReviewText(value: unknown): boolean | undefined {
+	const text = typeof value === "string" ? value.toLowerCase() : "";
+	if (!text.trim()) return undefined;
+	if (/\b(reject(?:ed)?|request changes|changes requested|blocker|blocked|do not merge|not accepted|fail(?:ed)?)\b/.test(text)) return false;
+	if (/\b(accept(?:ed)?|approved?|approve|no blockers?|safe to merge|looks good|pass(?:ed)?)\b/.test(text)) return true;
+	return undefined;
+}
+
+function collectAcceptedReviewBranches(result: NodeResult | undefined, accepted = new Set<string>()): Set<string> {
+	if (!result) return accepted;
+	if (result.type === "WorkspaceResult") {
+		const branch = nodeResultBranch(result);
+		const childVerdicts = Object.values(result.children || {}).map((child) => isAcceptedReviewText((child as any).stdout ?? (child as any).output));
+		if (branch && childVerdicts.some((verdict) => verdict === true) && !childVerdicts.some((verdict) => verdict === false)) accepted.add(branch);
+		return accepted;
+	}
+	if (result.type === "LoopResult") for (const child of result.iterations || []) collectAcceptedReviewBranches(child, accepted);
+	if (result.type === "CompositeResult") for (const child of Object.values(result.children || {})) collectAcceptedReviewBranches(child, accepted);
+	return accepted;
+}
+
 async function mergeGraphWorkspaceBranches(
 	context: GraphNodeExecutionContext,
 	deps: PipelineExecutionDeps,
 	targetCwd: string,
 ): Promise<Partial<GitMergeResult>> {
 	const mergeInputs = Array.isArray((context.node as any).inputs) ? (context.node as any).inputs.filter((entry: unknown): entry is string => typeof entry === "string" && entry.length > 0) : undefined;
-	const candidates = collectWorkspaceMergeCandidates(context.needs, mergeInputs);
+	let candidates = collectWorkspaceMergeCandidates(context.needs, mergeInputs);
+	if ((context.node as any).strategy === "accepted-only" && context.needs.review) {
+		const acceptedBranches = collectAcceptedReviewBranches(context.needs.review);
+		candidates = candidates.filter((candidate) => acceptedBranches.has(candidate.branch));
+		if (!candidates.length) throw new Error(`${context.path} has no review-accepted mergeable branches`);
+	}
 	if (!candidates.length) throw new Error(`${context.path} requires effectful mergeable branches`);
 	await assertGraphGit(deps, targetCwd, ["rev-parse", "--show-toplevel"], `${context.path} git repository check`);
 	const targetBranch = await assertGraphGit(deps, targetCwd, ["rev-parse", "--abbrev-ref", "HEAD"], `${context.path} target branch check`);
@@ -3714,10 +3152,17 @@ export async function executePipeline(
 	const recordPath = join(runDir, "record.json");
 	const logDir = join(runDir, "logs");
 	const branchStrategy = resolvePipelineBranchStrategy(pipelineName, pipeline);
-	const useGraphExecutor = !deps.forceLegacy && pipelineHasGraphNodes(pipeline);
+	const useGraphExecutor = pipelineHasGraphNodes(pipeline);
+	if (!useGraphExecutor) throw new Error(`Pipeline '${pipelineName}' is not graph-native. Fix ${CONFIG_PATH} to use kind: composite with nodes.`);
 	const createWorktreeImpl = deps.createWorktree || createWorktree;
 	const makePipelineAgent = deps.makeAgent;
 	const loadSandboxProvider = deps.loadSandboxProvider || loadPipelineSandboxProvider;
+	const graphHookCapabilities = buildGraphHookCapabilities(pipeline, deps);
+	const configuredGraphHooks = [
+		...((cfg.workSource || cfg.issueTracker) === "doc-vader" ? createDocVaderWorkSourceHooks() : []),
+		...(deps.graphHooks || []),
+	];
+	const graphHooks = discoverHooksByCapability(configuredGraphHooks, graphHookCapabilities);
 	const record: PipelineRunRecord = {
 		id,
 		kind: PIPELINE_RUN_KIND,
@@ -3725,7 +3170,7 @@ export async function executePipeline(
 		prompt,
 		status: "running",
 		branchStrategy,
-		executor: useGraphExecutor ? "graph" : "legacy-steps",
+		executor: "graph",
 		logDir,
 		recordPath,
 		startedAt: new Date(startedAtMs).toISOString(),
@@ -3782,7 +3227,7 @@ export async function executePipeline(
 				const model = resolvePipelineModelForProvider((node as any).model || role.model || pipeline.model || cfg.defaultModel, provider);
 				const hostPiRuntime = provider === "pi" ? createHostPiAgentRuntime() : undefined;
 				try {
-					const sandbox = await loadSandboxProvider(sandboxKind, hostPiRuntime ? hostPiSandboxOptions(cwd, cfg, hostPiRuntime) : { imageName: defaultSandcastleImageName(cwd, cfg.imageNamePattern) });
+					const sandbox = await loadSandboxProvider(sandboxKind, hostPiRuntime ? hostPiSandboxOptions(cwd, cfg, hostPiRuntime, sandboxKind) : withSandboxRuntimeOptions(sandboxKind, { imageName: defaultSandcastleImageName(cwd, cfg.imageNamePattern) }));
 					const template = node.promptOverride || resolvePromptText(cfg, node.prompt || "$INPUT");
 					const stepPromptBody = `${contextPromptPrefix}${resolvePipelineStepPrompt(template, prompt, prompt)}`;
 					const stepPrompt = role.systemPrompt ? `${role.systemPrompt}\n\n## Delegated task\n\n${stepPromptBody}` : stepPromptBody;
@@ -3829,6 +3274,17 @@ export async function executePipeline(
 			};
 			const graphResult = await executeGraphWorkflow({ kind: "composite", nodes: pipeline.nodes } as GraphWorkflowNode, {
 				input: deps.graphInput ?? prompt,
+				hooks: graphHooks,
+				hookCapabilities: graphHookCapabilities,
+				hookContext: {
+					global: { cwd, runId: id, pipeline: pipelineName, recordPath, logDir },
+					runtime: { executor: "graph", adapter: "sandcastle", cwd, pipeline: pipelineName, runId: id, recordPath, logDir },
+					providers: {
+						...(deps.graphHookNamespaces || {}),
+						git: { branchStrategy, targetCwd: worktree?.worktreePath || cwd, ...providerNamespaceValue(deps.graphHookNamespaces, "git") },
+						work: { graphInput: deps.graphInput, ...providerNamespaceValue(deps.graphHookNamespaces, "work") },
+					},
+				},
 				handlers: {
 					agent: runAgentNode,
 					"agent.pi": runAgentNode,
@@ -3858,7 +3314,9 @@ export async function executePipeline(
 								},
 							});
 							const childResults = Object.values(childRun.children) as NodeResult[];
-							const commits = childResults.flatMap((child) => collectGraphResultStringArray(child, "commits"));
+							const childCommits = childResults.flatMap((child) => collectGraphResultStringArray(child, "commits"));
+							const autoCommits = await commitGraphWorktreeChanges(deps, laneWorktree.worktreePath, `agent-workflows: capture ${graphContextString(context, "itemId") || context.id} changes`);
+							const commits = [...childCommits, ...autoCommits];
 							const childEffects = childResults.flatMap((child) => collectGraphResultStringArray(child, "effects")).filter((effect) => !isLogArtifactEffect(effect));
 							const itemId = graphContextString(context, "itemId");
 							const nodePath = graphStatusNodePath(context);
@@ -3891,60 +3349,7 @@ export async function executePipeline(
 			return record;
 		}
 
-		let input = prompt;
-		for (const [index, step] of pipeline.steps.entries()) {
-			const stepRecord: PipelineRunStepRecord = {
-				index,
-				role: step.role,
-				status: "running",
-				maxIterations: step.maxIterations || cfg.maxIterations || 10,
-				commits: [],
-				logPath: buildPipelineStepLogPath(logDir, index, step.role),
-			};
-			record.steps.push(stepRecord);
-			await writePipelineRunRecord(record);
-			deps.onStepUpdate?.(stepRecord, record);
-
-			const sandboxKind = step.sandbox || pipeline.sandbox || cfg.defaultSandbox || DEFAULT_SANDBOX;
-			await ensureSandboxImage(cwd, sandboxKind, deps.image, undefined, cfg);
-			const role = cfg.agents[step.role];
-			const provider = role?.provider || cfg.defaultAgent || "pi";
-			const model = resolvePipelineModelForProvider(step.model || role?.model || pipeline.model || cfg.defaultModel, provider);
-			const hostPiRuntime = provider === "pi" ? createHostPiAgentRuntime() : undefined;
-			try {
-				const sandbox = await loadSandboxProvider(sandboxKind, hostPiRuntime ? hostPiSandboxOptions(cwd, cfg, hostPiRuntime) : { imageName: defaultSandcastleImageName(cwd, cfg.imageNamePattern) });
-				const stepPromptBody = resolvePipelineStepPrompt(step.promptOverride || resolvePromptText(cfg, step.prompt), input, prompt);
-				const stepPrompt = role?.systemPrompt ? `${role.systemPrompt}\n\n## Delegated task\n\n${stepPromptBody}` : stepPromptBody;
-				const result = await worktree.run({
-					agent: makePipelineAgent ? makePipelineAgent(model, provider) : createAgentProviderForRuntime(model, provider, { hostPiRuntime, sandbox: sandboxKind, claudeCodeFactory: deps.claudeCode }),
-					sandbox,
-				prompt: stepPrompt,
-				maxIterations: step.maxIterations || cfg.maxIterations || 10,
-				logging: {
-					type: "file",
-					path: stepRecord.logPath,
-					verbose: true,
-					onAgentStreamEvent: (event: unknown) => deps.onStepStreamEvent?.(stepRecord, event, record),
-				},
-				});
-
-				const commitShas = getPipelineCommitShas(result.commits);
-				stepRecord.status = "completed";
-				stepRecord.branch = result.branch;
-				stepRecord.commits = commitShas;
-				record.branch = result.branch || record.branch;
-				stepRecord.logPath = result.logFilePath || stepRecord.logPath;
-				input = summarizePipelineStepResult(pipelineName, step.role, result.branch, commitShas, stepRecord.logPath);
-				await writePipelineRunRecord(record);
-				deps.onStepUpdate?.(stepRecord, record);
-			} finally {
-				if (hostPiRuntime?.dir) rmSync(hostPiRuntime.dir, { recursive: true, force: true });
-			}
-		}
-		record.status = "completed";
-		record.completedAt = new Date(now()).toISOString();
-		await writePipelineRunRecord(record);
-		return record;
+		throw new Error(`Pipeline '${pipelineName}' is not graph-native. Fix ${CONFIG_PATH} to use kind: composite with nodes.`);
 	} catch (error) {
 		record.status = "failed";
 		record.error = error instanceof Error ? error.message : String(error);
@@ -3985,16 +3390,33 @@ function renderWidget(runs: Map<string, RunState>): string[] {
 }
 
 function statusTextValue(value: unknown): string {
-	if (typeof value === "string") return value;
+	if (typeof value === "string") {
+		const trimmed = value.trim();
+		if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+			try {
+				return statusTextValue(JSON.parse(trimmed));
+			} catch {
+				return value;
+			}
+		}
+		return value;
+	}
 	if (value === undefined || value === null) return "";
 	if (Array.isArray(value)) return value.map(statusTextValue).filter(Boolean).join(" ");
 	if (typeof value === "object") {
 		const record = value as Record<string, unknown>;
-		for (const key of ["text", "message", "content", "delta", "partial"]) {
+		if (record.type === "thinking") return statusTextValue(record.thinking);
+		if (record.type === "message_update" || record.assistantMessageEvent) {
+			const nestedEvent = record.assistantMessageEvent as Record<string, unknown> | undefined;
+			const nestedText = statusTextValue(nestedEvent?.text ?? nestedEvent?.content ?? nestedEvent?.partial);
+			if (nestedText) return nestedText;
+			return "";
+		}
+		for (const key of ["text", "message", "content", "delta", "partial", "thinking"]) {
 			const nested = statusTextValue(record[key]);
 			if (nested) return nested;
 		}
-		return JSON.stringify(value);
+		return "";
 	}
 	return String(value);
 }
@@ -4009,7 +3431,10 @@ function formatAgentStreamStatus(event: any, maxIterations?: number): string | u
 	const iteration = Number.isFinite(event.iteration) ? Number(event.iteration) : undefined;
 	const iterationPrefix = iteration ? `iter ${iteration}${maxIterations ? `/${maxIterations}` : ""}: ` : "";
 	if (event.type === "toolCall") return `${iterationPrefix}tool: ${event.name || "tool"}`;
-	if (event.type === "text") return `${iterationPrefix}${compactStatusText(event.message || event.text || "", 120)}`;
+	if (event.type === "text") {
+		const text = compactStatusText(event.message || event.text || "", 120);
+		return text ? `${iterationPrefix}${text}` : undefined;
+	}
 	if (event.type === "raw") {
 		const raw = String(event.line || event.text || "").trim();
 		if (raw.startsWith("{")) {
@@ -4017,8 +3442,8 @@ function formatAgentStreamStatus(event: any, maxIterations?: number): string | u
 				const parsed = JSON.parse(raw);
 				const nestedType = parsed.assistantMessageEvent?.type || parsed.type;
 				if (["thinking_start", "message_start", "message_update"].includes(nestedType)) return undefined;
-				const text = parsed.text || parsed.message || parsed.assistantMessageEvent?.text || parsed.delta?.text;
-				return text ? `${iterationPrefix}${compactStatusText(text, 120)}` : undefined;
+				const text = compactStatusText(parsed.text || parsed.message || parsed.thinking || parsed.assistantMessageEvent?.text || parsed.delta?.text || parsed, 120);
+				return text ? `${iterationPrefix}${text}` : undefined;
 			} catch {
 				return undefined;
 			}
@@ -4133,7 +3558,7 @@ function selectableValuesForPath(cfg: SandcastleConfig, path: string): string[] 
 	const values = schemaEnumForPath(path)
 		|| (path === "defaultPipeline" ? ["simple-loop", "sequential-reviewer", "parallel-planner", "parallel-planner-with-review", "archive"] : undefined)
 		|| (path === "defaultAgent" ? ["claude-code", "pi", "codex", "cursor", "opencode", "copilot"] : undefined)
-		|| (path === "workSource" ? ["github-issues", "custom", "beads"] : undefined)
+		|| (path === "workSource" ? ["github-issues", "custom", "beads", "doc-vader"] : undefined)
 		|| (parts[0] === "pipelines" && parts[2] === "nodes" && parts.at(-1) === "role" ? Object.keys(cfg.agents) : undefined)
 		|| (parts[0] === "pipelines" && parts[2] === "steps" && parts[4] === "role" ? Object.keys(cfg.agents) : undefined);
 	const withDefault = isDefaultableConfigPath(path) ? ["default", ...(values || [])] : (values || []);
@@ -4169,8 +3594,6 @@ type BacklogConfigAction =
 	| { type: "add-pipeline"; name: string }
 	| { type: "rename-pipeline"; oldName: string; newName: string }
 	| { type: "delete-pipeline"; name: string }
-	| { type: "add-pipeline-step"; pipeline: string }
-	| { type: "delete-pipeline-step"; pipeline: string; index: number }
 	| { type: "replace-config"; config: SandcastleConfig }
 	| { type: "import-config-file" }
 	| { type: "apply-pack"; pack: string }
@@ -4188,8 +3611,8 @@ function friendlyConfigLabel(pathOrField: string): string {
 		maxIterations: "Max Iterations",
 		workSource: "Work Source",
 		workSourceSetupCommand: "Work Source Setup Command",
-		issueTracker: "Issue Tracker (legacy)",
-		issueTrackerSetupCommand: "Issue Tracker Setup Command (legacy)",
+		issueTracker: "Issue Tracker",
+		issueTrackerSetupCommand: "Issue Tracker Setup Command",
 		imageNamePattern: "Image Name Pattern",
 		description: "Description",
 		model: "Model",
@@ -4211,8 +3634,6 @@ function summarizeValue(value: unknown): string {
 function describeConfigAction(action: BacklogConfigAction, before: SandcastleConfig, after: SandcastleConfig): string {
 	if (action.type === "set-config") return `${friendlyConfigLabel(action.path)}: ${summarizeValue(readConfigValue(before, action.path))} → ${summarizeValue(readConfigValue(after, action.path))}`;
 	if (action.type === "replace-config") return "Replace configuration draft";
-	if (action.type === "add-pipeline-step") return `Add step: ${action.pipeline}`;
-	if (action.type === "delete-pipeline-step") return `Delete step ${action.index + 1}: ${action.pipeline}`;
 	if (action.type.startsWith("rename-")) return `${action.type.replace("rename-", "Rename ")}: ${(action as any).oldName} → ${(action as any).newName}`;
 	if (action.type.startsWith("add-")) return `${action.type.replace("add-", "Add ")}: ${(action as any).name}`;
 	if (action.type.startsWith("delete-")) return `${action.type.replace("delete-", "Delete ")}: ${(action as any).name}`;
@@ -4220,7 +3641,7 @@ function describeConfigAction(action: BacklogConfigAction, before: SandcastleCon
 }
 
 function configActionRequiresImageRebuild(action: BacklogConfigAction): boolean {
-	if (["init", "apply-pack", "replace-config", "add-agent", "rename-agent", "delete-agent", "add-pipeline", "rename-pipeline", "delete-pipeline", "add-pipeline-step", "delete-pipeline-step"].includes(action.type)) return true;
+	if (["init", "apply-pack", "replace-config", "add-agent", "rename-agent", "delete-agent", "add-pipeline", "rename-pipeline", "delete-pipeline"].includes(action.type)) return true;
 	if (action.type === "set-config") return action.path !== "workSourceSetupCommand" && action.path !== "issueTrackerSetupCommand";
 	if (action.type === "batch") return action.actions.some(configActionRequiresImageRebuild);
 	return false;
@@ -4332,7 +3753,7 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 			subtitle: "Choose a pipeline for detailed inspection/editing",
 			items: [
 				{ value: "text:add-pipeline", label: "New pipeline", description: "Create a graph-native worker pipeline" },
-				...Object.entries(cfg.pipelines).filter(([name]) => name !== "blank").map(([name, pipeline]) => ({ value: `nav:pipeline:${name}`, label: name, description: pipeline.description || (pipeline.nodes ? "graph composite" : `${pipeline.steps?.length || 0} step(s)`) })),
+				...Object.entries(cfg.pipelines).filter(([name]) => name !== "blank").map(([name, pipeline]) => ({ value: `nav:pipeline:${name}`, label: name, description: pipeline.description || "graph composite" })),
 			],
 		});
 
@@ -4361,41 +3782,16 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 			const pipeline = cfg.pipelines[name];
 			const branch = pipeline?.branchStrategy ? `${pipeline.branchStrategy.type || "branch"}${pipeline.branchStrategy.branch ? ` → ${pipeline.branchStrategy.branch}` : ""}` : "Inherited";
 			const isGraph = Boolean(pipeline?.nodes && Object.keys(pipeline.nodes).length);
-			const stepItems = isGraph ? [] : (pipeline?.steps || []).map((step, index) => ({
-				value: `nav:pipeline-step:${name}:${index}`,
-				label: `Step ${index + 1}: ${step.role || "No role selected"}`,
-				description: promptSummary(step.prompt),
-			}));
 			return {
 				title: `PIPELINE / ${name}`,
-				subtitle: `${isGraph ? "Graph composite" : "Legacy steps"} · Branch strategy: ${branch}`,
+				subtitle: `Graph composite · Branch strategy: ${branch}`,
 				items: [
 					{ value: `text:rename-pipeline:${name}`, label: "Rename pipeline", description: name },
 					field(`pipelines.${name}.description`),
 					field(`pipelines.${name}.model`),
 					field(`pipelines.${name}.sandbox`),
 					...graphNodeItems(name, pipeline?.nodes),
-					...stepItems,
-					...(isGraph ? [] : [{ value: `add-pipeline-step:${name}`, label: "Add step", description: "Append a worker step to this legacy pipeline" }]),
 					{ value: `delete-pipeline:${name}`, label: "Delete pipeline", description: "Remove this pipeline from the config" },
-				],
-			};
-		};
-
-		const pipelineStepScreen = (pipelineName: string, indexText: string): Screen => {
-			const stepIndex = Number(indexText);
-			const step = cfg.pipelines[pipelineName]?.steps?.[stepIndex];
-			return {
-				title: `PIPELINE / ${pipelineName} / STEP ${stepIndex + 1}`,
-				subtitle: "Step settings; leave model/sandbox empty to inherit runtime defaults",
-				items: [
-					field(`pipelines.${pipelineName}.steps.${stepIndex}.role`, "Role"),
-					field(`pipelines.${pipelineName}.steps.${stepIndex}.description`),
-					field(`pipelines.${pipelineName}.steps.${stepIndex}.model`),
-					field(`pipelines.${pipelineName}.steps.${stepIndex}.sandbox`),
-					field(`pipelines.${pipelineName}.steps.${stepIndex}.maxIterations`),
-					field(`pipelines.${pipelineName}.steps.${stepIndex}.prompt`, "Prompt"),
-					{ value: `delete-pipeline-step:${pipelineName}:${stepIndex}`, label: "Delete step", description: `Remove ${step?.role || "this"} step from the pipeline` },
 				],
 			};
 		};
@@ -4423,10 +3819,6 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 			if (key.startsWith("agent:")) return agentScreen(key.slice("agent:".length));
 			if (key === "pipelines") return pipelinesScreen();
 			if (key.startsWith("pipeline:")) return pipelineScreen(key.slice("pipeline:".length));
-			if (key.startsWith("pipeline-step:")) {
-				const [, pipelineName, indexText] = key.split(":");
-				return pipelineStepScreen(pipelineName, indexText);
-			}
 			if (key === "actions") return actionsScreen();
 			if (key === "packs") return { title: "IMPORT BUNDLED TEMPLATE", subtitle: "Built-in templates replace the current draft; save on exit to write it", items: listConfigPacks().map((item) => ({ ...item, value: `pack:${item.value}` })) };
 			if (key === "confirm-pack") return { title: "CONFIRM IMPORT", subtitle: `Pack: ${pendingPack}`, items: [{ value: "action:apply-pack", label: `Import ${pendingPack}`, description: "Replace the current unsaved draft with this configuration" }, { value: "back", label: "Back", description: "Return to configuration imports" }] };
@@ -4473,8 +3865,6 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 			if (action.type === "add-pipeline") model.addPipeline(action.name);
 			if (action.type === "rename-pipeline") model.renamePipeline(action.oldName, action.newName);
 			if (action.type === "delete-pipeline") model.deletePipeline(action.name);
-			if (action.type === "add-pipeline-step") model.addPipelineStep(action.pipeline);
-			if (action.type === "delete-pipeline-step") model.deletePipelineStep(action.pipeline, action.index);
 		};
 
 		const rebuildModelFromPendingActions = () => {
@@ -4554,8 +3944,6 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 			if (value.startsWith("text:rename-pipeline:")) return beginTextAction("rename-pipeline", "RENAME PIPELINE", { oldName: value.slice("text:rename-pipeline:".length) }, value.slice("text:rename-pipeline:".length));
 			if (value.startsWith("delete-agent:")) { const name = value.slice("delete-agent:".length); model.deleteAgent(name); route = ["main", "agents"]; return queueAction({ type: "delete-agent", name }); }
 			if (value.startsWith("delete-pipeline:")) { const name = value.slice("delete-pipeline:".length); model.deletePipeline(name); route = ["main", "pipelines"]; return queueAction({ type: "delete-pipeline", name }); }
-			if (value.startsWith("add-pipeline-step:")) { const pipeline = value.slice("add-pipeline-step:".length); model.addPipelineStep(pipeline); return queueAction({ type: "add-pipeline-step", pipeline }); }
-			if (value.startsWith("delete-pipeline-step:")) { const [, pipeline, indexText] = value.split(":"); const index = Number(indexText); model.deletePipelineStep(pipeline, index); route = ["main", "pipelines", `pipeline:${pipeline}`]; return queueAction({ type: "delete-pipeline-step", pipeline, index }); }
 			if (value.startsWith("pack:")) { pendingPack = value.slice(5); return replace("confirm-pack"); }
 			if (value.startsWith("editor:")) { setPreferredEditor(ctx.cwd, value.slice(7)); route = ["main", "actions"]; selected = 0; ctx.ui.notify(`Preferred Agent Workflows config editor set to: ${value.slice(7)}`, "success"); return tui.requestRender(); }
 			if (value === "action:init") { replaceDraftConfig(DEFAULT_CONFIG); return; }
@@ -4742,11 +4130,11 @@ export default function agentWorkflows(
 		return `Agent Workflows commands
 
 Setup and configuration:
-  /work:config
-    Open the friendly graph-aware config TUI.
+  /work:config [show|init|edit|editor|get|set|reset|validate]
+    Open the friendly graph-aware config TUI, or run config utility subcommands.
 
   /work:config-raw show|init|edit|editor|get|set|reset|validate
-    Run raw config utility actions for graph-native or legacy configs.
+    Deprecated compatibility alias for /work:config subcommands.
 
 Execution utilities:
   /work:build-image [docker|podman]
@@ -4756,7 +4144,7 @@ Execution utilities:
     Run one configured Role directly.
 
   /work:pipeline <pipeline> [prompt]
-    Run a graph-native runtime Pipeline directly, with legacy steps[] fallback.
+    Run a graph-native runtime Pipeline directly.
 
 Work views and processing:
   /work:list [query]
@@ -4795,12 +4183,26 @@ Work views and processing:
 	}
 
 
+	function renderReadyWork(plan: BacklogPlanResult): string {
+		const lines = [`Query: ${plan.query || "(none)"}`];
+		for (const [iterationIndex, iteration] of plan.iterations.entries()) {
+			lines.push(`Iteration ${iterationIndex + 1}: ${iteration.supportsParallel ? "parallel" : "sequential"} — ${iteration.rationale}`);
+			for (const item of iteration.items) lines.push(`- ${item.id}: ${item.title}${item.sourcePath ? ` (${item.sourcePath})` : ""}${item.summary ? ` — ${item.summary}` : ""}`);
+		}
+		return lines.join("\n");
+	}
+
+	async function readConfiguredReadyWork(cwd: string, args: string): Promise<string> {
+		if (backlogDeps.ready) return backlogDeps.ready(cwd, args);
+		const cfg = await loadConfig(cwd);
+		if ((cfg.workSource || cfg.issueTracker) === "doc-vader") return (await runProcess(cwd, "dv", ["work", "ready", ...tokenizeCommandArgs(args)])).stdout.trim();
+		return renderReadyWork(await planBacklogProcessing(cwd, args));
+	}
+
 	async function runPlannerPhase(args: string, ctx: any): Promise<any> {
 		const cfg = await loadConfig(ctx.cwd);
 		const agent = selectPlanWorkRoleName(cfg);
-		const readyOutput = backlogDeps.ready
-			? await backlogDeps.ready(ctx.cwd, args)
-			: (await runProcess(ctx.cwd, "dv", ["work", "ready"])).stdout.trim();
+		const readyOutput = await readConfiguredReadyWork(ctx.cwd, args);
 		const task = `Run the Work planning phase for this repository.\n\nGuardrails: you are running inside an isolated planner workspace created through the normal execution engine. Do not attempt to update the source repository, create branches for execution, or perform Work Source mutations. Any filesystem changes you make are discarded after planning.\n\nRequested plan arguments: ${args || "(none)"}\n\nMax workers available for a single parallel iteration: ${cfg.maxWorkers || 5}. When selecting unblocked-ready-AFK work, plan no more than this many independently executable items in one actionable iteration.\n\nReady Work input from the configured Work Source:\n${readyOutput}\n\nReturn one authoritative Work Plan JSON object using kind \"workPlan\" and scope \"forecast\". Include an actionable Work Plan at field actionable with scope \"actionable\" containing only currently executable work from the Ready Work input. The top-level forecast iterations may map future waves that could become unblocked after earlier iterations complete, but forecast waves are advisory only. Each iteration must contain an items array of objects such as {\"id\": \"wi-001\"}; do not return bare string item ids. Each iteration rationale must be a string; if you have dependency/classification/risk rationale, combine it into one readable rationale string or put details in classifications. Include any HITL constraints and blocked/deferred work summaries when relevant. Do not author execution mechanics such as pipeline names or branch names. End with <promise>COMPLETE</promise>.`;
 		if (backlogDeps.runPlanWorkRole) return backlogDeps.runPlanWorkRole({ cwd: ctx.cwd, args, role: agent, task, ctx });
 		const run = await dispatch(ctx.cwd, agent, task, ctx, { branchPrefix: "agent-workflows/planner" });
@@ -4832,9 +4234,7 @@ Work views and processing:
 
 	async function notifyBacklogReady(args: string, ctx: any): Promise<void> {
 		try {
-			const output = backlogDeps.ready
-				? await backlogDeps.ready(ctx.cwd, args)
-				: (await runProcess(ctx.cwd, "dv", ["work", "ready", ...tokenizeCommandArgs(args)])).stdout.trim();
+			const output = await readConfiguredReadyWork(ctx.cwd, args);
 			ctx.ui.notify(output || "No ready work candidates.", "info");
 		} catch (error) {
 			ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -4938,19 +4338,6 @@ Work views and processing:
 		return state;
 	}
 
-	async function runChain(cwd: string, chainName: string, original: string, ctx?: any): Promise<void> {
-		const cfg = await loadConfig(cwd);
-		const chain = cfg.chains[chainName];
-		if (!chain) throw new Error(`Unknown chain '${chainName}'. Chains: ${Object.keys(cfg.chains).join(", ")}`);
-		let input = original;
-		for (const step of chain) {
-			const prompt = step.prompt.replace(/\$INPUT/g, input).replace(/\$ORIGINAL/g, original);
-			const run = await dispatch(cwd, step.role, prompt, ctx);
-			await new Promise<void>((resolve) => run.proc?.on("close", () => resolve()));
-			if (run.status !== "done") break;
-			input = `Run ${run.id} completed. Branch: ${run.branch}. Commits: ${(run.commits || []).join(", ") || "none"}. Log: ${run.logPath}. Result: ${run.resultPath}.`;
-		}
-	}
 
 	async function delegateDefault(cwd: string, task: string, ctx?: any): Promise<void> {
 		const cfg = await loadConfig(cwd);
@@ -5060,6 +4447,50 @@ Work views and processing:
 		if (changed) refreshWidget();
 	}
 
+	async function configuredWorkSourceMutationAdapter(cwd: string): Promise<WorkSourceMutationAdapter | undefined> {
+		if (backlogDeps.workSourceAdapter) return backlogDeps.workSourceAdapter;
+		const cfg = await loadConfig(cwd);
+		if ((cfg.workSource || cfg.issueTracker) === "doc-vader") return createDocVaderWorkSourceAdapter();
+		return undefined;
+	}
+
+	async function runWorkSourceMutations(input: {
+		cwd: string;
+		runId: string;
+		pipeline: string;
+		recordPath: string;
+		items: WorkItem[];
+	}): Promise<{ outcomes: WorkSourceMutationOutcome[]; failed: boolean }> {
+		const adapter = await configuredWorkSourceMutationAdapter(input.cwd);
+		const outcomes: WorkSourceMutationOutcome[] = [];
+		if (!adapter) return { outcomes, failed: false };
+		let failed = false;
+		for (const item of input.items) {
+			const itemId = item.id;
+			const context = { itemId, cwd: input.cwd, runId: input.runId, pipeline: input.pipeline, recordPath: input.recordPath, item };
+			if (adapter.validate) {
+				try {
+					await adapter.validate(context);
+					outcomes.push({ itemId, action: "validate", status: "succeeded" });
+				} catch (error) {
+					failed = true;
+					outcomes.push({ itemId, action: "validate", status: "failed", message: error instanceof Error ? error.message : String(error) });
+					continue;
+				}
+			}
+			if (adapter.close) {
+				try {
+					await adapter.close(context);
+					outcomes.push({ itemId, action: "close", status: "succeeded" });
+				} catch (error) {
+					failed = true;
+					outcomes.push({ itemId, action: "close", status: "failed", message: error instanceof Error ? error.message : String(error) });
+				}
+			}
+		}
+		return { outcomes, failed };
+	}
+
 	async function executeBacklogProcessing(
 		cwd: string,
 		input: {
@@ -5148,12 +4579,14 @@ Work views and processing:
 				row.nodePath = step.nodePath;
 				row.laneId = step.laneId;
 				row.itemId = step.itemId;
-				if (step.status === "running" && row.lastLine.startsWith("waiting")) row.lastLine = `iter 0${step.maxIterations ? `/${step.maxIterations}` : ""}: started ${step.nodePath || `step ${step.index + 1}`}`;
-				if (step.status === "completed" || step.status === "failed") row.lastLine = `${step.status}${step.branch ? ` on ${step.branch}` : ""}`;
+				if (step.status === "running" && row.lastLine.startsWith("waiting")) row.lastLine = `started${step.maxIterations ? ` · iter 0/${step.maxIterations}` : ""}`;
+				if (step.status === "completed") row.lastLine = step.commits?.length ? `completed · ${step.commits.length} commit(s)` : "completed · no changes";
+				if (step.status === "failed") row.lastLine = step.error ? `failed · ${compactStatusText(step.error, 96)}` : "failed";
 			}
 			refreshWidget();
 		};
 		try {
+			const workSourceHookState: { mutations?: WorkSourceMutationOutcome[] } = {};
 			const pipelineRun = await executePipeline(cwd, input.pipeline, runtimePrompt, {
 				...deps.pipeline,
 				graphInput: {
@@ -5164,6 +4597,10 @@ Work views and processing:
 					executionGroups: input.executionGroups,
 				},
 				image: deps.pipeline?.image || deps.image,
+				graphHookNamespaces: {
+					...(deps.pipeline?.graphHookNamespaces || {}),
+					work: { ...providerNamespaceValue(deps.pipeline?.graphHookNamespaces, "work"), mutations: workSourceHookState.mutations ||= [] },
+				},
 				onStepUpdate: (step, record) => {
 					updateWorkerStatus(step);
 					deps.pipeline?.onStepUpdate?.(step, record);
@@ -5179,13 +4616,14 @@ Work views and processing:
 					deps.pipeline?.onStepStreamEvent?.(step, event, record);
 				},
 			});
+			let executionResult: BacklogExecutionResult;
 			if (pipelineRun.executor === "graph") {
 				const nodeBranches = Array.from(new Set((pipelineRun.nodes || []).map((node) => node.branch).filter((branch): branch is string => !!branch)));
 				const nodeLogs = Array.from(new Set([
 					...pipelineRun.steps.map((step) => step.logPath),
 					...(pipelineRun.nodes || []).map((node) => node.logPath),
 				].filter((logPath): logPath is string => !!logPath)));
-				return {
+				executionResult = {
 					branches: nodeBranches,
 					logs: nodeLogs,
 					workerStatuses: (pipelineRun.nodes || []).map((node, index) => ({
@@ -5203,13 +4641,23 @@ Work views and processing:
 					})),
 					status: pipelineRun.status === "completed" ? "done" : "error",
 				};
+			} else {
+				executionResult = {
+					branches: [pipelineRun.branch].filter((branch): branch is string => !!branch),
+					logs: pipelineRun.steps.map((step) => step.logPath).filter((logPath): logPath is string => !!logPath),
+					workerStatuses: pipelineRun.steps.map((step) => ({ index: step.index, role: step.role, status: step.status, branch: step.branch, commits: step.commits, logPath: step.logPath, error: step.error })),
+					status: pipelineRun.status === "completed" ? "done" : "error",
+				};
 			}
-			return {
-				branches: [pipelineRun.branch].filter((branch): branch is string => !!branch),
-				logs: pipelineRun.steps.map((step) => step.logPath).filter((logPath): logPath is string => !!logPath),
-				workerStatuses: pipelineRun.steps.map((step) => ({ index: step.index, role: step.role, status: step.status, branch: step.branch, commits: step.commits, logPath: step.logPath, error: step.error })),
-				status: pipelineRun.status === "completed" ? "done" : "error",
-			};
+			if (workSourceHookState.mutations?.length) {
+				executionResult.workSourceMutations = workSourceHookState.mutations;
+				if (workSourceHookState.mutations.some((mutation) => mutation.status === "failed")) executionResult.status = "error";
+			} else if (executionResult.status === "done") {
+				const mutationResult = await runWorkSourceMutations({ cwd, runId: input.runId, pipeline: input.pipeline, recordPath: input.recordPath, items: input.items });
+				if (mutationResult.outcomes.length) executionResult.workSourceMutations = mutationResult.outcomes;
+				if (mutationResult.failed) executionResult.status = "error";
+			}
+			return executionResult;
 		} catch (error) {
 			for (const rows of statusRows.values()) {
 				for (const row of rows) {
@@ -5262,7 +4710,7 @@ Work views and processing:
 				return;
 			}
 			const providerArg = args.trim().split(/\s+/).filter(Boolean)[0] as "docker" | "podman" | undefined;
-			const cfg = await loadConfig(ctx.cwd).catch(() => ({ defaultSandbox: DEFAULT_SANDBOX, prompts: {}, agents: {}, chains: {}, pipelines: {} }) as SandcastleConfig);
+			const cfg = await loadConfig(ctx.cwd).catch(() => ({ defaultSandbox: DEFAULT_SANDBOX, prompts: {}, agents: {}, pipelines: {} }) as SandcastleConfig);
 			const provider = providerArg || imageProviderForSandbox(cfg.defaultSandbox) || "docker";
 			if (provider !== "docker" && provider !== "podman") {
 				ctx.ui.notify("Usage: /work:build-image [docker|podman]", "error");
@@ -5281,102 +4729,8 @@ Work views and processing:
 		},
 	});
 
-	pi.registerCommand("work:config", {
-		description: "Open the friendly Agent Workflows configuration BIOS",
-		handler: async (_args, ctx) => {
-			if (ctx.mode !== "tui" || !ctx.ui?.custom) {
-				ctx.ui.notify("/work:config requires TUI mode. Use /work:config-raw for terminal commands.", "error");
-				return;
-			}
-			const action = await showBacklogConfigTui(ctx);
-			if (!action || action.type === "cancel") return;
-			try {
-				if (action.type === "batch" && action.config) {
-					ensureScaffold(ctx.cwd, { hydrate: true });
-					writeFileSync(join(ctx.cwd, CONFIG_PATH), configToYaml(action.config));
-					ctx.ui.notify(`Saved ${action.actions.length} Agent Workflows config change(s).${action.rebuildImage ? " Starting sandbox image rebuild." : " Rebuild the sandbox image separately when needed."}`, "success");
-					if (action.rebuildImage) startConfigImageRebuild(ctx, action.config);
-					return;
-				}
-				const actions = action.type === "batch" ? action.actions : [action];
-				for (const action of actions) {
-					if (action.type === "init") {
-						const result = ensureScaffold(ctx.cwd, { overwrite: true, hydrate: false });
-						ctx.ui.notify(`Reset Agent Workflows config: ${result.changes.length ? result.changes.join("; ") : "no changes needed"}. Rebuild the sandbox image separately when needed.`, "success");
-					}
-					if (action.type === "apply-pack") {
-						ensureScaffold(ctx.cwd, { hydrate: false });
-						writeFileSync(join(ctx.cwd, CONFIG_PATH), configPackText(action.pack));
-						ctx.ui.notify(`Imported config pack '${action.pack}' to ${CONFIG_PATH}. Rebuild the sandbox image separately when needed.`, "success");
-					}
-					if (action.type === "set-editor") {
-						setPreferredEditor(ctx.cwd, action.editor);
-						ctx.ui.notify(`Preferred Agent Workflows config editor set to: ${action.editor}`, "success");
-					}
-					if (action.type === "set-config") {
-						if (!supportedConfigPath(action.path)) throw new Error(`Unsupported config path '${action.path}'.`);
-						ensureScaffold(ctx.cwd, { hydrate: true });
-						const configPath = join(ctx.cwd, CONFIG_PATH);
-						const raw = readFileSync(configPath, "utf8");
-						const updated = action.value === "default" && isDefaultableConfigPath(action.path)
-							? removeConfigValueInText(raw, action.path)
-							: setConfigValueInText(raw, action.path, coerceConfigValue(action.path, action.value));
-						writeFileSync(configPath, updated);
-						ctx.ui.notify(`Updated ${action.path}. Rebuild the sandbox image separately when needed.`, "success");
-					}
-					if (["add-agent", "rename-agent", "delete-agent", "add-pipeline", "rename-pipeline", "delete-pipeline"].includes(action.type)) {
-						ensureScaffold(ctx.cwd, { hydrate: true });
-						const configPath = join(ctx.cwd, CONFIG_PATH);
-						const raw = readFileSync(configPath, "utf8");
-						let updated = raw;
-						if (action.type === "add-agent") updated = appendAgentText(raw, action.name);
-						if (action.type === "rename-agent") updated = updateYamlReferences(renameTopLevelMapEntry(raw, roleSectionName(raw), action.oldName, action.newName), action.oldName, action.newName);
-						if (action.type === "delete-agent") updated = removeYamlReferences(deleteTopLevelMapEntry(raw, roleSectionName(raw), action.name), action.name);
-						if (action.type === "add-pipeline") updated = appendPipelineText(raw, action.name);
-						if (action.type === "rename-pipeline") updated = renameTopLevelMapEntry(raw, "pipelines", action.oldName, action.newName);
-						if (action.type === "delete-pipeline") updated = deleteTopLevelMapEntry(raw, "pipelines", action.name);
-						writeFileSync(configPath, updated);
-						ctx.ui.notify(`Updated ${CONFIG_PATH}. Rebuild the sandbox image separately when needed.`, "success");
-					}
-					if (action.type === "replace-config") {
-						ensureScaffold(ctx.cwd, { hydrate: true });
-						writeFileSync(join(ctx.cwd, CONFIG_PATH), configToYaml(action.config));
-						ctx.ui.notify(`Replaced ${CONFIG_PATH}. Rebuild the sandbox image separately when needed.`, "success");
-					}
-					if (action.type === "validate") {
-						const cfg = await loadExistingConfig(ctx.cwd);
-						const issues = validateConfig(ctx.cwd, cfg);
-						ctx.ui.notify(issues.length ? `Agent Workflows config validation failed:\n- ${issues.join("\n- ")}` : "Agent Workflows config validation passed.", issues.length ? "error" : "success");
-					}
-					if (action.type === "build-image") {
-						const cfg = await loadConfig(ctx.cwd).catch(() => ({ defaultSandbox: DEFAULT_SANDBOX, prompts: {}, agents: {}, chains: {}, pipelines: {} }) as SandcastleConfig);
-						const provider = imageProviderForSandbox(cfg.defaultSandbox) || "docker";
-						const imageName = defaultSandcastleImageName(ctx.cwd, cfg.imageNamePattern);
-						await ensureScaffoldForImageBuild(ctx.cwd, cfg, provider, (message, type) => ctx.ui.notify(message, type));
-						ctx.ui.notify(`Building Sandcastle ${provider} image ${imageName}...`, "info");
-						await buildSandboxImageOnce(ctx.cwd, provider, imageName, deps.image?.buildImage || buildSandboxImage);
-						ctx.ui.notify(`Built Sandcastle ${provider} image ${imageName}.`, "success");
-					}
-					if (action.type === "sandcastle-init") {
-						const cfg = await loadConfig(ctx.cwd);
-						const result = await ensureSandcastleCliScaffold(ctx.cwd, cfg, { reinitialize: true });
-						ctx.ui.notify(`Initialized execution scaffold: ${result.changes.join("; ")}. Rebuild the sandbox image separately when needed.`, "success");
-					}
-				}
-				if (actions.length > 1) {
-					ctx.ui.notify(`Saved ${actions.length} Agent Workflows config change(s). Rebuild the sandbox image separately when needed.`, "success");
-				}
-			} catch (error) {
-				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
-			}
-		},
-	});
-
-	pi.registerCommand("work:config-raw", {
-		description: "Show, init, edit, reset, or validate Agent Workflows config",
-		getArgumentCompletions: (prefix: string) => scConfigCompletionItems(prefix),
-		handler: async (args, ctx) => {
-			const input = args.trim();
+	async function runConfigSubcommand(args: string, ctx: any, commandName = "/work:config"): Promise<void> {
+		const input = args.trim();
 			const [subcommand = "show", ...rest] = input ? input.split(/\s+/) : ["show"];
 			try {
 				switch (subcommand) {
@@ -5389,7 +4743,7 @@ Work views and processing:
 						const overwrite = rest.includes("--force") || rest.includes("--overwrite");
 						if (existsSync(join(ctx.cwd, CONFIG_PATH)) && !overwrite) {
 							ensureScaffold(ctx.cwd, { hydrate: false });
-							ctx.ui.notify(`${CONFIG_PATH} already exists. Use /work:config-raw init --force to overwrite it with defaults.`, "warning");
+							ctx.ui.notify(`${CONFIG_PATH} already exists. Use ${commandName} init --force to overwrite it with defaults.`, "warning");
 							break;
 						}
 						const result = ensureScaffold(ctx.cwd, { overwrite, hydrate: false });
@@ -5480,7 +4834,7 @@ Work views and processing:
 						try {
 							cfg = await loadExistingConfig(ctx.cwd);
 						} catch {
-							cfg = { prompts: {}, agents: {}, chains: {}, pipelines: {} };
+							cfg = { prompts: {}, agents: {}, pipelines: {} };
 						}
 						const issues = validateConfig(ctx.cwd, cfg);
 						if (issues.length) ctx.ui.notify(`Agent Workflows config validation failed:\n- ${issues.join("\n- ")}`, "error");
@@ -5494,11 +4848,114 @@ Work views and processing:
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 			}
 			refreshWidget();
+	}
+
+	pi.registerCommand("work:config", {
+		description: "Configure Agent Workflows: /work:config [show|init|edit|editor|get|set|reset|validate]",
+		getArgumentCompletions: (prefix: string) => scConfigCompletionItems(prefix),
+		handler: async (args, ctx) => {
+			if (args.trim()) {
+				await runConfigSubcommand(args, ctx, "/work:config");
+				return;
+			}
+			if (ctx.mode !== "tui" || !ctx.ui?.custom) {
+				await runConfigSubcommand("show", ctx, "/work:config");
+				return;
+			}
+			const action = await showBacklogConfigTui(ctx);
+			if (!action || action.type === "cancel") return;
+			try {
+				if (action.type === "batch" && action.config) {
+					ensureScaffold(ctx.cwd, { hydrate: true });
+					writeFileSync(join(ctx.cwd, CONFIG_PATH), configToYaml(action.config));
+					ctx.ui.notify(`Saved ${action.actions.length} Agent Workflows config change(s).${action.rebuildImage ? " Starting sandbox image rebuild." : " Rebuild the sandbox image separately when needed."}`, "success");
+					if (action.rebuildImage) startConfigImageRebuild(ctx, action.config);
+					return;
+				}
+				const actions = action.type === "batch" ? action.actions : [action];
+				for (const action of actions) {
+					if (action.type === "init") {
+						const result = ensureScaffold(ctx.cwd, { overwrite: true, hydrate: false });
+						ctx.ui.notify(`Reset Agent Workflows config: ${result.changes.length ? result.changes.join("; ") : "no changes needed"}. Rebuild the sandbox image separately when needed.`, "success");
+					}
+					if (action.type === "apply-pack") {
+						ensureScaffold(ctx.cwd, { hydrate: false });
+						writeFileSync(join(ctx.cwd, CONFIG_PATH), configPackText(action.pack));
+						ctx.ui.notify(`Imported config pack '${action.pack}' to ${CONFIG_PATH}. Rebuild the sandbox image separately when needed.`, "success");
+					}
+					if (action.type === "set-editor") {
+						setPreferredEditor(ctx.cwd, action.editor);
+						ctx.ui.notify(`Preferred Agent Workflows config editor set to: ${action.editor}`, "success");
+					}
+					if (action.type === "set-config") {
+						if (!supportedConfigPath(action.path)) throw new Error(`Unsupported config path '${action.path}'.`);
+						ensureScaffold(ctx.cwd, { hydrate: true });
+						const configPath = join(ctx.cwd, CONFIG_PATH);
+						const raw = readFileSync(configPath, "utf8");
+						const updated = action.value === "default" && isDefaultableConfigPath(action.path)
+							? removeConfigValueInText(raw, action.path)
+							: setConfigValueInText(raw, action.path, coerceConfigValue(action.path, action.value));
+						writeFileSync(configPath, updated);
+						ctx.ui.notify(`Updated ${action.path}. Rebuild the sandbox image separately when needed.`, "success");
+					}
+					if (["add-agent", "rename-agent", "delete-agent", "add-pipeline", "rename-pipeline", "delete-pipeline"].includes(action.type)) {
+						ensureScaffold(ctx.cwd, { hydrate: true });
+						const configPath = join(ctx.cwd, CONFIG_PATH);
+						const raw = readFileSync(configPath, "utf8");
+						let updated = raw;
+						if (action.type === "add-agent") updated = appendAgentText(raw, action.name);
+						if (action.type === "rename-agent") updated = updateYamlReferences(renameTopLevelMapEntry(raw, roleSectionName(raw), action.oldName, action.newName), action.oldName, action.newName);
+						if (action.type === "delete-agent") updated = removeYamlReferences(deleteTopLevelMapEntry(raw, roleSectionName(raw), action.name), action.name);
+						if (action.type === "add-pipeline") updated = appendPipelineText(raw, action.name);
+						if (action.type === "rename-pipeline") updated = renameTopLevelMapEntry(raw, "pipelines", action.oldName, action.newName);
+						if (action.type === "delete-pipeline") updated = deleteTopLevelMapEntry(raw, "pipelines", action.name);
+						writeFileSync(configPath, updated);
+						ctx.ui.notify(`Updated ${CONFIG_PATH}. Rebuild the sandbox image separately when needed.`, "success");
+					}
+					if (action.type === "replace-config") {
+						ensureScaffold(ctx.cwd, { hydrate: true });
+						writeFileSync(join(ctx.cwd, CONFIG_PATH), configToYaml(action.config));
+						ctx.ui.notify(`Replaced ${CONFIG_PATH}. Rebuild the sandbox image separately when needed.`, "success");
+					}
+					if (action.type === "validate") {
+						const cfg = await loadExistingConfig(ctx.cwd);
+						const issues = validateConfig(ctx.cwd, cfg);
+						ctx.ui.notify(issues.length ? `Agent Workflows config validation failed:\n- ${issues.join("\n- ")}` : "Agent Workflows config validation passed.", issues.length ? "error" : "success");
+					}
+					if (action.type === "build-image") {
+						const cfg = await loadConfig(ctx.cwd).catch(() => ({ defaultSandbox: DEFAULT_SANDBOX, prompts: {}, agents: {}, pipelines: {} }) as SandcastleConfig);
+						const provider = imageProviderForSandbox(cfg.defaultSandbox) || "docker";
+						const imageName = defaultSandcastleImageName(ctx.cwd, cfg.imageNamePattern);
+						await ensureScaffoldForImageBuild(ctx.cwd, cfg, provider, (message, type) => ctx.ui.notify(message, type));
+						ctx.ui.notify(`Building Sandcastle ${provider} image ${imageName}...`, "info");
+						await buildSandboxImageOnce(ctx.cwd, provider, imageName, deps.image?.buildImage || buildSandboxImage);
+						ctx.ui.notify(`Built Sandcastle ${provider} image ${imageName}.`, "success");
+					}
+					if (action.type === "sandcastle-init") {
+						const cfg = await loadConfig(ctx.cwd);
+						const result = await ensureSandcastleCliScaffold(ctx.cwd, cfg, { reinitialize: true });
+						ctx.ui.notify(`Initialized execution scaffold: ${result.changes.join("; ")}. Rebuild the sandbox image separately when needed.`, "success");
+					}
+				}
+				if (actions.length > 1) {
+					ctx.ui.notify(`Saved ${actions.length} Agent Workflows config change(s). Rebuild the sandbox image separately when needed.`, "success");
+				}
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			}
+		},
+	});
+
+	pi.registerCommand("work:config-raw", {
+		description: "Deprecated alias for /work:config show|init|edit|editor|get|set|reset|validate",
+		getArgumentCompletions: (prefix: string) => scConfigCompletionItems(prefix),
+		handler: async (args, ctx) => {
+			await runConfigSubcommand(args, ctx, "/work:config-raw");
 		},
 	});
 
 	pi.registerCommand("work:pipeline", {
-		description: "Run a graph-native or legacy-compatible pipeline: /work:pipeline <pipeline> [prompt]",
+		description: "Run a graph-native pipeline: /work:pipeline <pipeline> [prompt]",
 		getArgumentCompletions: (prefix: string) => pipelineCompletionItems(tokenAfterLastSpace(prefix)),
 		handler: async (args, ctx) => {
 			if (isConfigImageRebuildInProgress()) {

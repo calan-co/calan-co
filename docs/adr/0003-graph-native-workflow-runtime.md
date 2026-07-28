@@ -6,9 +6,9 @@ Accepted
 
 ## Context
 
-Agent Workflows originally compiled Sandcastle-inspired runtime packs into legacy sequential `steps[]`. That made the command surface usable, but it also kept the implementation coupled to a one-pipeline/one-worktree approximation and made parallel Work processing, per-item branches, typed mergeability, and fail-closed no-effect behavior hard to reason about.
+Agent Workflows needs a deterministic workflow model that can describe parallel Work processing, per-item branches, typed mergeability, and fail-closed no-effect behavior without coupling product semantics to an adapter template shape.
 
-The product model has since moved to concrete workflow nodes with typed results:
+The product model is concrete workflow nodes with typed results:
 
 - `kind: composite` is the top-level workflow shape.
 - `nodes` is a map keyed by node id; node ids are not stored inside node bodies.
@@ -20,7 +20,7 @@ The product model has since moved to concrete workflow nodes with typed results:
 
 ## Decision
 
-Agent Workflows uses a graph-native workflow runtime as the authoritative pipeline representation. Legacy `steps[]` remain as compatibility metadata and fallback for old repo configs, but generated defaults and the friendly config surface prefer graph pipelines.
+Agent Workflows uses graph-native workflow config as the authoritative pipeline representation. Pipelines are valid only when they satisfy the current schema and policy checks.
 
 The runtime is split into four layers:
 
@@ -69,12 +69,11 @@ pipelines:
 Imperative flow:
 
 1. `/work:pipeline simple-loop "fix auth bug"` loads the graph pipeline.
-2. `executePipeline` chooses graph execution because the pipeline has `kind: composite` and non-empty `nodes`.
-3. The graph executor enters `root.nodes.workspace`.
-4. The `git.worktree` handler creates a Sandcastle worktree/branch and executes child nodes inside that workspace context.
-5. The `agent.pi` node resolves the worker role and prompt, runs the selected provider through Sandcastle, and returns an `AgentResult` with commits/logs.
-6. `git.worktree` aggregates child commits into a `WorkspaceResult` with repository effects.
-7. The pipeline run succeeds only if at least one node produced repository effects.
+2. The graph executor enters `root.nodes.workspace`.
+3. The `git.worktree` handler creates a Sandcastle worktree/branch and executes child nodes inside that workspace context.
+4. The `agent.pi` node resolves the worker role and prompt, runs the selected provider through Sandcastle, and returns an `AgentResult` with commits/logs.
+5. `git.worktree` aggregates child commits into a `WorkspaceResult` with repository effects.
+6. The pipeline run succeeds only if at least one node produced repository effects.
 
 Reasoning boundary:
 
@@ -145,7 +144,7 @@ defaultAgent: claude-code
 
 Imperative flow:
 
-1. `/work:config-raw set pipelines.simple-loop.nodes.workspace.nodes.run.role reviewer` targets a graph node path.
+1. `/work:config set pipelines.simple-loop.nodes.workspace.nodes.run.role reviewer` targets a graph node path.
 2. The config command merges runtime-pack defaults before applying the edit, so the complete graph is present.
 3. The shadow model updates only the targeted nested role field.
 4. `configToYaml` writes a graph-native pipeline with required `kind` fields preserved.
@@ -156,44 +155,21 @@ Reasoning boundary:
 - Config editing is deterministic and schema/validator-backed.
 - No LLM role participates in config mutation.
 
-### Example 4: legacy `steps[]` fallback
-
-Legacy repo config:
-
-```yaml
-pipelines:
-  old-pipeline:
-    steps:
-      - role: worker
-        prompt: $INPUT
-```
-
-Imperative flow:
-
-1. The loader preserves the step-only pipeline as legacy rather than overlaying graph defaults onto it.
-2. `executePipeline` uses the legacy path because there is no graph-shaped pipeline.
-3. A single top-level Sandcastle worktree is created and steps run sequentially.
-
-Reasoning boundary:
-
-- Legacy behavior remains available for existing configs, but generated defaults and new TUI-created pipelines use graph-native nodes.
-
 ## Consequences
 
-- Runtime packs are no longer compiled down to legacy steps as the primary representation.
-- `configToYaml(packsToConfig())` renders graph-native default workflows without top-level `steps:` blocks.
-- The friendly config TUI must preserve graph nodes and block legacy step mutation for graph pipelines.
-- `/work:process` status rows and run summaries should be graph-event/node/lane based, not synthetic step-role based.
+- Runtime packs define graph nodes directly.
+- `configToYaml(packsToConfig())` renders graph-native default workflows.
+- The friendly config TUI preserves graph nodes and mutates graph-node fields only.
+- `/work:process` status rows and run summaries are graph-event/node/lane based, not synthetic role placeholders.
 - Sandcastle remains an adapter dependency for concrete workspace/sandbox/provider execution, but not the source of workflow semantics.
 
 ## Compatibility
 
-- Existing step-only repo configs continue to run through the legacy fallback.
-- Runtime packs may keep legacy-compatible step metadata for migration and older tests, but command execution prefers graph nodes when present.
+- Repo config must validate against the current graph-native schema and policy checks before execution.
+- Runtime packs contain graph-native node definitions only.
 - Logs and log paths remain observable artifacts, but they do not count as repository effects.
 
 ## Follow-ups
 
 - Add richer graph-node editing in the friendly config TUI beyond basic role/prompt fields.
-- Add explicit config migration tooling if/when repo configs need automatic conversion from legacy steps to graph nodes.
 - Consider extracting the graph executor and runtime adapter interfaces into a smaller module boundary once more adapters exist.

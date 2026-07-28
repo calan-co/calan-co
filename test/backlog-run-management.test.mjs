@@ -157,7 +157,11 @@ test('infers backlog status safely and reports ambiguity', async () => {
 
   const latestSelection = selectBacklogRunForStatus([finished], '');
   assert.equal(latestSelection.kind, 'record');
-  assert.match(formatStatusSelection(latestSelection), /Latest work run/);
+  const latestStatus = formatStatusSelection(latestSelection);
+  assert.match(latestStatus, /Latest work run/);
+  assert.match(latestStatus, /Work process run-c/);
+  assert.match(latestStatus, /Status: ✓ done/);
+  assert.match(latestStatus, /Pipeline: implement/);
 
   const missingSelection = selectBacklogRunForStatus([finished], 'missing');
   assert.equal(missingSelection.kind, 'missing');

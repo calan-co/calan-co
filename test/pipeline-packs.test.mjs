@@ -10,8 +10,12 @@ test('pipeline packs are discovered from the Agent Workflows execution runtime p
   const runtime = loadExecutionRuntimePack();
   assert.ok(runtime.prompts['implement-work'].template.length > 20);
   assert.equal(runtime.roles.planner.kind, 'planWork');
-  assert.equal(runtime.pipelines['parallel-planner'].steps[0].kind, 'fanOut');
-  assert.equal(runtime.pipelines['parallel-planner'].steps[0].step.role, 'implementer');
+  assert.equal(runtime.pipelines['parallel-planner'].steps, undefined);
+  assert.equal(runtime.pipelines['parallel-planner'].nodes.implement.kind, 'loop');
+  assert.deepEqual(runtime.pipelines['parallel-planner'].nodes.implement.capabilities, ['loop']);
+  assert.deepEqual(runtime.pipelines['parallel-planner'].nodes.implement.node.capabilities, ['worktree', 'git.worktree']);
+  assert.deepEqual(runtime.pipelines['parallel-planner'].nodes.implement.node.nodes.implement.capabilities, ['runRole', 'agent.pi']);
+  assert.equal(runtime.pipelines['parallel-planner'].nodes.implement.node.nodes.implement.role, 'implementer');
 });
 
 test('pipeline packs map into agent-workflows agent and pipeline inventory', () => {
@@ -33,11 +37,11 @@ test('pipeline packs map into agent-workflows agent and pipeline inventory', () 
   assert.equal(cfg.pipelines['parallel-planner'].nodes.merge.kind, 'git.merge');
   assert.equal(cfg.pipelines['parallel-planner-with-review'].nodes.review.node.kind, 'git.worktree');
   assert.equal(cfg.pipelines['parallel-planner-with-review'].nodes.merge.kind, 'git.merge');
-  assert.equal(cfg.pipelines['parallel-planner'].steps[0].role, 'implementer');
-  assert.equal(cfg.pipelines['parallel-planner-with-review'].steps[1].role, 'reviewer');
+  assert.equal(cfg.pipelines['parallel-planner'].steps, undefined);
+  assert.equal(cfg.pipelines['parallel-planner-with-review'].steps, undefined);
 });
 
-test('configToYaml renders graph-native default workflow definitions without legacy steps', () => {
+test('configToYaml renders graph-native default workflow definitions without steps arrays', () => {
   const text = configToYaml(packsToConfig());
   assert.match(text, /^  parallel-planner-with-review:/m);
   assert.match(text, /^    kind: composite/m);
@@ -55,14 +59,4 @@ assert.doesNotMatch(text, /^issueTracker:/m);
   assert.doesNotMatch(text, /^agents:/m);
   assert.doesNotMatch(text, /^pipelines:/m);
   assert.doesNotMatch(text, /^teams:/m);
-});
-
-test('configToYaml preserves legacy chains when rewriting drafts', () => {
-  const cfg = packsToConfig();
-  cfg.chains = { review: [{ role: 'reviewer', prompt: 'Review the branch.' }] };
-  const text = configToYaml(cfg);
-  assert.match(text, /^chains:/m);
-  assert.match(text, /^  review:/m);
-  assert.match(text, /^    - role: reviewer/m);
-  assert.match(text, /Review the branch\./);
 });

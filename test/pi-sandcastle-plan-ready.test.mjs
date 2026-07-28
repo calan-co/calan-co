@@ -27,7 +27,7 @@ function makeRepo() {
   return cwd;
 }
 
-test('Agent Workflows registers /work planning commands without legacy /backlog aliases', async () => {
+test('Agent Workflows registers /work planning commands without /backlog aliases', async () => {
   const pi = fakePi();
   agentWorkflows(pi, {});
 
@@ -330,6 +330,50 @@ test('/work:process --plan refuses cached Work Plans with planner-authored execu
   assert.match(notifications[0].message, /branchName/);
 });
 
+test('/work:process refuses invalid graph config before planning or execution', async () => {
+  const cwd = makeRepo();
+  mkdirSync(join(cwd, '.pi', 'sandcastle'), { recursive: true });
+  writeFileSync(join(cwd, '.pi', 'sandcastle', 'config.yaml'), [
+    'runtimeVersion: 1',
+    'defaultPipeline: old',
+    'roles:',
+    '  worker:',
+    '    description: Worker',
+    'pipelines:',
+    '  old:',
+    '    steps:',
+    '      - kind: runRole',
+    '        role: worker',
+    '        prompt: simple-loop',
+  ].join('\n'));
+  const pi = fakePi();
+  const calls = [];
+  const notifications = [];
+  agentWorkflows(pi, {
+    work: {
+      async plan() {
+        calls.push('plan');
+        return { iterations: [{ items: [{ id: 'wi-001' }] }] };
+      },
+      async execute() {
+        calls.push('execute');
+        return { status: 'done' };
+      },
+    },
+  });
+
+  await pi.commands.get('work:process').handler('ready work', {
+    cwd,
+    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  });
+
+  assert.deepEqual(calls, []);
+  assert.equal(notifications[0].type, 'error');
+  assert.match(notifications[0].message, /Invalid Agent Workflows configuration/);
+  assert.match(notifications[0].message, /config\.pipelines\.old\.kind is required/);
+  assert.match(notifications[0].message, /config\.pipelines\.old\.steps is not supported/);
+});
+
 test('/work:process ignores planner-recommended pipeline and derives pipeline from config/default', async () => {
   const cwd = makeRepo();
   const pi = fakePi();
@@ -341,7 +385,7 @@ test('/work:process ignores planner-recommended pipeline and derives pipeline fr
       async plan(repo, query) {
         return {
           query,
-          iterations: [{ items: [{ id: 'wi-001' }], recommendedPipeline: 'planner-chosen-review', supportsParallel: false, rationale: 'legacy planner fixture' }],
+          iterations: [{ items: [{ id: 'wi-001' }], recommendedPipeline: 'planner-chosen-review', supportsParallel: false, rationale: 'planner fixture' }],
         };
       },
       async execute(repo, input) {
@@ -358,7 +402,7 @@ test('/work:process ignores planner-recommended pipeline and derives pipeline fr
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].input.pipeline, 'simple-loop');
-  assert.match(notifications.at(-1).message, /pipeline simple-loop/);
+  assert.match(notifications.at(-1).message, /Pipeline: simple-loop/);
 });
 
 test('/work:process --plan consumes actionable section of cached forecast plans only', async () => {
@@ -550,7 +594,7 @@ test('/work:process --plan derives pipeline from config and preserves explicit p
   const savedRecord = JSON.parse(readFileSync(calls[0].input.recordPath, 'utf8'));
   assert.deepEqual(savedRecord.branches, ['branch']);
   assert.deepEqual(savedRecord.executionContexts.map((context) => context.branch), calls[0].input.executionContexts.map((context) => context.branch));
-  assert.match(notifications.at(-1).message, /Work process done/);
+  assert.match(notifications.at(-1).message, /Status: ✓ done/);
 });
 
 test('/work:ready delegates readiness to Doc-Vader capability', async () => {

@@ -108,6 +108,79 @@ test('runWorkProcess owns record writes, branch policy, and ignores planner reco
   }
 });
 
+test('runWorkProcess omits dependency-blocked and HITL items before execution', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'agent-workflows-orchestrator-'));
+  const executeInputs = [];
+  try {
+    const result = await runWorkProcess(
+      {
+        cwd,
+        query: 'ready work',
+        defaultPipeline: 'simple-loop',
+        now: () => 1000,
+        createRunId: () => 'run-filtered',
+      },
+      {
+        async plan() {
+          return {
+            query: 'ready work',
+            iterations: [
+              {
+                hitl: ['wi-human'],
+                items: [
+                  { id: 'wi-ready', title: 'Ready', tags: ['afk'] },
+                  { id: 'wi-blocked', title: 'Blocked', dependsOn: ['wi-foundation'], readiness: 'dependency-blocked', tags: ['afk'] },
+                  { id: 'wi-dependent', title: 'Dependent in same pass', dependsOn: ['wi-ready'], tags: ['afk'] },
+                  { id: 'wi-human', title: 'Human', tags: ['hitl'] },
+                ],
+              },
+            ],
+          };
+        },
+        async execute(_cwd, input) {
+          executeInputs.push(input);
+          return { status: 'done', branches: ['branch-ready'], logs: [] };
+        },
+        writeRecord(repo, record) {
+          return join(repo, `${record.id}.json`);
+        },
+      },
+    );
+
+    assert.deepEqual(executeInputs[0].items.map((item) => item.id), ['wi-ready']);
+    assert.deepEqual(result.record.resolvedItems.map((item) => item.id), ['wi-ready']);
+    assert.match(result.advisoryNotes.join('\n'), /omitted non-executable Work Items: wi-blocked, wi-dependent, wi-human/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('runWorkProcess fails closed when no currently executable items remain', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'agent-workflows-orchestrator-'));
+  try {
+    await assert.rejects(
+      runWorkProcess(
+        {
+          cwd,
+          query: 'blocked work',
+          defaultPipeline: 'simple-loop',
+        },
+        {
+          async plan() {
+            return { iterations: [{ items: [{ id: 'wi-blocked', dependsOn: ['wi-foundation'], readiness: 'dependency-blocked' }, { id: 'wi-human', tags: ['hitl'] }] }] };
+          },
+          async execute() {
+            throw new Error('execute should not be called');
+          },
+        },
+      ),
+      /No currently executable Work Items were selected.*wi-blocked, wi-human/s,
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test('runWorkProcess validates cached plans before execution', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'agent-workflows-orchestrator-'));
   try {

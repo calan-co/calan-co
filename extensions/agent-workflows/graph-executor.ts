@@ -1,3 +1,14 @@
+import {
+	buildHookContext,
+	discoverHooksByCapability,
+	runHooksForPhase,
+	validateProviderNamespaces,
+	type GraphNodeHook,
+	type HookContext,
+} from "./hooks.ts";
+
+export type { GraphNodeHook, HookContext } from "./hooks.ts";
+
 export type GraphNodeMode = "sequential" | "parallel";
 export type NodeExecutionStatus = "succeeded";
 
@@ -10,6 +21,7 @@ export interface GraphWorkflowNode {
 	each?: unknown;
 	max?: number;
 	with?: Record<string, unknown>;
+	capabilities?: string[];
 	[key: string]: unknown;
 }
 
@@ -101,14 +113,26 @@ export interface GraphNodeExecutionContext {
 
 export type GraphNodeHandler = (context: GraphNodeExecutionContext) => unknown | Promise<unknown>;
 
+export interface GraphHookContextSeed {
+	global?: Record<string, unknown>;
+	runtime?: Record<string, unknown>;
+	providers?: Record<string, unknown>;
+}
+
 export interface GraphExecutorOptions {
 	input?: unknown;
 	handlers?: Record<string, GraphNodeHandler>;
+	hooks?: GraphNodeHook[];
+	hookCapabilities?: string[];
+	hookContext?: GraphHookContextSeed;
 }
 
 interface ExecutionScope {
 	input: unknown;
 	handlers: Record<string, GraphNodeHandler>;
+	hooks: GraphNodeHook[];
+	hookCapabilities: string[];
+	hookContext: GraphHookContextSeed;
 	loop?: LoopExecutionContext;
 	workspace?: Record<string, unknown>;
 }
@@ -124,7 +148,14 @@ const LEAF_RESULT_TYPES: Record<string, string> = Object.freeze({
 export async function executeGraphWorkflow(workflow: GraphWorkflowNode, options: GraphExecutorOptions = {}): Promise<CompositeResult> {
 	if (!isRecord(workflow)) throw new Error("root must be an object");
 	if (workflow.kind !== "composite") throw new Error("root kind must be 'composite'");
-	const result = await executeNode("root", "root", workflow, { input: options.input, handlers: options.handlers || {} }, {});
+	validateProviderNamespaces(options.hookContext?.providers);
+	const result = await executeNode("root", "root", workflow, {
+		input: options.input,
+		handlers: options.handlers || {},
+		hooks: options.hooks || [],
+		hookCapabilities: stringArray(options.hookCapabilities),
+		hookContext: options.hookContext || {},
+	}, {});
 	return result as CompositeResult;
 }
 
@@ -138,7 +169,34 @@ async function executeNode(
 	if (!isRecord(node)) throw new Error(`${path} must be an object`);
 	if (typeof node.kind !== "string" || !node.kind) throw new Error(`${path} is missing kind`);
 	if (node.max !== undefined && (!Number.isInteger(node.max) || node.max < 1)) throw new Error(`${path} max must be a positive integer`);
+	if (!isExecutableNodeKind(node.kind, scope)) throw new Error(`${path} references unknown concrete kind '${node.kind}'`);
 
+	const hooks = discoverHooksByCapability(scope.hooks, nodeHookCapabilities(node, scope));
+	const hookContext = makeHookContext(id, path, node, scope, needs);
+	await runHooksForPhase(hooks, "beforeNode", hookContext);
+	try {
+		const result = await executeNodeBody(id, path, node, scope, needs);
+		hookContext.runtime.result = result;
+		await runHooksForPhase(hooks, "afterNode", hookContext);
+		return result;
+	} catch (error) {
+		hookContext.runtime.error = error;
+		try {
+			await runHooksForPhase(hooks, "onNodeError", hookContext);
+		} catch {
+			// Preserve the original node execution error even if an error hook fails.
+		}
+		throw error;
+	}
+}
+
+async function executeNodeBody(
+	id: string,
+	path: string,
+	node: GraphWorkflowNode,
+	scope: ExecutionScope,
+	needs: Record<string, NodeResult>,
+): Promise<NodeResult> {
 	if (node.kind === "composite") return executeCompositeNode(id, path, node, scope);
 	if (node.kind === "loop") return executeLoopNode(id, path, node, scope);
 	if (node.kind === "git.worktree") return executeWorkspaceNode(id, path, node, scope, needs);
@@ -146,6 +204,15 @@ async function executeNode(
 	if (LEAF_RESULT_TYPES[node.kind]) return executeLeafNode(id, path, node, scope, needs, LEAF_RESULT_TYPES[node.kind]);
 	if (scope.handlers[node.kind]) return coerceResult(await scope.handlers[node.kind](makeHandlerContext(id, path, node, scope, needs)), "NodeResult", id, node.kind);
 	throw new Error(`${path} references unknown concrete kind '${node.kind}'`);
+}
+
+function isExecutableNodeKind(kind: string, scope: ExecutionScope): boolean {
+	return kind === "composite"
+		|| kind === "loop"
+		|| kind === "git.worktree"
+		|| kind === "git.merge"
+		|| Boolean(LEAF_RESULT_TYPES[kind])
+		|| Boolean(scope.handlers[kind]);
 }
 
 async function executeCompositeNode(id: string, path: string, node: GraphWorkflowNode, scope: ExecutionScope): Promise<CompositeResult> {
@@ -381,6 +448,52 @@ async function runParallel<T, R>(items: T[], concurrency: number, task: (item: T
 	return results;
 }
 
+function nodeHookCapabilities(node: GraphWorkflowNode, scope: ExecutionScope): string[] {
+	return [...new Set([
+		...scope.hookCapabilities,
+		node.kind,
+		`node.kind:${node.kind}`,
+		...stringArray(node.capabilities),
+	])];
+}
+
+function makeHookContext(
+	id: string,
+	path: string,
+	node: GraphWorkflowNode,
+	scope: ExecutionScope,
+	needs: Record<string, NodeResult>,
+): HookContext {
+	const roleId = typeof node.role === "string" && node.role.length
+		? node.role
+		: typeof node.with?.role === "string" && node.with.role.length
+			? node.with.role
+			: undefined;
+	return buildHookContext({
+		global: {
+			input: scope.input,
+			...(scope.hookContext.global || {}),
+		},
+		runtime: {
+			needs,
+			...(scope.loop ? { loop: scope.loop } : {}),
+			...(scope.workspace ? { workspace: scope.workspace } : {}),
+			...(scope.hookContext.runtime || {}),
+		},
+		node: {
+			id,
+			path,
+			kind: node.kind,
+			definition: node,
+			needs,
+			...(scope.loop ? { loop: scope.loop } : {}),
+			...(scope.workspace ? { workspace: scope.workspace } : {}),
+		},
+		...(roleId ? { role: { id: roleId } } : {}),
+		providers: scope.hookContext.providers,
+	});
+}
+
 function makeHandlerContext(
 	id: string,
 	path: string,
@@ -458,6 +571,10 @@ function hasNonEmptyStringArray(value: unknown): value is string[] {
 
 function isLogArtifactEffect(value: string): boolean {
 	return /^(log|logs|logPath|logFilePath)(:|=|$)/i.test(value.trim());
+}
+
+function stringArray(value: unknown): string[] {
+	return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0) : [];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

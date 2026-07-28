@@ -22,7 +22,7 @@ test('Agent Workflows architecture docs capture graph-native end-to-end design',
     'Example 1: direct graph pipeline',
     'Example 2: durable process fan-out with review and merge',
     'Example 3: graph config editing from root-only defaults',
-    'Example 4: legacy `steps[]` fallback',
+    'Example 4: config validation boundary',
     'Sandcastle adapter',
     'Logs and log paths remain observable artifacts, but they do not count as repository effects.',
   ]);
@@ -34,6 +34,6 @@ test('Agent Workflows architecture docs capture graph-native end-to-end design',
     'Imperative orchestration layer',
     'Runtime adapter layer',
     'Reasoning layer',
-    'Legacy `steps[]` remain as compatibility metadata and fallback',
+    'Repo config must validate against the current graph-native schema and policy checks before execution.',
   ]);
 });

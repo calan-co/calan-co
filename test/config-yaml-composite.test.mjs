@@ -28,10 +28,6 @@ const compositeYaml = () => [
   '    description: Reviewer',
   '',
   'pipelines:',
-  '  legacy:',
-  '    steps:',
-  '      - role: implementer',
-  '        prompt: Implement legacy work.',
   '  issue-work:',
   '    description: Composite issue workflow.',
   '    kind: composite',
@@ -59,11 +55,9 @@ const compositeYaml = () => [
   '        needs: [each-item]',
 ].join('\n');
 
-test('parseSimpleYaml supports composite pipeline map-form nodes and preserves legacy steps', () => {
+test('parseSimpleYaml supports composite pipeline map-form nodes', () => {
   const parsed = parseSimpleYaml(compositeYaml());
 
-  assert.equal(parsed.pipelines.legacy.steps.length, 1);
-  assert.equal(parsed.pipelines.legacy.steps[0].role, 'implementer');
   assert.equal(parsed.pipelines['issue-work'].kind, 'composite');
   assert.deepEqual(Object.keys(parsed.pipelines['issue-work'].nodes), ['each-item', 'merge']);
   assert.equal(parsed.pipelines['issue-work'].nodes['each-item'].kind, 'loop');
@@ -87,7 +81,6 @@ test('configToYaml round-trips representative composite pipeline nodes', () => {
   assert.equal(reparsed.pipelines['issue-work'].nodes['each-item'].nodes.workspace.nodes.implement.role, 'implementer');
   assert.equal(reparsed.pipelines['issue-work'].nodes['each-item'].nodes.workspace.nodes.review.role, 'reviewer');
   assert.deepEqual(reparsed.pipelines['issue-work'].nodes.merge.needs, ['each-item']);
-  assert.equal(reparsed.pipelines.legacy.steps[0].role, 'implementer');
 });
 
 test('/work:config-raw get and set support composite node role paths', async () => {
@@ -151,6 +144,67 @@ test('/work:config-raw validate accepts composite pipeline map-form nodes', asyn
   assert.equal(notifications[0].type, 'success');
 });
 
+test('/work:config-raw reset without path replaces stale config with graph-native defaults', async () => {
+  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-reset-config-'));
+  await fs.mkdir(path.join(repoRoot, '.pi/sandcastle'), { recursive: true });
+  await fs.writeFile(path.join(repoRoot, '.pi/sandcastle', 'run-job.mjs'), '', 'utf8');
+  await fs.writeFile(path.join(repoRoot, '.pi/sandcastle', 'config.yaml'), [
+    'runtimeVersion: 1',
+    'defaultPipeline: parallel-planner-with-review',
+    'roles:',
+    '  implementer:',
+    '    description: Implementer',
+    'pipelines:',
+    '  parallel-planner-with-review:',
+    '    steps:',
+    '      - kind: runRole',
+    '        role: implementer',
+    '        prompt: implement-work',
+  ].join('\n'), 'utf8');
+  const pi = createFakePi();
+  agentWorkflows(pi);
+  const notifications = [];
+  const ctx = { cwd: repoRoot, ui: { notify: (message, type = 'info') => notifications.push({ message, type }) } };
+
+  await pi.commands.get('work:config-raw')('reset', ctx);
+  await pi.commands.get('work:config-raw')('validate', ctx);
+
+  const reparsed = parseSimpleYaml(await fs.readFile(path.join(repoRoot, '.pi/sandcastle', 'config.yaml'), 'utf8'));
+  assert.equal(reparsed.pipelines['parallel-planner-with-review'].kind, 'composite');
+  assert.ok(reparsed.pipelines['parallel-planner-with-review'].nodes.implement);
+  assert.equal(reparsed.pipelines['parallel-planner-with-review'].steps, undefined);
+  assert.equal(notifications.at(-1).type, 'success');
+});
+
+test('/work:config-raw validate rejects config that fails current graph schema', async () => {
+  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-invalid-config-'));
+  await fs.mkdir(path.join(repoRoot, '.pi/sandcastle'), { recursive: true });
+  await fs.writeFile(path.join(repoRoot, '.pi/sandcastle', 'run-job.mjs'), '', 'utf8');
+  await fs.writeFile(path.join(repoRoot, '.pi/sandcastle', 'config.yaml'), [
+    'roles:',
+    '  implementer:',
+    '    description: Implementer',
+    'pipelines:',
+    '  old:',
+    '    steps:',
+    '      - role: implementer',
+    '        prompt: Implement work.',
+  ].join('\n'), 'utf8');
+  const pi = createFakePi();
+  agentWorkflows(pi);
+  const notifications = [];
+
+  await pi.commands.get('work:config-raw')('validate', {
+    cwd: repoRoot,
+    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  });
+
+  assert.equal(notifications[0].type, 'error');
+  assert.match(notifications[0].message, /config\.pipelines\.old\.kind is required/);
+  assert.match(notifications[0].message, /config\.pipelines\.old\.nodes is required/);
+  assert.match(notifications[0].message, /config\.pipelines\.old\.steps is not supported/);
+});
+
 test('ConfigShadowModel renameAgent updates nested composite node role references', () => {
   const cfg = parseSimpleYaml(compositeYaml());
   const model = new ConfigShadowModel(cfg);
@@ -160,7 +214,6 @@ test('ConfigShadowModel renameAgent updates nested composite node role reference
 
   assert.equal(snapshot.agents.implementer, undefined);
   assert.equal(snapshot.agents.builder.name, 'builder');
-  assert.equal(snapshot.pipelines.legacy.steps[0].role, 'builder');
   assert.equal(snapshot.pipelines['issue-work'].nodes['each-item'].nodes.workspace.nodes.implement.role, 'builder');
   assert.equal(snapshot.pipelines['issue-work'].nodes['each-item'].nodes.workspace.nodes.review.role, 'reviewer');
 });

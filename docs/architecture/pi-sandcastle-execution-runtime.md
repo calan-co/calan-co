@@ -20,7 +20,7 @@ Agent Workflows is now **graph-native by default**:
 
 - Default runtime packs define `kind: composite` pipelines with map-form `nodes`.
 - Generated default config rendered via `configToYaml(packsToConfig())` emits graph-native pipeline definitions.
-- Legacy `steps[]` remain compatibility metadata/fallback for older repo configs.
+- Repo config must validate against the current graph schema and policy checks before execution.
 - New friendly-config TUI pipelines are graph-native `git.worktree` pipelines.
 - Graph-node role/prompt config paths are supported for deterministic raw config edits.
 
@@ -32,7 +32,7 @@ All durable execution state is a unified Run Record under `.pi/sandcastle/runs/`
 - `pipeline` for `/work:pipeline` executions, including step and graph node records.
 - `work-process` for `/work:process` records with query, resolved Work Items, selected pipeline, execution contexts, branches, logs, node/lane statuses, and resume metadata.
 
-Command-specific views filter these Run Records instead of maintaining separate lifecycle stores. Legacy `.pi/sandcastle/backlog-runs/` and `.pi/sandcastle/results/` records may be read for migration, but new Work Process writes target the unified runs directory.
+Command-specific views filter these Run Records instead of maintaining separate lifecycle stores.
 
 ## Runtime objects
 
@@ -42,7 +42,7 @@ The stable, reusable, overrideable objects are:
    - Version of the Agent Workflows runtime contract.
 
 2. `metadata`
-   - Human-readable pack identity, provenance, and compatibility notes.
+   - Human-readable pack identity and provenance notes.
 
 3. `defaults`
    - Global fallbacks for sandbox provider, agent provider, model, Work Source, image policy, branch policy, worker cap, iteration cap, and completion policy.
@@ -138,8 +138,6 @@ Rules:
   - Consumes mergeable/effectful `WorkspaceResult` inputs and merges branches into the target worktree.
 - `docker.container` / `podman.container`
   - Reserved concrete container nodes for future direct container execution.
-
-Legacy step kinds (`planWork`, `runRole`, `review`, `merge`, `fanOut`) remain compatibility metadata/fallback, not the preferred persisted pipeline representation.
 
 ## Typed results and effect rules
 
@@ -325,7 +323,7 @@ defaultAgent: claude-code
 Command:
 
 ```text
-/work:config-raw set pipelines.simple-loop.nodes.workspace.nodes.run.role reviewer
+/work:config set pipelines.simple-loop.nodes.workspace.nodes.run.role reviewer
 ```
 
 Imperative flow:
@@ -340,36 +338,41 @@ Reasoning boundary:
 
 - Config mutation is deterministic; no role/LLM participates.
 
-### Example 4: legacy `steps[]` fallback
+### Example 4: config validation boundary
 
-Legacy config:
+Declarative config requirements:
 
 ```yaml
 pipelines:
-  old-pipeline:
-    steps:
-      - role: worker
-        prompt: $INPUT
+  issue-work:
+    kind: composite
+    nodes:
+      workspace:
+        kind: git.worktree
+        nodes:
+          run:
+            kind: agent.pi
+            role: worker
+            prompt: implement-work
 ```
 
 Imperative flow:
 
-1. The loader detects a user-defined step-only pipeline.
-2. It preserves that pipeline as legacy instead of overlaying graph default nodes onto it.
-3. `executePipeline` uses the legacy steps path.
-4. A single top-level Sandcastle worktree runs steps sequentially.
+1. The loader parses repo config and overlays runtime-pack defaults where root-only edits require them.
+2. Validation applies the current schema and policy checks before any worktree or agent is created.
+3. `/work:pipeline` and `/work:process` stop at the config boundary when validation fails.
 
-Compatibility boundary:
+Config boundary:
 
-- Existing repo configs continue working.
 - Generated defaults and new TUI-created pipelines are graph-native.
+- Config errors are user-owned and must be fixed in `.pi/sandcastle/config.yaml`.
 
 ## Config and TUI behavior
 
 - `/work:config` is graph-aware.
 - New TUI-created pipelines use `kind: composite` + `git.worktree` + `agent.pi`.
 - Graph pipeline role/prompt fields can be edited by deterministic config paths.
-- Legacy step add/delete/edit is blocked for graph-native pipelines and preserved for legacy pipelines.
+- Pipeline editing targets graph nodes.
 - Root-only config edits to graph-node paths merge runtime defaults first to avoid partial/corrupt graphs.
 
 ## Non-goals
@@ -395,5 +398,4 @@ Completed:
 Still optional/future:
 
 - Rich graph node create/delete/reorder editing in the friendly TUI.
-- Explicit one-shot migration command from arbitrary legacy `steps[]` to graph nodes.
 - Additional runtime adapters beyond Sandcastle.

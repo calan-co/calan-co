@@ -10,9 +10,6 @@
       "sandcastle@0.12.0 templates/sequential-reviewer",
       "sandcastle@0.12.0 templates/parallel-planner",
       "sandcastle@0.12.0 templates/parallel-planner-with-review"
-    ],
-    "compatibility": [
-      "legacy steps[] normalized to composite nodes"
     ]
   },
   "defaults": {
@@ -212,9 +209,17 @@
             "run": {
               "kind": "agent.pi",
               "prompt": "blank",
-              "role": "worker"
+              "role": "worker",
+              "capabilities": [
+                "runRole",
+                "agent.pi"
+              ]
             }
-          }
+          },
+          "capabilities": [
+            "worktree",
+            "git.worktree"
+          ]
         }
       }
     },
@@ -231,9 +236,17 @@
             "run": {
               "kind": "agent.pi",
               "prompt": "simple-loop",
-              "role": "worker"
+              "role": "worker",
+              "capabilities": [
+                "runRole",
+                "agent.pi"
+              ]
             }
-          }
+          },
+          "capabilities": [
+            "worktree",
+            "git.worktree"
+          ]
         }
       }
     },
@@ -250,7 +263,11 @@
             "implement": {
               "kind": "agent.pi",
               "prompt": "implement-work",
-              "role": "implementer"
+              "role": "implementer",
+              "capabilities": [
+                "runRole",
+                "agent.pi"
+              ]
             },
             "review": {
               "kind": "agent.pi",
@@ -258,9 +275,17 @@
               "role": "reviewer",
               "needs": [
                 "implement"
+              ],
+              "capabilities": [
+                "runRole",
+                "agent.pi"
               ]
             }
-          }
+          },
+          "capabilities": [
+            "worktree",
+            "git.worktree"
+          ]
         }
       }
     },
@@ -281,10 +306,21 @@
               "implement": {
                 "kind": "agent.pi",
                 "prompt": "implement-work",
-                "role": "implementer"
+                "role": "implementer",
+                "capabilities": [
+                  "runRole",
+                  "agent.pi"
+                ]
               }
-            }
-          }
+            },
+            "capabilities": [
+              "worktree",
+              "git.worktree"
+            ]
+          },
+          "capabilities": [
+            "loop"
+          ]
         },
         "merge": {
           "kind": "git.merge",
@@ -294,7 +330,11 @@
           "strategy": "accepted-only",
           "overrides": {
             "maxIterations": 1
-          }
+          },
+          "capabilities": [
+            "merge",
+            "git.merge"
+          ]
         }
       }
     },
@@ -315,10 +355,21 @@
               "implement": {
                 "kind": "agent.pi",
                 "prompt": "implement-work",
-                "role": "implementer"
+                "role": "implementer",
+                "capabilities": [
+                  "runRole",
+                  "agent.pi"
+                ]
               }
-            }
-          }
+            },
+            "capabilities": [
+              "worktree",
+              "git.worktree"
+            ]
+          },
+          "capabilities": [
+            "loop"
+          ]
         },
         "review": {
           "kind": "loop",
@@ -330,12 +381,23 @@
               "review": {
                 "kind": "agent.pi",
                 "prompt": "review-work",
-                "role": "reviewer"
+                "role": "reviewer",
+                "capabilities": [
+                  "runRole",
+                  "agent.pi"
+                ]
               }
-            }
+            },
+            "capabilities": [
+              "worktree",
+              "git.worktree"
+            ]
           },
           "needs": [
             "implement"
+          ],
+          "capabilities": [
+            "loop"
           ]
         },
         "merge": {
@@ -350,6 +412,10 @@
           },
           "inputs": [
             "implement"
+          ],
+          "capabilities": [
+            "merge",
+            "git.merge"
           ]
         }
       }
@@ -367,9 +433,17 @@
             "archive": {
               "kind": "agent.pi",
               "prompt": "archive-terminal-work",
-              "role": "reviewer"
+              "role": "reviewer",
+              "capabilities": [
+                "runRole",
+                "agent.pi"
+              ]
             }
-          }
+          },
+          "capabilities": [
+            "worktree",
+            "git.worktree"
+          ]
         }
       }
     }
@@ -389,6 +463,13 @@
     },
     "custom": {
       "kind": "custom"
+    },
+    "doc-vader": {
+      "kind": "doc-vader",
+      "listCommand": "dv work list",
+      "inspectCommand": "dv work show {{ id }}",
+      "validateCommand": "dv work validate {{ id }}",
+      "closeCommand": "dv work close {{ id }}"
     }
   }
 }

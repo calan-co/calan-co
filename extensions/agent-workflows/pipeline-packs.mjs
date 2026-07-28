@@ -74,15 +74,11 @@ function yamlObjectLines(value, indent, preferredOrder = []) {
   return lines;
 }
 
-function hasMapFormPipeline(pipeline) {
-  return pipeline && (pipeline.kind !== undefined || pipeline.nodes !== undefined);
-}
-
-function renderMapFormPipeline(name, pipeline) {
+function renderGraphPipeline(name, pipeline) {
+  if (!pipeline || pipeline.kind !== 'composite' || !pipeline.nodes) throw new Error(`Pipeline '${name}' must be graph-native with kind: composite and nodes.`);
   const lines = [`  ${yamlMapKey(name)}:`];
   const order = ['description', 'kind', 'needs', 'branchStrategy', 'sandbox', 'model', 'copyToWorktree', 'nodes'];
-  const { steps: _legacySteps, ...graphPipeline } = pipeline;
-  lines.push(...yamlObjectLines(graphPipeline, 4, order));
+  lines.push(...yamlObjectLines(pipeline, 4, order));
   return lines;
 }
 
@@ -129,33 +125,9 @@ export function configToYaml(config) {
     if (prompt.format !== undefined) lines.push(`    format: ${yamlScalar(prompt.format)}`);
     if (prompt.template !== undefined) lines.push(`    template: ${yamlBlock(prompt.template, 6)}`);
   }
-  if (Object.keys(config.chains || {}).length) {
-    lines.push('', 'chains:');
-    for (const [name, steps] of Object.entries(config.chains || {})) {
-      lines.push(`  ${name}:`);
-      for (const step of steps || []) {
-        lines.push(`    - role: ${yamlScalar(step.role)}`, `      prompt: ${yamlBlock(step.prompt || '', 6)}`);
-      }
-    }
-  }
   lines.push('', 'pipelines:');
   for (const [name, pipeline] of Object.entries(config.pipelines)) {
-    if (hasMapFormPipeline(pipeline)) {
-      lines.push(...renderMapFormPipeline(name, pipeline), '');
-      continue;
-    }
-    lines.push(`  ${name}:`, `    description: ${yamlScalar(pipeline.description)}`, '    branchStrategy:');
-    for (const [key, value] of Object.entries(pipeline.branchStrategy || {})) lines.push(`      ${key}: ${yamlScalar(value)}`);
-    if (pipeline.sandbox !== undefined) lines.push(`    sandbox: ${yamlScalar(pipeline.sandbox)}`);
-    lines.push(`    model: ${yamlScalar(pipeline.model)}`, `    copyToWorktree: ${yamlScalar(pipeline.copyToWorktree || [])}`, '    steps:');
-    for (const step of pipeline.steps || []) {
-      lines.push(`      - kind: ${yamlScalar(step.kind || 'runRole')}`, `        role: ${yamlScalar(step.role)}`);
-      if (step.description !== undefined) lines.push(`        description: ${yamlScalar(step.description)}`);
-      lines.push(`        prompt: ${yamlScalar(step.prompt)}`);
-      if (step.maxIterations !== undefined) lines.push(`        maxIterations: ${yamlScalar(step.maxIterations)}`);
-      if (step.copyToWorktree !== undefined) lines.push(`        copyToWorktree: ${yamlScalar(step.copyToWorktree)}`);
-    }
-    lines.push('');
+    lines.push(...renderGraphPipeline(name, pipeline), '');
   }
   return lines.join('\n').replace(/\n+$/, '\n');
 }
