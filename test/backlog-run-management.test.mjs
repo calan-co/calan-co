@@ -168,6 +168,25 @@ test('infers backlog status safely and reports ambiguity', async () => {
   assert.match(formatStatusSelection(missingSelection), /No work run found/);
 });
 
+test('status shows lane-captured commits and rejected review reason', async () => {
+  await withTempDir(async (cwd) => {
+    const reviewLog = path.join(cwd, '.pi/sandcastle/runs/run-1/logs/reviewer.log');
+    await fs.mkdir(path.dirname(reviewLog), { recursive: true });
+    await fs.writeFile(reviewLog, 'Recommendation: Reject\n\nFindings:\n1. `sample-tests/fixture.test.mjs:1` — The branch adds a new fixture instead of renaming the existing fixture.\n\nMerge blocker: The implementation does not satisfy the rename-based acceptance criteria.');
+    const record = backlogRun({
+      status: 'done',
+      workerStatuses: [
+        { index: 0, role: 'git.worktree', kind: 'git.worktree', status: 'completed', itemId: 'wi-002', laneId: 'run/wi-002/0-1', branch: 'agent-workflows/run/wi-002', commits: ['abc123'] },
+        { index: 1, role: 'implementer', kind: 'agent.pi', status: 'completed', itemId: 'wi-002', laneId: 'run/wi-002/0-1', branch: 'agent-workflows/run/wi-002', commits: [] },
+        { index: 2, role: 'reviewer', kind: 'agent.pi', status: 'completed', itemId: 'wi-002', laneId: 'run/wi-002/0-1', branch: 'agent-workflows/run/wi-002', commits: [], logPath: reviewLog },
+      ],
+    });
+    const status = formatStatusSelection({ kind: 'record', record, inference: 'latest' });
+    assert.match(status, /implementer\s+0s · item wi-002; node .*captured 1 commit\(s\) on lane branch|implementer\s+0s · item wi-002; lane run\/wi-002\/0-1; completed · captured 1 commit\(s\) on lane branch/);
+    assert.match(status, /reviewer\s+0s · item wi-002; lane run\/wi-002\/0-1; rejected · `sample-tests\/fixture\.test\.mjs:1` — The branch adds a new fixture instead of renaming the existing fixture\./);
+  });
+});
+
 test('selects resumable backlog runs and rejects non-resumable ones', async () => {
   const resumable = backlogRun({
     id: 'run-resume',

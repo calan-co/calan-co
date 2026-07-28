@@ -2181,20 +2181,61 @@ function statusGlyph(status: string | undefined): string {
 	return "•";
 }
 
+function readStatusLogText(logPath: string | undefined): string {
+	if (!logPath || !existsSync(logPath)) return "";
+	try { return readFileSync(logPath, "utf8"); } catch { return ""; }
+}
+
+function normalizeReviewLogText(text: string): string {
+	return text.replace(/\\n/g, "\n").replace(/\\"/g, '"');
+}
+
+function extractReviewOutcome(logPath: string | undefined): { decision?: "accepted" | "rejected"; summary?: string } {
+	const text = normalizeReviewLogText(readStatusLogText(logPath));
+	if (!text.trim()) return {};
+	const rejected = /\b(?:Recommendation:\s*|Review result:\s*\*\*)Reject(?:ed)?\b/i.test(text)
+		|| /\brequest changes\b|\bmerge blocker\b/i.test(text);
+	const accepted = /\b(?:Recommendation:\s*|Review result:\s*\*\*)Accept(?:ed)?\b/i.test(text)
+		|| /\bapproved?\b|\bno regressions or merge blockers found\b/i.test(text);
+	const summary = text.match(/Findings:\s*\n\s*(?:\d+\.\s*)?([^\n]+)/i)?.[1]
+		|| text.match(/Findings:\s*([^\n]+)/i)?.[1]
+		|| text.match(/Merge blocker:\s*([^\n]+)/i)?.[1];
+	if (rejected) return { decision: "rejected", summary: summary ? compactStatusText(summary, 140) : undefined };
+	if (accepted) return { decision: "accepted", summary: summary ? compactStatusText(summary, 140) : undefined };
+	return {};
+}
+
+function workerKey(worker: { laneId?: string; itemId?: string; branch?: string }): string | undefined {
+	return worker.laneId || worker.itemId || worker.branch;
+}
+
 function formatPipelineWorkerRows(record: Pick<WorkProcessRunRecord, "workerStatuses"> | undefined): string[] {
 	const workers = record?.workerStatuses || [];
 	if (!workers.length) return ["  (no worker details recorded)"];
+	const laneCommits = new Map<string, number>();
+	for (const worker of workers) {
+		if (worker.kind !== "git.worktree") continue;
+		const key = workerKey(worker);
+		if (key) laneCommits.set(key, Math.max(laneCommits.get(key) || 0, worker.commits?.length || 0));
+	}
 	return workers.map((step) => {
 		const details = [
 			step.itemId ? `item ${step.itemId}` : undefined,
 			step.nodePath ? `node ${step.nodePath}` : undefined,
 			step.laneId ? `lane ${step.laneId}` : undefined,
 		].filter(Boolean).join("; ");
-		const statusText = step.status === "completed"
-			? step.commits?.length ? `completed · ${step.commits.length} commit(s)` : "completed · no changes"
-			: step.status === "failed"
-				? step.error ? `failed · ${compactStatusText(step.error, 96)}` : "failed"
-				: "running";
+		const key = workerKey(step);
+		const capturedCommits = key ? laneCommits.get(key) || 0 : 0;
+		const review = step.role === "reviewer" ? extractReviewOutcome(step.logPath) : {};
+		const statusText = review.decision === "rejected"
+			? `rejected${review.summary ? ` · ${review.summary}` : ""}`
+			: review.decision === "accepted"
+				? `accepted${review.summary ? ` · ${review.summary}` : " · no changes"}`
+				: step.status === "completed"
+					? step.commits?.length ? `completed · ${step.commits.length} commit(s)` : capturedCommits ? `completed · captured ${capturedCommits} commit(s) on lane branch` : "completed · no changes"
+					: step.status === "failed"
+						? step.error ? `failed · ${compactStatusText(step.error, 96)}` : "failed"
+						: "running";
 		return `${step.status.padEnd(9)} ${step.role.padEnd(12)} 0s · ${details ? `${details}; ` : ""}${statusText}`;
 	});
 }
