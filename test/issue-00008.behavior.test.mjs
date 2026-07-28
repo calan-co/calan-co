@@ -310,10 +310,9 @@ test('work:process reports one worker row per graph agent in the completion summ
     assert.match(message, /^Work process backlog-/);
     assert.match(message, /Status: ✓ done/);
     assert.match(message, /Pipeline: implement/);
-    assert.match(message, /Execution workers: \d+/);
-    assert.match(message, /completed\s+researcher\s+0s · .*completed · 1 commit\(s\)/);
+    assert.match(message, /Execution workers: 1/);
     assert.match(message, /completed\s+builder\s+0s · .*completed · 1 commit\(s\)/);
-    assert.match(message, /node root\.nodes\.workspace\.nodes\.research/);
+    assert.match(message, /node root\.nodes\.workspace\.nodes\.build/);
     assert.match(message, /Approved changes merged:/);
     assert.match(message, /Artifacts:\n  Record:/);
     assert.ok(widgets.some((entry) => entry.lines.some((line) => /running\s+researcher.*tool: Search/.test(line))));

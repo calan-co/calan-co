@@ -360,28 +360,14 @@
                   "runRole",
                   "agent.pi"
                 ]
-              }
-            },
-            "capabilities": [
-              "worktree",
-              "git.worktree"
-            ]
-          },
-          "capabilities": [
-            "loop"
-          ]
-        },
-        "review": {
-          "kind": "loop",
-          "mode": "parallel",
-          "each": "$.executionContexts",
-          "node": {
-            "kind": "git.worktree",
-            "nodes": {
+              },
               "review": {
                 "kind": "agent.pi",
                 "prompt": "review-work",
                 "role": "reviewer",
+                "needs": [
+                  "implement"
+                ],
                 "capabilities": [
                   "runRole",
                   "agent.pi"
@@ -393,9 +379,6 @@
               "git.worktree"
             ]
           },
-          "needs": [
-            "implement"
-          ],
           "capabilities": [
             "loop"
           ]
@@ -403,8 +386,7 @@
         "merge": {
           "kind": "git.merge",
           "needs": [
-            "implement",
-            "review"
+            "implement"
           ],
           "strategy": "accepted-only",
           "overrides": {

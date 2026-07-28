@@ -2209,6 +2209,15 @@ function workerKey(worker: { laneId?: string; itemId?: string; branch?: string }
 	return worker.laneId || worker.itemId || worker.branch;
 }
 
+function formatWorkerStatusText(step: WorkProcessRunRecord["workerStatuses"][number], capturedCommits: number): string {
+	const review = step.role === "reviewer" ? extractReviewOutcome(step.logPath) : {};
+	if (review.decision === "rejected") return `rejected${capturedCommits ? ` · captured ${capturedCommits} commit(s) on lane branch` : ""}${review.summary ? ` · ${review.summary}` : ""}`;
+	if (review.decision === "accepted") return `accepted${capturedCommits ? ` · captured ${capturedCommits} commit(s) on lane branch` : review.summary ? ` · ${review.summary}` : " · no changes"}`;
+	if (step.status === "completed") return step.commits?.length ? `completed · ${step.commits.length} commit(s)` : capturedCommits ? `completed · captured ${capturedCommits} commit(s) on lane branch` : "completed · no changes";
+	if (step.status === "failed") return step.error ? `failed · ${compactStatusText(step.error, 96)}` : "failed";
+	return "running";
+}
+
 function formatPipelineWorkerRows(record: Pick<WorkProcessRunRecord, "workerStatuses"> | undefined): string[] {
 	const workers = record?.workerStatuses || [];
 	if (!workers.length) return ["  (no worker details recorded)"];
@@ -2218,7 +2227,17 @@ function formatPipelineWorkerRows(record: Pick<WorkProcessRunRecord, "workerStat
 		const key = workerKey(worker);
 		if (key) laneCommits.set(key, Math.max(laneCommits.get(key) || 0, worker.commits?.length || 0));
 	}
-	return workers.map((step) => {
+	const laneGroups = new Map<string, typeof workers>();
+	const nonLaneWorkers: typeof workers = [];
+	for (const worker of workers) {
+		const key = workerKey(worker);
+		if (key) laneGroups.set(key, [...(laneGroups.get(key) || []), worker]);
+		else if (!["composite", "loop"].includes(worker.kind || "")) nonLaneWorkers.push(worker);
+	}
+	const displayWorkers = laneGroups.size
+		? [...laneGroups.values()].map((group) => group.find((worker) => worker.role === "reviewer") || group.find((worker) => worker.role === "implementer") || group.at(-1)!)
+		: workers;
+	return [...displayWorkers, ...nonLaneWorkers].map((step) => {
 		const details = [
 			step.itemId ? `item ${step.itemId}` : undefined,
 			step.nodePath ? `node ${step.nodePath}` : undefined,
@@ -2226,17 +2245,7 @@ function formatPipelineWorkerRows(record: Pick<WorkProcessRunRecord, "workerStat
 		].filter(Boolean).join("; ");
 		const key = workerKey(step);
 		const capturedCommits = key ? laneCommits.get(key) || 0 : 0;
-		const review = step.role === "reviewer" ? extractReviewOutcome(step.logPath) : {};
-		const statusText = review.decision === "rejected"
-			? `rejected${review.summary ? ` · ${review.summary}` : ""}`
-			: review.decision === "accepted"
-				? `accepted${review.summary ? ` · ${review.summary}` : " · no changes"}`
-				: step.status === "completed"
-					? step.commits?.length ? `completed · ${step.commits.length} commit(s)` : capturedCommits ? `completed · captured ${capturedCommits} commit(s) on lane branch` : "completed · no changes"
-					: step.status === "failed"
-						? step.error ? `failed · ${compactStatusText(step.error, 96)}` : "failed"
-						: "running";
-		return `${step.status.padEnd(9)} ${step.role.padEnd(12)} 0s · ${details ? `${details}; ` : ""}${statusText}`;
+		return `${step.status.padEnd(9)} ${step.role.padEnd(12)} 0s · ${details ? `${details}; ` : ""}${formatWorkerStatusText(step, capturedCommits)}`;
 	});
 }
 
@@ -2251,13 +2260,14 @@ function formatWorkSourceMutationRows(record: Pick<WorkProcessRunRecord, "workSo
 
 function formatWorkProcessSummary(input: { record: WorkProcessRunRecord; recordPath: string; advisoryNotes?: string[] }): string {
 	const record = input.record;
+	const workerRows = formatPipelineWorkerRows(record);
 	const lines = [
 		`Work process ${record.id}`,
 		`Status: ${statusGlyph(record.status)} ${record.status}`,
 		`Pipeline: ${record.pipeline}`,
 		`Items: ${record.resolvedItems.length}`,
-		`Execution workers: ${record.workerStatuses?.length || 0}`,
-		...formatPipelineWorkerRows(record),
+		`Execution workers: ${workerRows[0] === "  (no worker details recorded)" ? 0 : workerRows.length}`,
+		...workerRows,
 	];
 	if (record.branches.length) lines.push("Approved changes merged:", ...record.branches.map((branch) => `  - ${branch}`));
 	lines.push("Artifacts:", `  Record: ${input.recordPath}`);
@@ -3045,8 +3055,18 @@ interface GraphMergeCandidate {
 	nodeId: string;
 	branch: string;
 	commits: string[];
+	itemId?: string;
+	laneId?: string;
 }
 
+interface GraphReviewVerdict {
+	accepted: boolean;
+	summary?: string;
+	branch?: string;
+	itemId?: string;
+	laneId?: string;
+	nodePath?: string;
+}
 function defaultRunGit(args: string[], options: { cwd: string }): GitCommandResult {
 	const result = spawnSync("git", args, { cwd: options.cwd, encoding: "utf8", env: process.env });
 	return {
@@ -3089,6 +3109,12 @@ function collectWorkspaceMergeCandidates(needs: Record<string, NodeResult>, inpu
 	return candidates;
 }
 
+function nodeResultMetadata(result: NodeResult): { itemId?: string; laneId?: string } {
+	const itemId = typeof (result as any).itemId === "string" && (result as any).itemId.length ? (result as any).itemId : undefined;
+	const laneId = typeof (result as any).laneId === "string" && (result as any).laneId.length ? (result as any).laneId : undefined;
+	return { itemId, laneId };
+}
+
 function collectWorkspaceMergeCandidatesFromResult(need: string, result: NodeResult, candidates: GraphMergeCandidate[]): void {
 	if (result.type === "WorkspaceResult") {
 		const commits = nodeResultStringArray(result, "commits");
@@ -3096,11 +3122,15 @@ function collectWorkspaceMergeCandidatesFromResult(need: string, result: NodeRes
 		if (!commits.length && !effects.length) return;
 		const branch = nodeResultBranch(result);
 		if (!branch) throw new Error(`git.merge requires mergeable branches; '${need}' produced no branch`);
-		candidates.push({ need, nodeId: result.nodeId, branch, commits });
+		candidates.push({ need, nodeId: result.nodeId, branch, commits, ...nodeResultMetadata(result) });
 		return;
 	}
 	if (result.type === "LoopResult") {
-		for (const [index, child] of (((result as any).mergeableResults || []) as NodeResult[]).entries()) collectWorkspaceMergeCandidatesFromResult(`${need}[${index}]`, child, candidates);
+		const children = (((result as any).mergeableResults || (result as any).iterations || []) as NodeResult[]);
+		for (const [index, child] of children.entries()) collectWorkspaceMergeCandidatesFromResult(`${need}[${index}]`, child, candidates);
+	}
+	if (result.type === "CompositeResult") {
+		for (const [childId, child] of Object.entries((result as CompositeResult).children || {})) collectWorkspaceMergeCandidatesFromResult(`${need}.${childId}`, child as NodeResult, candidates);
 	}
 }
 
@@ -3112,17 +3142,49 @@ function isAcceptedReviewText(value: unknown): boolean | undefined {
 	return undefined;
 }
 
-function collectAcceptedReviewBranches(result: NodeResult | undefined, accepted = new Set<string>()): Set<string> {
-	if (!result) return accepted;
+function reviewSummaryText(value: unknown): string | undefined {
+	const text = typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+	return text ? compactStatusText(text, 180) : undefined;
+}
+
+function collectReviewVerdicts(result: NodeResult | undefined, verdicts: GraphReviewVerdict[] = [], inherited: { branch?: string; itemId?: string; laneId?: string } = {}): GraphReviewVerdict[] {
+	if (!result) return verdicts;
+	const metadata = { ...inherited, ...nodeResultMetadata(result) };
 	if (result.type === "WorkspaceResult") {
-		const branch = nodeResultBranch(result);
-		const childVerdicts = Object.values(result.children || {}).map((child) => isAcceptedReviewText((child as any).stdout ?? (child as any).output));
-		if (branch && childVerdicts.some((verdict) => verdict === true) && !childVerdicts.some((verdict) => verdict === false)) accepted.add(branch);
-		return accepted;
+		const branch = nodeResultBranch(result) || metadata.branch;
+		const workspaceMetadata = { ...metadata, branch };
+		for (const [childId, child] of Object.entries(result.children || {})) {
+			const output = (child as any).stdout ?? (child as any).output;
+			const accepted = isAcceptedReviewText(output);
+			if (accepted !== undefined) verdicts.push({ accepted, summary: reviewSummaryText(output), branch, itemId: workspaceMetadata.itemId, laneId: workspaceMetadata.laneId, nodePath: childId });
+			collectReviewVerdicts(child as NodeResult, verdicts, workspaceMetadata);
+		}
+		return verdicts;
 	}
-	if (result.type === "LoopResult") for (const child of result.iterations || []) collectAcceptedReviewBranches(child, accepted);
-	if (result.type === "CompositeResult") for (const child of Object.values(result.children || {})) collectAcceptedReviewBranches(child, accepted);
-	return accepted;
+	if (result.type === "LoopResult") {
+		const children = (((result as any).iterations || (result as any).mergeableResults || []) as NodeResult[]);
+		for (const child of children) collectReviewVerdicts(child, verdicts, metadata);
+	}
+	if (result.type === "CompositeResult") for (const child of Object.values(result.children || {})) collectReviewVerdicts(child as NodeResult, verdicts, metadata);
+	return verdicts;
+}
+
+function collectAllReviewVerdicts(needs: Record<string, NodeResult>): GraphReviewVerdict[] {
+	return Object.values(needs).flatMap((result) => collectReviewVerdicts(result));
+}
+
+function verdictMatchesCandidate(verdict: GraphReviewVerdict, candidate: GraphMergeCandidate): boolean {
+	if (verdict.branch && verdict.branch === candidate.branch) return true;
+	if (verdict.laneId && candidate.laneId && verdict.laneId === candidate.laneId) return true;
+	if (verdict.itemId && candidate.itemId && verdict.itemId === candidate.itemId) return true;
+	return false;
+}
+
+function acceptedOnlyCandidates(candidates: GraphMergeCandidate[], verdicts: GraphReviewVerdict[]): GraphMergeCandidate[] {
+	return candidates.filter((candidate) => {
+		const matching = verdicts.filter((verdict) => verdictMatchesCandidate(verdict, candidate));
+		return matching.some((verdict) => verdict.accepted) && !matching.some((verdict) => !verdict.accepted);
+	});
 }
 
 async function mergeGraphWorkspaceBranches(
@@ -3132,9 +3194,8 @@ async function mergeGraphWorkspaceBranches(
 ): Promise<Partial<GitMergeResult>> {
 	const mergeInputs = Array.isArray((context.node as any).inputs) ? (context.node as any).inputs.filter((entry: unknown): entry is string => typeof entry === "string" && entry.length > 0) : undefined;
 	let candidates = collectWorkspaceMergeCandidates(context.needs, mergeInputs);
-	if ((context.node as any).strategy === "accepted-only" && context.needs.review) {
-		const acceptedBranches = collectAcceptedReviewBranches(context.needs.review);
-		candidates = candidates.filter((candidate) => acceptedBranches.has(candidate.branch));
+	if ((context.node as any).strategy === "accepted-only") {
+		candidates = acceptedOnlyCandidates(candidates, collectAllReviewVerdicts(context.needs));
 		if (!candidates.length) throw new Error(`${context.path} has no review-accepted mergeable branches`);
 	}
 	if (!candidates.length) throw new Error(`${context.path} requires effectful mergeable branches`);
@@ -3421,8 +3482,16 @@ function formatRunStateLine(run: RunState): string {
 }
 
 function renderWidget(runs: Map<string, RunState>): string[] {
-	const active = [...runs.values()].sort((a, b) => b.startedAt - a.startedAt).slice(0, 8);
-	const lines = [`Execution workers: ${runs.size}`];
+	const grouped = new Map<string, RunState[]>();
+	for (const run of runs.values()) {
+		const key = run.laneId || run.itemId || run.id;
+		grouped.set(key, [...(grouped.get(key) || []), run]);
+	}
+	const active = [...grouped.values()].map((group) => {
+		const running = group.filter((run) => run.status === "running").sort((a, b) => b.startedAt - a.startedAt)[0];
+		return running || group.sort((a, b) => b.startedAt - a.startedAt)[0];
+	}).sort((a, b) => b.startedAt - a.startedAt).slice(0, 8);
+	const lines = [`Execution workers: ${grouped.size}`];
 	for (const run of active) {
 		const ageSource = run.endedAt || Date.now();
 		const age = Math.max(0, Math.round((ageSource - run.startedAt) / 1000));

@@ -182,8 +182,8 @@ test('status shows lane-captured commits and rejected review reason', async () =
       ],
     });
     const status = formatStatusSelection({ kind: 'record', record, inference: 'latest' });
-    assert.match(status, /implementer\s+0s · item wi-002; node .*captured 1 commit\(s\) on lane branch|implementer\s+0s · item wi-002; lane run\/wi-002\/0-1; completed · captured 1 commit\(s\) on lane branch/);
-    assert.match(status, /reviewer\s+0s · item wi-002; lane run\/wi-002\/0-1; rejected · `sample-tests\/fixture\.test\.mjs:1` — The branch adds a new fixture instead of renaming the existing fixture\./);
+    assert.match(status, /Execution workers: 1/);
+    assert.match(status, /reviewer\s+0s · item wi-002; lane run\/wi-002\/0-1; rejected · captured 1 commit\(s\) on lane branch · `sample-tests\/fixture\.test\.mjs:1` — The branch adds a new fixture instead of renaming the existing fixture\./);
   });
 });
 

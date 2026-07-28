@@ -35,7 +35,8 @@ test('pipeline packs map into agent-workflows agent and pipeline inventory', () 
   assert.equal(cfg.pipelines.archive.nodes.workspace.kind, 'git.worktree');
   assert.equal(cfg.pipelines['parallel-planner'].nodes.implement.node.kind, 'git.worktree');
   assert.equal(cfg.pipelines['parallel-planner'].nodes.merge.kind, 'git.merge');
-  assert.equal(cfg.pipelines['parallel-planner-with-review'].nodes.review.node.kind, 'git.worktree');
+  assert.equal(cfg.pipelines['parallel-planner-with-review'].nodes.implement.node.kind, 'git.worktree');
+  assert.equal(cfg.pipelines['parallel-planner-with-review'].nodes.implement.node.nodes.review.needs[0], 'implement');
   assert.equal(cfg.pipelines['parallel-planner-with-review'].nodes.merge.kind, 'git.merge');
   assert.equal(cfg.pipelines['parallel-planner'].steps, undefined);
   assert.equal(cfg.pipelines['parallel-planner-with-review'].steps, undefined);

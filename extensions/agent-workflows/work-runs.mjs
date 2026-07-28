@@ -389,28 +389,37 @@ function formatWorkRunDetail(record) {
     const key = workerKey(worker);
     if (key) laneCommits.set(key, Math.max(laneCommits.get(key) || 0, worker.commits?.length || 0));
   }
-  lines.push(`Execution workers: ${workers.length}`);
-  if (workers.length) {
-    for (const worker of workers) {
-      const details = [
-        worker.itemId ? `item ${worker.itemId}` : undefined,
-        worker.nodePath ? `node ${worker.nodePath}` : undefined,
-        worker.laneId ? `lane ${worker.laneId}` : undefined,
-      ].filter(Boolean).join("; ");
-      const key = workerKey(worker);
-      const capturedCommits = key ? laneCommits.get(key) || 0 : 0;
-      const review = worker.role === "reviewer" ? extractReviewOutcome(worker.logPath) : {};
-      const statusText = review.decision === "rejected"
-        ? `rejected${review.summary ? ` · ${review.summary}` : ""}`
-        : review.decision === "accepted"
-          ? `accepted${review.summary ? ` · ${review.summary}` : " · no changes"}`
-          : worker.status === "completed"
-            ? worker.commits?.length ? `completed · ${worker.commits.length} commit(s)` : capturedCommits ? `completed · captured ${capturedCommits} commit(s) on lane branch` : "completed · no changes"
-            : worker.status === "failed"
-              ? worker.error ? `failed · ${String(worker.error).slice(0, 96)}` : "failed"
-              : "running";
-      lines.push(`${String(worker.status || "").padEnd(9)} ${String(worker.role || "worker").padEnd(12)} 0s · ${details ? `${details}; ` : ""}${statusText}`);
-    }
+  const laneGroups = new Map();
+  const nonLaneWorkers = [];
+  for (const worker of workers) {
+    const key = workerKey(worker);
+    if (key) laneGroups.set(key, [...(laneGroups.get(key) || []), worker]);
+    else if (!["composite", "loop"].includes(worker.kind || "")) nonLaneWorkers.push(worker);
+  }
+  const displayWorkers = laneGroups.size
+    ? [...laneGroups.values()].map((group) => group.find((worker) => worker.role === "reviewer") || group.find((worker) => worker.role === "implementer") || group.at(-1))
+    : workers;
+  const rows = [...displayWorkers, ...nonLaneWorkers];
+  lines.push(`Execution workers: ${rows.length}`);
+  for (const worker of rows) {
+    const details = [
+      worker.itemId ? `item ${worker.itemId}` : undefined,
+      worker.nodePath ? `node ${worker.nodePath}` : undefined,
+      worker.laneId ? `lane ${worker.laneId}` : undefined,
+    ].filter(Boolean).join("; ");
+    const key = workerKey(worker);
+    const capturedCommits = key ? laneCommits.get(key) || 0 : 0;
+    const review = worker.role === "reviewer" ? extractReviewOutcome(worker.logPath) : {};
+    const statusText = review.decision === "rejected"
+      ? `rejected${capturedCommits ? ` · captured ${capturedCommits} commit(s) on lane branch` : ""}${review.summary ? ` · ${review.summary}` : ""}`
+      : review.decision === "accepted"
+        ? `accepted${capturedCommits ? ` · captured ${capturedCommits} commit(s) on lane branch` : review.summary ? ` · ${review.summary}` : " · no changes"}`
+        : worker.status === "completed"
+          ? worker.commits?.length ? `completed · ${worker.commits.length} commit(s)` : capturedCommits ? `completed · captured ${capturedCommits} commit(s) on lane branch` : "completed · no changes"
+          : worker.status === "failed"
+            ? worker.error ? `failed · ${String(worker.error).slice(0, 96)}` : "failed"
+            : "running";
+    lines.push(`${String(worker.status || "").padEnd(9)} ${String(worker.role || "worker").padEnd(12)} 0s · ${details ? `${details}; ` : ""}${statusText}`);
   }
   if (record.branches?.length) lines.push("Approved changes merged:", ...record.branches.map((branch) => `  - ${branch}`));
   if (record.logs?.length) lines.push("Logs:", ...record.logs.map((log) => `  - ${log}`));

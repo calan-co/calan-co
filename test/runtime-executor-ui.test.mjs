@@ -399,6 +399,74 @@ test('executePipeline graph git.merge accepted-only merges only review-approved 
   assert.deepEqual(record.nodes.find((node) => node.nodePath === 'root.nodes.merge').mergedBranches, ['feature/item-a']);
 });
 
+test('executePipeline graph git.merge accepted-only supports nested per-lane review nodes', async () => {
+  const repoRoot = await createGraphRepo(baseGraphConfig([
+    '  graph:',
+    '    kind: composite',
+    '    nodes:',
+    '      implement:',
+    '        kind: loop',
+    '        mode: parallel',
+    '        each: $.executionContexts',
+    '        node:',
+    '          kind: git.worktree',
+    '          nodes:',
+    '            implement:',
+    '              kind: agent.pi',
+    '              role: implementer',
+    '              prompt: Implement $INPUT',
+    '            review:',
+    '              kind: agent.pi',
+    '              role: reviewer',
+    '              prompt: Review $INPUT',
+    '              needs: [implement]',
+    '      merge:',
+    '        kind: git.merge',
+    '        needs: [implement]',
+    '        inputs: [implement]',
+    '        strategy: accepted-only',
+  ]));
+  const contexts = [
+    { contextId: 'run/item-a/0-0', branch: 'feature/item-a', groupIndex: 0, itemIndex: 0, itemId: 'item-a' },
+    { contextId: 'run/item-b/0-1', branch: 'feature/item-b', groupIndex: 0, itemIndex: 1, itemId: 'item-b' },
+  ];
+  const merged = [];
+  let head = 'base-head';
+
+  const record = await executePipeline(repoRoot, 'graph', 'nested review gated merge', {
+    now: () => 1700000004450,
+    graphInput: { prompt: 'nested review gated merge', executionContexts: contexts },
+    createWorktree: async (options) => fakeWorktree(repoRoot, async (runOptions) => {
+      const branch = options.branchStrategy.branch;
+      const isReview = /Review/.test(runOptions.prompt);
+      return {
+        iterations: [],
+        commits: isReview ? [] : [{ sha: `commit-${branch.split('/').at(-1)}` }],
+        branch,
+        stdout: isReview ? (branch.endsWith('item-a') ? 'Accepted: no blockers, safe to merge.' : 'Rejected: blocker found, do not merge.') : '',
+        logFilePath: runOptions.logging.path,
+      };
+    }, { branch: options.branchStrategy.branch, worktreePath: path.join(repoRoot, '.pi/sandcastle/worktrees', options.branchStrategy.branch.replaceAll('/', '-')) }),
+    loadSandboxProvider: async (kind) => ({ kind }),
+    makeAgent: (model, provider) => ({ model, provider }),
+    runGit: async (args) => {
+      if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return { status: 0, stdout: 'main\n', stderr: '' };
+      if (args[0] === 'rev-parse' && args[1] === 'HEAD') return { status: 0, stdout: `${head}\n`, stderr: '' };
+      if (args[0] === 'merge') {
+        merged.push(args.at(-1));
+        head = `merge-${merged.length}`;
+        return { status: 0, stdout: 'merged\n', stderr: '' };
+      }
+      if (args[0] === 'status') return { status: 0, stdout: '', stderr: '' };
+      return { status: 0, stdout: '', stderr: '' };
+    },
+  });
+
+  assert.equal(record.status, 'completed');
+  assert.deepEqual(merged, ['feature/item-a']);
+  assert.deepEqual(record.nodes.find((node) => node.nodePath === 'root.nodes.merge').mergedBranches, ['feature/item-a']);
+});
+
 test('executePipeline graph git.merge merges accepted workspace branch content into the target worktree', async () => {
   const repoRoot = await createGraphRepo(baseGraphConfig([
     '  graph:',

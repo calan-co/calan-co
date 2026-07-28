@@ -176,8 +176,9 @@ test('runtime compiler converts deterministic runtime pipelines to graph-native 
   assert.equal(cfg.pipelines['parallel-planner'].nodes.implement.node.kind, 'git.worktree');
   assert.equal(cfg.pipelines['parallel-planner'].nodes.merge.kind, 'git.merge');
   assert.equal(cfg.pipelines['parallel-planner'].steps, undefined);
+  assert.equal(cfg.pipelines['parallel-planner-with-review'].nodes.implement.node.nodes.review.needs[0], 'implement');
   assert.equal(cfg.pipelines['parallel-planner-with-review'].nodes.merge.kind, 'git.merge');
-  assert.deepEqual(cfg.pipelines['parallel-planner-with-review'].nodes.merge.needs, ['implement', 'review']);
+  assert.deepEqual(cfg.pipelines['parallel-planner-with-review'].nodes.merge.needs, ['implement']);
   assert.deepEqual(cfg.pipelines['parallel-planner-with-review'].nodes.merge.inputs, ['implement']);
   assert.equal(cfg.pipelines['parallel-planner-with-review'].steps, undefined);
 });
