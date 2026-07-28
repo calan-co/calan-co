@@ -164,8 +164,8 @@ test('work:process executes graph pipelines and records context-bound lane statu
     }
 
     const message = notifications.at(-1).message;
-    assert.match(message, /✓ Worker \d+: implementer completed — item wi-1 · node root\.nodes\.work\.iterations\.0\.nodes\.implement · lane [^·]+ · branch agent-workflows\/graph-process\/[^\s·]+\/wi-1 · commits sha-1 · log /);
-    assert.match(message, /✓ Worker \d+: implementer completed — item wi-2 · node root\.nodes\.work\.iterations\.1\.nodes\.implement · lane [^·]+ · branch agent-workflows\/graph-process\/[^\s·]+\/wi-2 · commits sha-2 · log /);
+    assert.match(message, /completed\s+implementer\s+0s · item wi-1; node root\.nodes\.work\.iterations\.0\.nodes\.implement; lane [^;]+; completed · 1 commit\(s\)/);
+    assert.match(message, /completed\s+implementer\s+0s · item wi-2; node root\.nodes\.work\.iterations\.1\.nodes\.implement; lane [^;]+; completed · 1 commit\(s\)/);
 
     const [pipelineRecord] = await readPipelineRecords(repoRoot);
     assert.equal(pipelineRecord.executor, 'graph');
@@ -183,8 +183,8 @@ test('work:process graph status rows use actual graph lane agents instead of syn
     await commands.get('work:process').handler('graph', ctx);
 
     const message = notifications.at(-1).message;
-    assert.match(message, /✓ Worker \d+: worker completed — item wi-1 · node root\.nodes\.work\.iterations\.0\.nodes\.implement · lane [^·]+ · branch agent-workflows\/graph-process\/[^\s·]+\/wi-1 · commits sha-1 · log /);
-    assert.match(message, /✓ Worker \d+: worker completed — item wi-2 · node root\.nodes\.work\.iterations\.1\.nodes\.implement · lane [^·]+ · branch agent-workflows\/graph-process\/[^\s·]+\/wi-2 · commits sha-2 · log /);
+    assert.match(message, /completed\s+worker\s+0s · item wi-1; node root\.nodes\.work\.iterations\.0\.nodes\.implement; lane [^;]+; completed · 1 commit\(s\)/);
+    assert.match(message, /completed\s+worker\s+0s · item wi-2; node root\.nodes\.work\.iterations\.1\.nodes\.implement; lane [^;]+; completed · 1 commit\(s\)/);
     assert.doesNotMatch(message, /Worker \d+: implementer /, 'graph summary must not include stale synthetic implementer rows');
 
     const allWidgetLines = widgets.flatMap((entry) => entry.lines);

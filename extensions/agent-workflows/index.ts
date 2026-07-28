@@ -2189,11 +2189,13 @@ function formatPipelineWorkerRows(record: Pick<WorkProcessRunRecord, "workerStat
 			step.itemId ? `item ${step.itemId}` : undefined,
 			step.nodePath ? `node ${step.nodePath}` : undefined,
 			step.laneId ? `lane ${step.laneId}` : undefined,
-			step.branch ? `branch ${step.branch}` : undefined,
-			step.commits?.length ? `commits ${step.commits.join(", ")}` : undefined,
-			step.logPath ? `log ${step.logPath}` : undefined,
-		].filter(Boolean).join(" · ");
-		return `  ${statusGlyph(step.status)} Worker ${step.index + 1}: ${step.role} ${step.status}${details ? ` — ${details}` : ""}`;
+		].filter(Boolean).join("; ");
+		const statusText = step.status === "completed"
+			? step.commits?.length ? `completed · ${step.commits.length} commit(s)` : "completed · no changes"
+			: step.status === "failed"
+				? step.error ? `failed · ${compactStatusText(step.error, 96)}` : "failed"
+				: "running";
+		return `${step.status.padEnd(9)} ${step.role.padEnd(12)} 0s · ${details ? `${details}; ` : ""}${statusText}`;
 	});
 }
 
@@ -2213,7 +2215,7 @@ function formatWorkProcessSummary(input: { record: WorkProcessRunRecord; recordP
 		`Status: ${statusGlyph(record.status)} ${record.status}`,
 		`Pipeline: ${record.pipeline}`,
 		`Items: ${record.resolvedItems.length}`,
-		"Workers:",
+		`Execution workers: ${record.workerStatuses?.length || 0}`,
 		...formatPipelineWorkerRows(record),
 	];
 	if (record.branches.length) lines.push("Approved changes merged:", ...record.branches.map((branch) => `  - ${branch}`));

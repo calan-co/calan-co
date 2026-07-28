@@ -355,18 +355,20 @@ function formatWorkRunDetail(record) {
   lines.push(`Items: ${itemCount}`);
   if (record.query) lines.push(`Query: ${JSON.stringify(record.query)}`);
   const workers = Array.isArray(record.workerStatuses) ? record.workerStatuses : [];
+  lines.push(`Execution workers: ${workers.length}`);
   if (workers.length) {
-    lines.push("Workers:");
-    for (const [index, worker] of workers.entries()) {
+    for (const worker of workers) {
       const details = [
         worker.itemId ? `item ${worker.itemId}` : undefined,
         worker.nodePath ? `node ${worker.nodePath}` : undefined,
         worker.laneId ? `lane ${worker.laneId}` : undefined,
-        worker.branch ? `branch ${worker.branch}` : undefined,
-        worker.commits?.length ? `commits ${worker.commits.join(", ")}` : undefined,
-        worker.logPath ? `log ${worker.logPath}` : undefined,
-      ].filter(Boolean).join(" · ");
-      lines.push(`  ${statusGlyph(worker.status)} Worker ${Number.isFinite(worker.index) ? worker.index + 1 : index + 1}: ${worker.role || "worker"} ${worker.status}${details ? ` — ${details}` : ""}`);
+      ].filter(Boolean).join("; ");
+      const statusText = worker.status === "completed"
+        ? worker.commits?.length ? `completed · ${worker.commits.length} commit(s)` : "completed · no changes"
+        : worker.status === "failed"
+          ? worker.error ? `failed · ${String(worker.error).slice(0, 96)}` : "failed"
+          : "running";
+      lines.push(`${String(worker.status || "").padEnd(9)} ${String(worker.role || "worker").padEnd(12)} 0s · ${details ? `${details}; ` : ""}${statusText}`);
     }
   }
   if (record.branches?.length) lines.push("Approved changes merged:", ...record.branches.map((branch) => `  - ${branch}`));
