@@ -373,6 +373,16 @@
                   "runRole",
                   "agent.pi"
                 ]
+              },
+              "close": {
+                "kind": "work.close",
+                "needs": [
+                  "review"
+                ],
+                "when": "needs.review.accepted == true",
+                "capabilities": [
+                  "work.close"
+                ]
               }
             },
             "capabilities": [
@@ -396,6 +406,7 @@
           "inputs": [
             "implement"
           ],
+          "when": "needs.implement.mergeableResults.exists(r, has(r.children.close.closed) && r.children.close.closed == true)",
           "capabilities": [
             "merge",
             "git.merge"

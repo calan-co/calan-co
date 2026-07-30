@@ -14,6 +14,7 @@ export {
 } from "./workflow-model.ts";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { parse as parseCel } from "@bufbuild/cel";
 import { SelectList as PiSelectList, matchesKey } from "@earendil-works/pi-tui";
 import type { SelectListTheme as PiSelectListTheme } from "@earendil-works/pi-tui";
 import {
@@ -431,6 +432,13 @@ interface RunPlanWorkRoleInput {
 interface WorkSourceMutationAdapter {
 	validate?: (input: { itemId: string; cwd: string; runId: string; pipeline: string; recordPath: string; item?: WorkItem }) => Promise<unknown> | unknown;
 	close?: (input: { itemId: string; cwd: string; runId: string; pipeline: string; recordPath: string; item?: WorkItem }) => Promise<unknown> | unknown;
+}
+
+interface ShellCommandResult {
+	exitCode: number;
+	stdout: string;
+	stderr: string;
+	command: string;
 }
 
 interface BacklogProcessPlanDeps {
@@ -1653,6 +1661,14 @@ function validateConfigGraphNodes(nodes: Record<string, PipelineNodeDef> | undef
 			continue;
 		}
 		if (!node.kind) issues.push(`${nodePath}.kind is required.`);
+		if (node.when !== undefined) {
+			if (typeof node.when !== "string" || !node.when.trim()) issues.push(`${nodePath}.when must be a non-empty CEL expression string.`);
+			else {
+				try { parseCel(node.when); }
+				catch (error) { issues.push(`${nodePath}.when must parse as CEL: ${error instanceof Error ? error.message : String(error)}`); }
+			}
+		}
+		if (node.kind === "command" && (typeof (node as any).command !== "string" || !(node as any).command.trim())) issues.push(`${nodePath}.command is required for command nodes.`);
 		if (node.kind === "loop") {
 			if (node.mode === "parallel" && node.each === undefined) issues.push(`${nodePath}.each is required for parallel loop nodes.`);
 			if (node.node === undefined && node.nodes === undefined) issues.push(`${nodePath} loop must define node or nodes.`);
@@ -2868,6 +2884,9 @@ interface PipelineRunNodeRecord {
 	effects?: string[];
 	mergedBranches?: string[];
 	mergedCommits?: string[];
+	accepted?: boolean;
+	closed?: boolean;
+	exitCode?: number;
 	laneId?: string;
 	itemId?: string;
 }
@@ -2900,6 +2919,18 @@ interface GitCommandResult {
 
 type GitCommandRunner = (args: string[], options: { cwd: string }) => GitCommandResult | Promise<GitCommandResult>;
 
+function runShellCommand(command: string, options: { cwd: string; env?: Record<string, string> }): Promise<ShellCommandResult> {
+	return new Promise((resolve) => {
+		const child = spawn(command, { cwd: options.cwd, shell: true, env: { ...process.env, ...(options.env || {}) } });
+		const stdout: Buffer[] = [];
+		const stderr: Buffer[] = [];
+		child.stdout?.on("data", (chunk) => stdout.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))));
+		child.stderr?.on("data", (chunk) => stderr.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))));
+		child.on("error", (error) => resolve({ exitCode: 127, stdout: Buffer.concat(stdout).toString("utf8"), stderr: `${Buffer.concat(stderr).toString("utf8")}${error.message}`, command }));
+		child.on("close", (code) => resolve({ exitCode: Number(code ?? 1), stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8"), command }));
+	});
+}
+
 interface PipelineExecutionDeps {
 	createWorktree?: typeof createWorktree;
 	claudeCode?: typeof claudeCode;
@@ -2911,6 +2942,7 @@ interface PipelineExecutionDeps {
 	image?: SandboxImageDeps;
 	now?: () => number;
 	graphInput?: unknown;
+	workSourceAdapter?: WorkSourceMutationAdapter;
 	graphHooks?: GraphNodeHook[];
 	graphHookCapabilities?: string[];
 	graphHookNamespaces?: Record<string, unknown>;
@@ -3080,6 +3112,9 @@ function graphResultSummary(result: NodeResult): Record<string, unknown> {
 		kind: result.kind,
 		effects: nodeResultStringArray(result, "effects"),
 		commits: nodeResultStringArray(result, "commits"),
+		...(typeof (result as any).accepted === "boolean" ? { accepted: (result as any).accepted } : {}),
+		...(typeof (result as any).closed === "boolean" ? { closed: (result as any).closed } : {}),
+		...(typeof (result as any).exitCode === "number" ? { exitCode: (result as any).exitCode } : {}),
 	};
 }
 
@@ -3097,6 +3132,9 @@ function collectGraphNodeRecords(result: NodeResult, path = "root"): PipelineRun
 		...(nodeResultStringArray(result, "effects").length ? { effects: nodeResultStringArray(result, "effects") } : {}),
 		...(Array.isArray((result as any).mergedBranches) ? { mergedBranches: (result as any).mergedBranches.filter((entry: unknown): entry is string => typeof entry === "string" && entry.length > 0) } : {}),
 		...(Array.isArray((result as any).mergedCommits) ? { mergedCommits: (result as any).mergedCommits.filter((entry: unknown): entry is string => typeof entry === "string" && entry.length > 0) } : {}),
+		...(typeof (result as any).accepted === "boolean" ? { accepted: (result as any).accepted } : {}),
+		...(typeof (result as any).closed === "boolean" ? { closed: (result as any).closed } : {}),
+		...(typeof (result as any).exitCode === "number" ? { exitCode: (result as any).exitCode } : {}),
 		...(nodeResultString(result, "laneId") ? { laneId: nodeResultString(result, "laneId") } : {}),
 		...(nodeResultString(result, "itemId") ? { itemId: nodeResultString(result, "itemId") } : {}),
 	};
@@ -3247,6 +3285,31 @@ function acceptedOnlyCandidates(candidates: GraphMergeCandidate[], verdicts: Gra
 	});
 }
 
+function workGraphInputItem(input: unknown, itemId: string | undefined): WorkItem | undefined {
+	if (!itemId || !isRecord(input) || !Array.isArray((input as any).items)) return undefined;
+	return (input as any).items.find((item: unknown): item is WorkItem => isRecord(item) && (item as any).id === itemId);
+}
+
+function renderWorkCommandTemplate(command: string, values: Record<string, unknown>): string {
+	return command.replace(/\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}/g, (_match, key) => String(values[key] ?? ""));
+}
+
+function defaultWorkCloseCommand(workSource: string | undefined): string | undefined {
+	if (workSource === "github-issues") return "gh issue close {{ id }}";
+	if (workSource === "beads") return "bd close {{ id }}";
+	return undefined;
+}
+
+function commandEvidence(value: unknown): Partial<ShellCommandResult> {
+	return isRecord(value) ? {
+		...(typeof value.status === "number" ? { exitCode: value.status } : {}),
+		...(typeof value.exitCode === "number" ? { exitCode: value.exitCode } : {}),
+		...(typeof value.stdout === "string" ? { stdout: value.stdout } : {}),
+		...(typeof value.stderr === "string" ? { stderr: value.stderr } : {}),
+		...(typeof value.command === "string" ? { command: value.command } : {}),
+	} : {};
+}
+
 async function mergeGraphWorkspaceBranches(
 	context: GraphNodeExecutionContext,
 	deps: PipelineExecutionDeps,
@@ -3322,8 +3385,9 @@ export async function executePipeline(
 	const makePipelineAgent = deps.makeAgent;
 	const loadSandboxProvider = deps.loadSandboxProvider || loadPipelineSandboxProvider;
 	const graphHookCapabilities = buildGraphHookCapabilities(pipeline, deps);
+	const hasGraphNativeWorkClose = graphHookCapabilities.includes("node.kind:work.close");
 	const configuredGraphHooks = [
-		...((cfg.workSource || cfg.issueTracker) === "doc-vader" ? createDocVaderWorkSourceHooks() : []),
+		...((cfg.workSource || cfg.issueTracker) === "doc-vader" && !hasGraphNativeWorkClose ? createDocVaderWorkSourceHooks() : []),
 		...(deps.graphHooks || []),
 	];
 	const graphHooks = configuredGraphHooks;
@@ -3417,12 +3481,14 @@ export async function executePipeline(
 					stepRecord.logPath = result.logFilePath || stepRecord.logPath;
 					await writePipelineRunRecord(record);
 					deps.onStepUpdate?.(stepRecord, record);
+					const accepted = isAcceptedReviewText(result.stdout);
 					return {
 						role: roleName,
 						branch: resultBranch,
 						commits: commitShas,
 						logPath: result.logFilePath,
 						stdout: result.stdout,
+						...(accepted !== undefined ? { accepted } : {}),
 						...(itemId ? { itemId } : {}),
 						...(laneId ? { laneId } : {}),
 					};
@@ -3460,6 +3526,37 @@ export async function executePipeline(
 					agent: runAgentNode,
 					"agent.pi": runAgentNode,
 					script: async ({ node }) => ({ output: (node as any).run || (node as any).command || (node as any).with?.run }),
+					command: async ({ node }) => {
+						const command = typeof (node as any).command === "string" ? (node as any).command : typeof (node as any).with?.command === "string" ? (node as any).with.command : "";
+						if (!command.trim()) throw new Error("command node must define command");
+						const result = await runShellCommand(command, { cwd });
+						return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr, command: result.command, effects: result.exitCode === 0 ? [`command:${command}`] : [] };
+					},
+					"work.close": async (context) => {
+						const inputItems = isRecord(context.input) && Array.isArray((context.input as any).items) ? (context.input as any).items.filter((entry: unknown): entry is WorkItem => isRecord(entry) && typeof (entry as any).id === "string") : [];
+						const itemId = typeof (context.node as any).with?.itemId === "string" ? (context.node as any).with.itemId : typeof (context.loop?.item as any)?.itemId === "string" ? (context.loop?.item as any).itemId : inputItems.length === 1 ? inputItems[0].id : undefined;
+						if (!itemId) throw new Error(`${context.path} work.close requires an item id from with.itemId, loop item, or a single input item`);
+						const item = workGraphInputItem(context.input, itemId);
+						const closeCwd = typeof context.workspace?.worktreePath === "string" ? context.workspace.worktreePath : cwd;
+						const env = { ITEM_ID: itemId, WORK_ITEM_ID: itemId, RUN_ID: id, PIPELINE: pipelineName, RECORD_PATH: recordPath };
+						const explicitCommand = typeof (context.node as any).command === "string" ? (context.node as any).command : undefined;
+						let command = explicitCommand ? renderWorkCommandTemplate(explicitCommand, { id: itemId, itemId, runId: id, pipeline: pipelineName, recordPath }) : undefined;
+						let evidence: Partial<ShellCommandResult> = {};
+						if (!command) {
+							const adapter = deps.workSourceAdapter || ((cfg.workSource || cfg.issueTracker) === "doc-vader" ? createDocVaderWorkSourceAdapter() : undefined);
+							if (adapter?.close) evidence = commandEvidence(await adapter.close({ itemId, cwd: closeCwd, runId: id, pipeline: pipelineName, recordPath, item }));
+							else {
+								const defaultCommand = defaultWorkCloseCommand(cfg.workSource || cfg.issueTracker);
+								if (!defaultCommand) throw new Error(`${context.path} cannot close Work Item ${itemId}: no Work Source close adapter or command configured`);
+								command = renderWorkCommandTemplate(defaultCommand, { id: itemId, itemId, runId: id, pipeline: pipelineName, recordPath });
+							}
+						}
+						if (command) evidence = await runShellCommand(command, { cwd: closeCwd, env });
+						if ((evidence.exitCode ?? 0) !== 0) throw new Error(`${context.path} failed to close Work Item ${itemId}: ${evidence.stderr || evidence.stdout || `command exited ${evidence.exitCode}`}`);
+						const mutations = isRecord(deps.graphHookNamespaces?.work) && Array.isArray((deps.graphHookNamespaces.work as any).mutations) ? (deps.graphHookNamespaces.work as any).mutations as WorkSourceMutationOutcome[] : undefined;
+						mutations?.push({ itemId, action: "close", status: "succeeded" });
+						return { itemId, accepted: true, closed: true, exitCode: evidence.exitCode ?? 0, stdout: evidence.stdout || "", stderr: evidence.stderr || "", command: evidence.command, effects: [`close:${itemId}`] };
+					},
 					"git.worktree": async (context) => {
 						if (!context.executeChildren) throw new Error(`${context.path} cannot execute git.worktree children`);
 						const contextBranch = graphContextString(context, "branch");
@@ -4770,6 +4867,7 @@ Work views and processing:
 			const workSourceHookState: { mutations?: WorkSourceMutationOutcome[] } = {};
 			const pipelineRun = await executePipeline(cwd, input.pipeline, runtimePrompt, {
 				...deps.pipeline,
+				workSourceAdapter: deps.pipeline?.workSourceAdapter || backlogDeps.workSourceAdapter,
 				graphInput: {
 					prompt: runtimePrompt,
 					query: input.query,
@@ -4833,7 +4931,7 @@ Work views and processing:
 			if (workSourceHookState.mutations?.length) {
 				executionResult.workSourceMutations = workSourceHookState.mutations;
 				if (workSourceHookState.mutations.some((mutation) => mutation.status === "failed")) executionResult.status = "error";
-			} else if (executionResult.status === "done") {
+			} else if (executionResult.status === "done" && !pipelineRun.nodes?.some((node) => node.kind === "work.close")) {
 				const mutationResult = await runWorkSourceMutations({ cwd, runId: input.runId, pipeline: input.pipeline, recordPath: input.recordPath, items: input.items });
 				if (mutationResult.outcomes.length) executionResult.workSourceMutations = mutationResult.outcomes;
 				if (mutationResult.failed) executionResult.status = "error";

@@ -123,6 +123,113 @@ test('CEL when mixin fails closed for invalid or non-boolean expressions', async
   );
 });
 
+test('command and work.close nodes expose typed results for CEL gates', async () => {
+  const calls = [];
+  const result = await executeGraphWorkflow({
+    kind: 'composite',
+    nodes: {
+      check: { kind: 'command', command: 'echo ok' },
+      close: { kind: 'work.close', needs: ['check'], when: 'needs.check.exitCode == 0' },
+    },
+  }, {
+    handlers: {
+      command: ({ node }) => ({ exitCode: 0, stdout: 'ok\n', stderr: '', command: node.command, effects: ['command:echo ok'] }),
+      'work.close': () => { calls.push('close'); return { itemId: 'wi-1', accepted: true, closed: true, exitCode: 0, effects: ['close:wi-1'] }; },
+    },
+  });
+
+  assert.deepEqual(calls, ['close']);
+  assert.equal(result.children.check.type, 'CommandResult');
+  assert.equal(result.children.check.exitCode, 0);
+  assert.equal(result.children.close.type, 'WorkCloseResult');
+  assert.equal(result.children.close.closed, true);
+});
+
+test('merge can be gated by nested closed work without merge-specific condition logic', async () => {
+  const calls = [];
+  const result = await executeGraphWorkflow({
+    kind: 'composite',
+    nodes: {
+      lanes: {
+        kind: 'loop',
+        mode: 'parallel',
+        each: '$.items',
+        node: {
+          kind: 'git.worktree',
+          nodes: {
+            implement: { kind: 'script' },
+            review: { kind: 'review', needs: ['implement'] },
+            close: { kind: 'work.close', needs: ['review'], when: 'needs.review.accepted == true' },
+          },
+        },
+      },
+      merge: {
+        kind: 'git.merge',
+        needs: ['lanes'],
+        when: 'needs.lanes.mergeableResults.exists(r, has(r.children.close.closed) && r.children.close.closed == true)',
+      },
+    },
+  }, {
+    input: { items: [{ id: 'wi-1' }] },
+    handlers: {
+      'git.worktree': async (context) => {
+        const childRun = await context.executeChildren();
+        return { children: childRun.children, order: childRun.order, effects: ['commit:lane'] };
+      },
+      script: () => ({ effects: ['edit:file'] }),
+      review: () => ({ accepted: true }),
+      'work.close': () => ({ itemId: 'wi-1', closed: true, effects: ['close:wi-1'] }),
+      'git.merge': () => { calls.push('merge'); return { effects: ['merge:branch'] }; },
+    },
+  });
+
+  assert.deepEqual(calls, ['merge']);
+  assert.equal(result.children.merge.status, 'succeeded');
+  assert.equal(result.children.lanes.mergeableResults[0].children.close.closed, true);
+});
+
+test('merge is skipped when review rejection prevents close', async () => {
+  const calls = [];
+  const result = await executeGraphWorkflow({
+    kind: 'composite',
+    nodes: {
+      lanes: {
+        kind: 'loop',
+        each: '$.items',
+        node: {
+          kind: 'git.worktree',
+          nodes: {
+            implement: { kind: 'script' },
+            review: { kind: 'review', needs: ['implement'] },
+            close: { kind: 'work.close', needs: ['review'], when: 'needs.review.accepted == true' },
+          },
+        },
+      },
+      merge: {
+        kind: 'git.merge',
+        needs: ['lanes'],
+        when: 'needs.lanes.mergeableResults.exists(r, has(r.children.close.closed) && r.children.close.closed == true)',
+      },
+    },
+  }, {
+    input: { items: [{ id: 'wi-1' }] },
+    handlers: {
+      'git.worktree': async (context) => {
+        const childRun = await context.executeChildren();
+        return { children: childRun.children, order: childRun.order, effects: ['commit:lane'] };
+      },
+      script: () => ({ effects: ['edit:file'] }),
+      review: () => ({ accepted: false }),
+      'work.close': () => { calls.push('close'); return { closed: true }; },
+      'git.merge': () => { calls.push('merge'); return { effects: ['merge:branch'] }; },
+    },
+  });
+
+  assert.deepEqual(calls, []);
+  assert.equal(result.children.lanes.iterations[0].children.close.status, 'skipped');
+  assert.equal(result.children.merge.status, 'skipped');
+});
+
 test('runs sequential loops without each up to max iterations', async () => {
   const iterations = [];
   const result = await executeGraphWorkflow({

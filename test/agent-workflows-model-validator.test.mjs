@@ -163,6 +163,30 @@ test('validates loop model-level mode and max semantics', () => {
   assert.match(result.errors.join('\n'), /root.nodes.missingParallelIterator parallel loop must define each/);
 });
 
+test('validates command, work.close, and CEL when mixins', () => {
+  const valid = validateWorkflowModel({
+    kind: 'composite',
+    nodes: {
+      check: { kind: 'command', command: 'node --version' },
+      close: { kind: 'work.close', needs: ['check'], when: 'needs.check.exitCode == 0' },
+    },
+  });
+  assert.equal(valid.valid, true, valid.errors.join('\n'));
+  assert.equal(RESULT_CONTRACTS.command.resultType, 'CommandResult');
+  assert.equal(RESULT_CONTRACTS['work.close'].resultType, 'WorkCloseResult');
+
+  const invalid = validateWorkflowModel({
+    kind: 'composite',
+    nodes: {
+      missingCommand: { kind: 'command' },
+      badWhen: { kind: 'work.close', when: 'needs.' },
+    },
+  });
+  assert.equal(invalid.valid, false);
+  assert.match(invalid.errors.join('\n'), /root.nodes.missingCommand command nodes must define a non-empty command string/);
+  assert.match(invalid.errors.join('\n'), /root.nodes.badWhen when must parse as CEL/);
+});
+
 test('validates reserved $ ref node structure', () => {
   const valid = validateWorkflowModel({
     kind: 'composite',

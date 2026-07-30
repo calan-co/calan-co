@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { parse as parseCel } from "@bufbuild/cel";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -84,6 +85,7 @@ export interface RuntimePipelineNode {
 	nodes?: Record<string, RuntimePipelineNode>;
 	image?: RuntimeContainerImage;
 	strategy?: string;
+	command?: string;
 	when?: string;
 	with?: Record<string, unknown>;
 	overrides?: Record<string, unknown>;
@@ -146,7 +148,7 @@ export function validateExecutionRuntimePack(value: unknown): ExecutionRuntimePa
 	return normalizedPack;
 }
 
-const BUILT_IN_NODE_KINDS = new Set(["composite", "loop", "agent.pi", "git.worktree", "git.merge", "docker.container", "podman.container"]);
+const BUILT_IN_NODE_KINDS = new Set(["composite", "loop", "agent.pi", "command", "work.close", "git.worktree", "git.merge", "docker.container", "podman.container"]);
 const SUPPORTED_REF_META_KEYS = new Set(["ref", "default"]);
 const PROVIDER_QUALIFIED_NODE_KIND = /^[a-z][a-z0-9-]*\.[a-z][a-z0-9_-]*$/;
 
@@ -221,6 +223,14 @@ function validateNode(scope: string, id: string, node: RuntimePipelineNode, erro
 	if (validateRefNode(nodeScope, node, errors, pack)) return;
 	if (!node.kind) errors.push(`${nodeScope} is missing kind`);
 	else if (!BUILT_IN_NODE_KINDS.has(node.kind) && !PROVIDER_QUALIFIED_NODE_KIND.test(node.kind)) errors.push(`${nodeScope} references unknown node kind '${node.kind}'`);
+	if (node.when !== undefined) {
+		if (typeof node.when !== "string" || !node.when.trim()) errors.push(`${nodeScope} when must be a non-empty CEL expression string`);
+		else {
+			try { parseCel(node.when); }
+			catch (error) { errors.push(`${nodeScope} when must parse as CEL: ${error instanceof Error ? error.message : String(error)}`); }
+		}
+	}
+	if (node.kind === "command" && (typeof node.command !== "string" || !node.command.trim())) errors.push(`${nodeScope} command nodes must define command`);
 	if (node.kind === "agent.pi") {
 		if (!node.role) errors.push(`${nodeScope} must reference a role`);
 		if (!node.prompt) errors.push(`${nodeScope} must reference a prompt`);

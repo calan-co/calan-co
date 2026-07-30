@@ -1,3 +1,5 @@
+import { parse as parseCel } from "@bufbuild/cel";
+
 export const GLOBAL_NODE_DISCRIMINATOR = "kind" as const;
 export const MERGEABLE_RESULT_INTERFACE = "IMergeableResult" as const;
 
@@ -43,6 +45,8 @@ export const RESULT_CONTRACTS: Record<string, ResultContract> = Object.freeze({
 	loop: Object.freeze({ resultType: "LoopResult", interfaces: [], accepts: [] }),
 	agent: Object.freeze({ resultType: "AgentResult", interfaces: [], accepts: [] }),
 	script: Object.freeze({ resultType: "ScriptResult", interfaces: [], accepts: [] }),
+	command: Object.freeze({ resultType: "CommandResult", interfaces: [], accepts: [] }),
+	"work.close": Object.freeze({ resultType: "WorkCloseResult", interfaces: [], accepts: [] }),
 	"git.worktree": Object.freeze({ resultType: "WorkspaceResult", interfaces: [MERGEABLE_RESULT_INTERFACE], accepts: [] }),
 	"git.merge": Object.freeze({ resultType: "GitMergeResult", interfaces: [], accepts: [MERGEABLE_RESULT_INTERFACE] }),
 	"podman.container": Object.freeze({ resultType: "ContainerResult", interfaces: [], accepts: [] }),
@@ -125,6 +129,19 @@ function validateNeeds(path: string, node: Record<string, unknown>, siblingIds: 
 	return needs;
 }
 
+function validateWhenMixin(path: string, node: WorkflowNodeModel, ctx: ValidationContext): void {
+	if (!Object.prototype.hasOwnProperty.call(node, "when")) return;
+	if (typeof node.when !== "string" || !node.when.trim()) {
+		addError(ctx, path, "when must be a non-empty CEL expression string");
+		return;
+	}
+	try {
+		parseCel(node.when);
+	} catch (error) {
+		addError(ctx, path, `when must parse as CEL: ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+
 function validateMergeInputs(path: string, needs: string[], siblingContracts: Map<string, ResultContract> | undefined, ctx: ValidationContext): void {
 	if (!needs.length) {
 		addError(ctx, path, `requires needs that produce ${MERGEABLE_RESULT_INTERFACE}`);
@@ -182,6 +199,8 @@ function validateNode(
 		if (Object.prototype.hasOwnProperty.call(node, field)) addError(ctx, path, `uses provider selector field '${field}'; concrete node type must be selected by kind`);
 	}
 	if (Object.prototype.hasOwnProperty.call(node, "id")) addError(ctx, path, "must not define id; node ids are map keys");
+	validateWhenMixin(path, node, ctx);
+	if (kind === "command" && (typeof node.command !== "string" || !node.command.trim())) addError(ctx, path, "command nodes must define a non-empty command string");
 
 	validateNeeds(path, node, siblingIds, ctx);
 

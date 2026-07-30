@@ -204,6 +204,37 @@ test('/work:config-raw validate rejects graph nodes missing kind and $ ref metad
   assert.match(notifications[0].message, /config\.pipelines\.bad\.nodes\.missing-kind\.kind is required/);
 });
 
+test('/work:config-raw validate rejects invalid CEL when and command nodes without command', async () => {
+  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-invalid-when-config-'));
+  await fs.mkdir(path.join(repoRoot, '.pi/sandcastle'), { recursive: true });
+  await fs.writeFile(path.join(repoRoot, '.pi/sandcastle', 'run-job.mjs'), '', 'utf8');
+  await fs.writeFile(path.join(repoRoot, '.pi/sandcastle', 'config.yaml'), [
+    'roles:',
+    '  implementer:',
+    '    description: Implementer',
+    'pipelines:',
+    '  bad:',
+    '    kind: composite',
+    '    nodes:',
+    '      check:',
+    '        kind: command',
+    '      close:',
+    '        kind: work.close',
+    '        when: needs.',
+  ].join('\n'), 'utf8');
+  const pi = createFakePi();
+  agentWorkflows(pi);
+  const notifications = [];
+
+  await pi.commands.get('work:config-raw')('validate', {
+    cwd: repoRoot,
+    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  });
+
+  assert.equal(notifications[0].type, 'error');
+  assert.match(notifications[0].message, /command|when must parse as CEL/s);
+});
+
 test('/work:config-raw validate rejects parallel loop nodes without each', async () => {
   const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-invalid-loop-config-'));
   await fs.mkdir(path.join(repoRoot, '.pi/sandcastle'), { recursive: true });

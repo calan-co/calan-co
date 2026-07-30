@@ -130,7 +130,7 @@
         "kind": {
           "type": "string",
           "anyOf": [
-            { "enum": ["composite", "loop", "agent.pi", "git.worktree", "git.merge", "docker.container", "podman.container"] },
+            { "enum": ["composite", "loop", "agent.pi", "command", "work.close", "git.worktree", "git.merge", "docker.container", "podman.container"] },
             { "pattern": "^[a-z][a-z0-9-]*\\.[a-z][a-z0-9_-]*$" }
           ]
         },
@@ -161,6 +161,7 @@
         },
         "image": { "$ref": "#/$defs/containerImage" },
         "strategy": { "type": "string", "minLength": 1 },
+        "command": { "type": "string", "minLength": 1 },
         "when": { "type": "string", "minLength": 1 },
         "with": { "type": "object", "additionalProperties": true },
         "overrides": { "type": "object", "additionalProperties": true }
@@ -183,6 +184,10 @@
         {
           "if": { "properties": { "kind": { "const": "agent.pi" } }, "required": ["kind"] },
           "then": { "required": ["role", "prompt"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "command" } }, "required": ["kind"] },
+          "then": { "required": ["command"] }
         },
         {
           "if": { "properties": { "kind": { "const": "loop" } }, "required": ["kind"] },

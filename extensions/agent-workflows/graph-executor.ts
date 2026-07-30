@@ -66,6 +66,27 @@ export interface ScriptResult extends BaseNodeResult {
 	type: "ScriptResult";
 }
 
+export interface CommandResult extends BaseNodeResult {
+	type: "CommandResult";
+	exitCode: number;
+	stdout?: string;
+	stderr?: string;
+	command?: string;
+	effects?: string[];
+}
+
+export interface WorkCloseResult extends BaseNodeResult {
+	type: "WorkCloseResult";
+	closed: boolean;
+	accepted?: boolean;
+	itemId?: string;
+	exitCode?: number;
+	stdout?: string;
+	stderr?: string;
+	command?: string;
+	effects?: string[];
+}
+
 export interface ContainerResult extends BaseNodeResult {
 	type: "ContainerResult";
 	effects: string[];
@@ -106,7 +127,7 @@ export interface GitMergeResult extends BaseNodeResult {
 }
 
 export type MergeableNodeResult = WorkspaceResult | LoopResult;
-export type NodeResult = AgentResult | ScriptResult | ContainerResult | CompositeResult | WorkspaceResult | LoopResult | GitMergeResult | SkippedResult | BaseNodeResult;
+export type NodeResult = AgentResult | ScriptResult | CommandResult | WorkCloseResult | ContainerResult | CompositeResult | WorkspaceResult | LoopResult | GitMergeResult | SkippedResult | BaseNodeResult;
 
 export interface LoopExecutionContext {
 	index: number;
@@ -185,6 +206,8 @@ const LEAF_RESULT_TYPES: Record<string, string> = Object.freeze({
 	agent: "AgentResult",
 	"agent.pi": "AgentResult",
 	script: "ScriptResult",
+	command: "CommandResult",
+	"work.close": "WorkCloseResult",
 	"docker.container": "ContainerResult",
 	"podman.container": "ContainerResult",
 });
