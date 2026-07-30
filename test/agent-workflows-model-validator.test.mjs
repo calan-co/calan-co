@@ -140,16 +140,48 @@ test('enforces typed result contracts for mergeable fan-in', () => {
 });
 
 test('validates loop model-level mode and max semantics', () => {
+  const valid = validateWorkflowModel({
+    kind: 'composite',
+    nodes: {
+      counted: { kind: 'loop', max: 2, nodes: { run: { kind: 'script' } } },
+    },
+  });
+  assert.equal(valid.valid, true, valid.errors.join('\n'));
+  assert.equal(valid.model.nodes.counted.mode, 'sequential');
+
   const result = validateWorkflowModel({
     kind: 'composite',
     nodes: {
       badLoop: { kind: 'loop', mode: 'concurrent', each: '${items}', max: 0 },
-      missingIterator: { kind: 'loop', nodes: { run: { kind: 'script' } } },
+      missingParallelIterator: { kind: 'loop', mode: 'parallel', nodes: { run: { kind: 'script' } } },
     },
   });
 
   assert.equal(result.valid, false);
   assert.match(result.errors.join('\n'), /root.nodes.badLoop mode must be 'sequential' or 'parallel'/);
   assert.match(result.errors.join('\n'), /root.nodes.badLoop max must be a positive integer/);
-  assert.match(result.errors.join('\n'), /root.nodes.missingIterator loop must define each/);
+  assert.match(result.errors.join('\n'), /root.nodes.missingParallelIterator parallel loop must define each/);
+});
+
+test('validates reserved $ ref node structure', () => {
+  const valid = validateWorkflowModel({
+    kind: 'composite',
+    nodes: {
+      wave: { $ref: '$.defaultPipeline' },
+    },
+  });
+  assert.equal(valid.valid, true, valid.errors.join('\n'));
+
+  const invalid = validateWorkflowModel({
+    kind: 'composite',
+    nodes: {
+      badMeta: { $: { ref: 'simple-loop', include: 'nope' } },
+      badRef: { $ref: '' },
+      mixed: { kind: 'script', $ref: 'simple-loop' },
+    },
+  });
+  assert.equal(invalid.valid, false);
+  assert.match(invalid.errors.join('\n'), /root.nodes.badMeta uses unsupported \$ meta key 'include'/);
+  assert.match(invalid.errors.join('\n'), /root.nodes.badRef \$ref must be a non-empty string/);
+  assert.match(invalid.errors.join('\n'), /root.nodes.mixed must not combine \$ref metadata with kind/);
 });

@@ -21,6 +21,10 @@ test('execution runtime pack ports prompts, roles, and graph-native pipelines', 
   assert.equal(pack.pipelines['parallel-planner-with-review'].steps, undefined);
   assert.ok(listRuntimeAgents(pack).some((agent) => agent.name === 'reviewer'));
   assert.ok(listRuntimePipelines(pack).some((pipeline) => pipeline.name === 'archive'));
+  assert.ok(listRuntimePipelines(pack).some((pipeline) => pipeline.name === 'work-process-waves'));
+  assert.equal(pack.pipelines['work-process-waves'].nodes.waves.kind, 'loop');
+  assert.equal(pack.pipelines['work-process-waves'].nodes.waves.each, undefined);
+  assert.equal(pack.pipelines['work-process-waves'].nodes.waves.node.$ref, '$.defaultPipeline');
 });
 
 test('execution runtime validates negative fixtures with useful diagnostics', () => {
@@ -56,6 +60,24 @@ test('execution runtime validates negative fixtures with useful diagnostics', ()
     }),
     /loop must define exactly one of node or nodes/s,
   );
+  assert.throws(
+    () => validateExecutionRuntimePack({
+      runtimeVersion: 1,
+      roles: { worker: {} },
+      prompts: { ok: { format: 'markdown', template: 'x' } },
+      pipelines: { p: { kind: 'composite', nodes: { wave: { $ref: 'missing' } } } },
+    }),
+    /p\.wave \$ref references unknown pipeline 'missing'/s,
+  );
+  assert.doesNotThrow(() => validateExecutionRuntimePack({
+    runtimeVersion: 1,
+    roles: { worker: {} },
+    prompts: { ok: { format: 'markdown', template: 'x' } },
+    pipelines: {
+      simple: { kind: 'composite', nodes: { run: { kind: 'agent.pi', role: 'worker', prompt: 'ok' } } },
+      wrapper: { kind: 'composite', nodes: { waves: { kind: 'loop', max: 2, node: { $ref: '$.defaultPipeline' } } } },
+    },
+  }));
   assert.throws(
     () => validateExecutionRuntimePack({
       runtimeVersion: 1,
@@ -151,6 +173,9 @@ test('execution runtime schema requires graph-native composite map nodes', () =>
   assert.deepEqual(configSchema.$defs.pipeline.required, ['kind', 'nodes']);
   assert.match(JSON.stringify(schema.$defs.concreteNode.properties.kind), /git\.worktree/);
   assert.match(JSON.stringify(schema.$defs.concreteNode.properties.kind), /git\.merge/);
+  assert.ok(schema.$defs.concreteNode.properties.$ref, 'execution schema supports reserved $ref meta nodes');
+  assert.ok(configSchema.$defs.concreteNode.properties.$ref, 'config schema supports reserved $ref meta nodes');
+  assert.match(JSON.stringify(schema.$defs.concreteNode.allOf), /"mode":\{"const":"parallel"\}.*"required":\["each"\]/, 'only parallel loops require each');
   assert.match(JSON.stringify(schema.$defs.concreteNode.allOf), /oneOf/);
   assert.match(JSON.stringify(configSchema.$defs.concreteNode.allOf), /oneOf/);
   assert.deepEqual(schema.$defs.containerImage.required, ['name']);
@@ -181,6 +206,10 @@ test('runtime compiler converts deterministic runtime pipelines to graph-native 
   assert.deepEqual(cfg.pipelines['parallel-planner-with-review'].nodes.merge.needs, ['implement']);
   assert.deepEqual(cfg.pipelines['parallel-planner-with-review'].nodes.merge.inputs, ['implement']);
   assert.equal(cfg.pipelines['parallel-planner-with-review'].steps, undefined);
+  assert.equal(cfg.pipelines['work-process-waves'].kind, 'composite');
+  assert.equal(cfg.pipelines['work-process-waves'].nodes.waves.kind, 'loop');
+  assert.equal(cfg.pipelines['work-process-waves'].nodes.waves.each, undefined);
+  assert.equal(cfg.pipelines['work-process-waves'].nodes.waves.node.$ref, '$.defaultPipeline');
 });
 
 test('configToYaml renders graph-native runtime roles and pipelines', () => {
@@ -203,6 +232,8 @@ test('configToYaml renders graph-native runtime roles and pipelines', () => {
   assert.match(yaml, /^maxWorkers: 5/m);
   assert.match(yaml, /^maxIterations: 10/m);
   assert.doesNotMatch(yaml, /role: implementer[\s\S]{0,120}maxIterations:/);
+  assert.match(yaml, /^  work-process-waves:/m);
+  assert.match(yaml, /^          "\$ref": \$\.defaultPipeline/m);
   assert.doesNotMatch(yaml, /concurrency:/);
   assert.doesNotMatch(yaml, /^teams:/m);
 });

@@ -18,6 +18,8 @@
   },
   "dependencies": {
     "@ai-hero/sandcastle": "^0.12.0",
+    "@bufbuild/cel": "^0.6.0",
+    "@bufbuild/protobuf": "^2.13.0",
     "@earendil-works/pi-ai": "0.80.5",
     "@earendil-works/pi-tui": "^0.80.3",
     "@sinclair/typebox": "^0.34.49",

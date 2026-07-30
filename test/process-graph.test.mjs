@@ -54,6 +54,7 @@ async function setupProcessGraphRepo({ noEffects = false, actualRole = 'implemen
   const runCalls = [];
   let gitHead = 'process-base';
   let gitMerges = 0;
+  let planCalls = 0;
   agentWorkflows({
     registerCommand(name, spec) { commands.set(name, spec); },
     on(name, handler) { events.set(name, handler); },
@@ -61,16 +62,20 @@ async function setupProcessGraphRepo({ noEffects = false, actualRole = 'implemen
   }, {
     work: {
       now: () => 1710000100000,
-      plan: async (_cwd, query) => ({
-        query,
-        iterations: [{
-          supportsParallel: true,
-          items: [
-            { id: 'wi-1', title: 'First graph item', tags: [], sourcePath: 'backlog/wi-1.md' },
-            { id: 'wi-2', title: 'Second graph item', tags: [], sourcePath: 'backlog/wi-2.md' },
-          ],
-        }],
-      }),
+      plan: async (_cwd, query) => {
+        planCalls += 1;
+        if (planCalls > 1) return { query, iterations: [] };
+        return {
+          query,
+          iterations: [{
+            supportsParallel: true,
+            items: [
+              { id: 'wi-1', title: 'First graph item', tags: [], sourcePath: 'backlog/wi-1.md' },
+              { id: 'wi-2', title: 'Second graph item', tags: [], sourcePath: 'backlog/wi-2.md' },
+            ],
+          }],
+        };
+      },
     },
     pipeline: {
       now: () => 1700000010000,

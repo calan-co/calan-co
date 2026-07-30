@@ -17,6 +17,7 @@
     "sandboxProvider": "docker",
     "model": "Agent Default",
     "maxWorkers": 5,
+    "entrypoint": "work-process-waves",
     "imagePolicy": "repo-default",
     "branchPolicy": "branch-per-run",
     "completionPolicy": "promise-complete",
@@ -398,6 +399,26 @@
           "capabilities": [
             "merge",
             "git.merge"
+          ]
+        }
+      }
+    },
+    "work-process-waves": {
+      "description": "Repeat the selected Work wave pipeline until no eligible Work remains or the loop max is reached.",
+      "defaults": {
+        "branchPolicy": "branch-per-run"
+      },
+      "kind": "composite",
+      "nodes": {
+        "waves": {
+          "kind": "loop",
+          "mode": "sequential",
+          "max": 10,
+          "node": {
+            "$ref": "$.defaultPipeline"
+          },
+          "capabilities": [
+            "loop"
           ]
         }
       }

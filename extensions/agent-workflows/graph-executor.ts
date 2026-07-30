@@ -1,3 +1,5 @@
+import { isCelError, run as runCel } from "@bufbuild/cel";
+
 import {
 	buildHookContext,
 	discoverHooksByCapability,
@@ -10,10 +12,26 @@ import {
 export type { GraphNodeHook, HookContext } from "./hooks.ts";
 
 export type GraphNodeMode = "sequential" | "parallel";
-export type NodeExecutionStatus = "succeeded";
+export type NodeExecutionStatus = "succeeded" | "skipped";
+
+export interface GraphRefMeta {
+	ref: string;
+	default?: string;
+}
+
+export interface GraphRefNode {
+	$?: GraphRefMeta;
+	$ref?: string;
+	needs?: string | string[];
+	with?: Record<string, unknown>;
+	capabilities?: string[];
+	[key: string]: unknown;
+}
 
 export interface GraphWorkflowNode {
-	kind: string;
+	kind?: string;
+	$?: GraphRefMeta;
+	$ref?: string;
 	needs?: string | string[];
 	nodes?: Record<string, GraphWorkflowNode>;
 	node?: GraphWorkflowNode;
@@ -31,6 +49,13 @@ export interface BaseNodeResult {
 	nodeId: string;
 	kind: string;
 	output?: unknown;
+	reason?: string;
+}
+
+export interface SkippedResult extends BaseNodeResult {
+	type: "SkippedResult";
+	status: "skipped";
+	skipped: true;
 }
 
 export interface AgentResult extends BaseNodeResult {
@@ -81,7 +106,7 @@ export interface GitMergeResult extends BaseNodeResult {
 }
 
 export type MergeableNodeResult = WorkspaceResult | LoopResult;
-export type NodeResult = AgentResult | ScriptResult | ContainerResult | CompositeResult | WorkspaceResult | LoopResult | GitMergeResult | BaseNodeResult;
+export type NodeResult = AgentResult | ScriptResult | ContainerResult | CompositeResult | WorkspaceResult | LoopResult | GitMergeResult | SkippedResult | BaseNodeResult;
 
 export interface LoopExecutionContext {
 	index: number;
@@ -119,12 +144,29 @@ export interface GraphHookContextSeed {
 	providers?: Record<string, unknown>;
 }
 
+export interface GraphRefResolutionContext {
+	id: string;
+	path: string;
+	ref: string;
+	input: unknown;
+	loop?: LoopExecutionContext;
+	refStack: string[];
+}
+
+export type GraphRefResolver = (name: string, context: GraphRefResolutionContext) => GraphWorkflowNode | undefined | Promise<GraphWorkflowNode | undefined>;
+
+export interface GraphRefExecutorOptions {
+	maxDepth?: number;
+	resolveNamedPipeline?: GraphRefResolver;
+}
+
 export interface GraphExecutorOptions {
 	input?: unknown;
 	handlers?: Record<string, GraphNodeHandler>;
 	hooks?: GraphNodeHook[];
 	hookCapabilities?: string[];
 	hookContext?: GraphHookContextSeed;
+	refs?: GraphRefExecutorOptions;
 }
 
 interface ExecutionScope {
@@ -133,6 +175,8 @@ interface ExecutionScope {
 	hooks: GraphNodeHook[];
 	hookCapabilities: string[];
 	hookContext: GraphHookContextSeed;
+	refs: Required<Pick<GraphRefExecutorOptions, "maxDepth">> & Pick<GraphRefExecutorOptions, "resolveNamedPipeline">;
+	refStack: string[];
 	loop?: LoopExecutionContext;
 	workspace?: Record<string, unknown>;
 }
@@ -155,6 +199,8 @@ export async function executeGraphWorkflow(workflow: GraphWorkflowNode, options:
 		hooks: options.hooks || [],
 		hookCapabilities: stringArray(options.hookCapabilities),
 		hookContext: options.hookContext || {},
+		refs: { maxDepth: options.refs?.maxDepth || 8, resolveNamedPipeline: options.refs?.resolveNamedPipeline },
+		refStack: [],
 	}, {});
 	return result as CompositeResult;
 }
@@ -167,9 +213,17 @@ async function executeNode(
 	needs: Record<string, NodeResult>,
 ): Promise<NodeResult> {
 	if (!isRecord(node)) throw new Error(`${path} must be an object`);
+	if (isRefNode(node)) return executeRefNode(id, path, node, scope, needs);
 	if (typeof node.kind !== "string" || !node.kind) throw new Error(`${path} is missing kind`);
 	if (node.max !== undefined && (!Number.isInteger(node.max) || node.max < 1)) throw new Error(`${path} max must be a positive integer`);
 	if (!isExecutableNodeKind(node.kind, scope)) throw new Error(`${path} references unknown concrete kind '${node.kind}'`);
+
+	const skippedNeed = Object.entries(needs).find(([, result]) => result.status === "skipped");
+	if (skippedNeed) return skippedResult(id, node.kind, `skipped dependency: ${skippedNeed[0]}`);
+	if (Object.prototype.hasOwnProperty.call(node, "when")) {
+		if (typeof node.when !== "string" || !node.when.trim()) throw new Error(`${path} when must be a non-empty CEL expression string`);
+		if (!evaluateWhenExpression(path, node.when, id, node, scope, needs)) return skippedResult(id, node.kind, "when evaluated to false");
+	}
 
 	const hooks = discoverHooksByCapability(scope.hooks, nodeHookCapabilities(node, scope));
 	const hookContext = makeHookContext(id, path, node, scope, needs);
@@ -188,6 +242,55 @@ async function executeNode(
 		}
 		throw error;
 	}
+}
+
+function isRefNode(node: GraphWorkflowNode): node is GraphRefNode {
+	return Object.prototype.hasOwnProperty.call(node, "$ref") || isRecord((node as any).$);
+}
+
+function validateRefNode(path: string, node: GraphRefNode): GraphRefMeta {
+	if (node.kind !== undefined) throw new Error(`${path} must not combine $ref metadata with kind`);
+	if (node.node !== undefined || node.nodes !== undefined) throw new Error(`${path} must not combine $ref metadata with child nodes`);
+	if (node.$ !== undefined && node.$ref !== undefined) throw new Error(`${path} must not combine $ and $ref metadata`);
+	for (const key of Object.keys(node)) {
+		if (!["$", "$ref", "needs", "capabilities", "with"].includes(key)) throw new Error(`${path} uses unsupported $ref node field '${key}'`);
+	}
+	if (node.$ref !== undefined) {
+		if (typeof node.$ref !== "string" || !node.$ref.trim()) throw new Error(`${path} $ref must be a non-empty string`);
+		return { ref: node.$ref };
+	}
+	const meta = node.$;
+	if (!isRecord(meta)) throw new Error(`${path}.$ must be an object`);
+	for (const key of Object.keys(meta)) if (key !== "ref" && key !== "default") throw new Error(`${path} uses unsupported $ meta key '${key}'`);
+	if (typeof meta.ref !== "string" || !meta.ref.trim()) throw new Error(`${path} $.ref must be a non-empty string`);
+	if (meta.default !== undefined && (typeof meta.default !== "string" || !meta.default.trim())) throw new Error(`${path} $.default must be a non-empty string when provided`);
+	return meta;
+}
+
+function resolveRefName(path: string, meta: GraphRefMeta, scope: ExecutionScope): string {
+	const raw = meta.ref.trim();
+	const isExpression = raw.startsWith("$.") || /^\$\{.+\}$/.test(raw) || raw === "$";
+	const value = isExpression ? resolvePath(scope.input, raw) : raw;
+	const selected = value === undefined || value === null || value === "" ? meta.default : value;
+	if (typeof selected !== "string" || !selected.trim()) throw new Error(`${path} $ref resolved to an empty or non-string target`);
+	return selected.trim();
+}
+
+async function executeRefNode(
+	id: string,
+	path: string,
+	node: GraphRefNode,
+	scope: ExecutionScope,
+	needs: Record<string, NodeResult>,
+): Promise<NodeResult> {
+	const meta = validateRefNode(path, node);
+	const targetName = resolveRefName(path, meta, scope);
+	if (scope.refStack.includes(targetName)) throw new Error(`${path} attempted to enter $ref cycle: ${[...scope.refStack, targetName].join(" -> ")}`);
+	if (scope.refStack.length >= scope.refs.maxDepth) throw new Error(`${path} attempted to exceed $ref max depth ${scope.refs.maxDepth} before entering '${targetName}'`);
+	if (!scope.refs.resolveNamedPipeline) throw new Error(`${path} cannot resolve $ref target '${targetName}' because no named-pipeline resolver is configured`);
+	const target = await scope.refs.resolveNamedPipeline(targetName, { id, path, ref: meta.ref, input: scope.input, loop: scope.loop, refStack: [...scope.refStack] });
+	if (!target) throw new Error(`${path} $ref target '${targetName}' is unknown`);
+	return executeNode(id, path, target, { ...scope, refStack: [...scope.refStack, targetName] }, needs);
 }
 
 async function executeNodeBody(
@@ -514,6 +617,36 @@ function makeHandlerContext(
 		...(children ? { children } : {}),
 		...(executeChildren ? { executeChildren } : {}),
 	};
+}
+
+function skippedResult(nodeId: string, kind: string, reason: string): SkippedResult {
+	return {
+		type: "SkippedResult",
+		status: "skipped",
+		nodeId,
+		kind,
+		skipped: true,
+		reason,
+	};
+}
+
+function evaluateWhenExpression(path: string, expression: string, id: string, node: GraphWorkflowNode, scope: ExecutionScope, needs: Record<string, NodeResult>): boolean {
+	const activation = {
+		input: scope.input,
+		needs,
+		...(scope.loop ? { iteration: scope.loop, lane: scope.loop } : {}),
+		...(scope.workspace ? { workspace: scope.workspace } : {}),
+		node: { id, path, kind: node.kind },
+	};
+	let value: unknown;
+	try {
+		value = runCel(expression, activation);
+	} catch (error) {
+		throw new Error(`${path} when evaluation failed: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	if (isCelError(value)) throw new Error(`${path} when evaluation failed: ${String(value)}`);
+	if (typeof value !== "boolean") throw new Error(`${path} when must evaluate to boolean; got ${typeof value}`);
+	return value;
 }
 
 function coerceResult(value: unknown, type: string, nodeId: string, kind: string): NodeResult {

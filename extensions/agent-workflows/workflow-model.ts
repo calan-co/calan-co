@@ -7,10 +7,18 @@ export interface ResultContract {
 	accepts: string[];
 }
 
+export interface WorkflowRefMeta {
+	ref: string;
+	default?: string;
+}
+
 export interface WorkflowNodeModel {
-	kind: string;
+	kind?: string;
+	$?: WorkflowRefMeta;
+	$ref?: string;
 	needs?: string[];
 	nodes?: Record<string, WorkflowNodeModel>;
+	node?: WorkflowNodeModel;
 	mode?: "sequential" | "parallel";
 	each?: unknown;
 	max?: number;
@@ -42,6 +50,7 @@ export const RESULT_CONTRACTS: Record<string, ResultContract> = Object.freeze({
 });
 
 const NODE_KINDS_WITH_CHILDREN = new Set(["composite", "loop", "git.worktree", "podman.container", "docker.container"]);
+const SUPPORTED_REF_META_KEYS = new Set(["ref", "default"]);
 const PROVIDER_SELECTOR_FIELDS = new Set(["provider", "using"]);
 const NODE_ID_PATTERN = /^[A-Za-z][A-Za-z0-9_-]*$/;
 
@@ -130,12 +139,38 @@ function validateMergeInputs(path: string, needs: string[], siblingContracts: Ma
 	}
 }
 
+function validateRefMeta(path: string, node: WorkflowNodeModel, ctx: ValidationContext): boolean {
+	if (node.$ === undefined && node.$ref === undefined) return false;
+	if (node.kind !== undefined) addError(ctx, path, "must not combine $ref metadata with kind");
+	if (node.node !== undefined || node.nodes !== undefined) addError(ctx, path, "must not combine $ref metadata with child nodes");
+	if (node.$ !== undefined && node.$ref !== undefined) addError(ctx, path, "must not combine $ and $ref metadata");
+	for (const key of Object.keys(node)) {
+		if (!["$", "$ref", "needs", "capabilities", "with"].includes(key)) addError(ctx, path, `uses unsupported $ref node field '${key}'`);
+	}
+	if (node.$ref !== undefined) {
+		if (typeof node.$ref !== "string" || !node.$ref.trim()) addError(ctx, path, "$ref must be a non-empty string");
+		return true;
+	}
+	if (!isRecord(node.$)) {
+		addError(ctx, `${path}.$`, "must be an object");
+		return true;
+	}
+	for (const key of Object.keys(node.$)) if (!SUPPORTED_REF_META_KEYS.has(key)) addError(ctx, path, `uses unsupported $ meta key '${key}'`);
+	if (typeof node.$.ref !== "string" || !node.$.ref.trim()) addError(ctx, path, "$.ref must be a non-empty string");
+	if (node.$.default !== undefined && (typeof node.$.default !== "string" || !node.$.default.trim())) addError(ctx, path, "$.default must be a non-empty string when provided");
+	return true;
+}
+
 function validateNode(
 	path: string,
 	node: WorkflowNodeModel,
 	siblingIds: Set<string> | undefined,
 	ctx: ValidationContext,
 ): ResultContract {
+	if (validateRefMeta(path, node, ctx)) {
+		validateNeeds(path, node, siblingIds, ctx);
+		return { resultType: "RefResult", interfaces: [], accepts: [] };
+	}
 	const kind = typeof node.kind === "string" ? node.kind : undefined;
 	if (!kind) {
 		addError(ctx, path, "is missing kind");
@@ -153,15 +188,20 @@ function validateNode(
 	if (kind === "loop") {
 		if (node.mode === undefined) node.mode = "sequential";
 		else if (node.mode !== "sequential" && node.mode !== "parallel") addError(ctx, path, "mode must be 'sequential' or 'parallel'");
-		if (node.each === undefined) addError(ctx, path, "loop must define each");
+		if (node.mode === "parallel" && node.each === undefined) addError(ctx, path, "parallel loop must define each");
 		if (node.max !== undefined && (!Number.isInteger(node.max) || node.max < 1)) addError(ctx, path, "max must be a positive integer");
+		const hasNode = Object.prototype.hasOwnProperty.call(node, "node");
+		const hasNodes = Object.prototype.hasOwnProperty.call(node, "nodes");
+		if (!hasNode && !hasNodes) addError(ctx, path, "loop must define node or nodes");
+		if (hasNode && hasNodes) addError(ctx, path, "loop must define exactly one of node or nodes");
 	}
 
 	if (kind && NODE_KINDS_WITH_CHILDREN.has(kind)) {
-		if (kind === "composite" || kind === "loop" || kind === "git.worktree") {
+		if (kind === "composite" || kind === "git.worktree") {
 			if (node.nodes === undefined) addError(ctx, path, "must define child nodes");
 			else if (isRecord(node.nodes) && Object.keys(node.nodes).length === 0) addError(ctx, path, "must define at least one child node");
 		}
+		if (kind === "loop" && node.nodes !== undefined && isRecord(node.nodes) && Object.keys(node.nodes).length === 0) addError(ctx, path, "must define at least one child node");
 	} else if (node.nodes !== undefined) {
 		addError(ctx, path, "must not define child nodes");
 	}
@@ -171,6 +211,13 @@ function validateNode(
 }
 
 function validateChildNodes(path: string, node: WorkflowNodeModel, ctx: ValidationContext): ResultContract[] {
+	if (node.node !== undefined) {
+		if (!isRecord(node.node)) {
+			addError(ctx, `${path}.node`, "must be an object");
+			return [];
+		}
+		return [validateNode(`${path}.node`, node.node as WorkflowNodeModel, undefined, ctx)];
+	}
 	const entries = childNodeEntries(node, path, ctx);
 	if (!entries.length) return [];
 	const siblingIds = new Set(entries.map(([id]) => id));

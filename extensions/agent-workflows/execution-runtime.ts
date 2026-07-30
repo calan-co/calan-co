@@ -60,8 +60,15 @@ export interface RuntimeContainerImage {
 	context?: string;
 }
 
+export interface RuntimeRefMeta {
+	ref: string;
+	default?: string;
+}
+
 export interface RuntimePipelineNode {
-	kind: string;
+	kind?: string;
+	$?: RuntimeRefMeta;
+	$ref?: string;
 	needs?: string[];
 	inputs?: string[];
 	capabilities?: string[];
@@ -86,6 +93,7 @@ export interface LegacyConfigLike {
 	defaultSandbox?: "docker" | "podman" | "vercel" | "no-sandbox";
 	defaultModel?: string;
 	defaultPipeline?: string;
+	entrypoint?: string;
 	defaultAgent?: string;
 	maxWorkers?: number;
 	maxIterations?: number;
@@ -139,6 +147,7 @@ export function validateExecutionRuntimePack(value: unknown): ExecutionRuntimePa
 }
 
 const BUILT_IN_NODE_KINDS = new Set(["composite", "loop", "agent.pi", "git.worktree", "git.merge", "docker.container", "podman.container"]);
+const SUPPORTED_REF_META_KEYS = new Set(["ref", "default"]);
 const PROVIDER_QUALIFIED_NODE_KIND = /^[a-z][a-z0-9-]*\.[a-z][a-z0-9_-]*$/;
 
 function normalizePipeline(scope: string, pipeline: Partial<RuntimePipeline>, errors: string[], _pack: ExecutionRuntimePack): RuntimePipeline {
@@ -175,8 +184,41 @@ function validatePipeline(scope: string, pipeline: RuntimePipeline, errors: stri
 	for (const [id, node] of Object.entries(pipeline.nodes || {})) validateNode(scope, id, node, errors, pack);
 }
 
+function isDynamicRefExpression(value: string): boolean {
+	const trimmed = value.trim();
+	return trimmed === "$" || trimmed.startsWith("$.") || /^\$\{.+\}$/.test(trimmed);
+}
+
+function validateRefNode(nodeScope: string, node: RuntimePipelineNode, errors: string[], pack: ExecutionRuntimePack): boolean {
+	if (node.$ === undefined && node.$ref === undefined) return false;
+	if (node.kind !== undefined) errors.push(`${nodeScope} must not combine $ref metadata with kind`);
+	if (node.node !== undefined || node.nodes !== undefined) errors.push(`${nodeScope} must not combine $ref metadata with child nodes`);
+	if (node.$ !== undefined && node.$ref !== undefined) errors.push(`${nodeScope} must not combine $ and $ref metadata`);
+	for (const key of Object.keys(node)) {
+		if (!["$", "$ref", "needs", "capabilities", "with"].includes(key)) errors.push(`${nodeScope} uses unsupported $ref node field '${key}'`);
+	}
+	if (node.$ref !== undefined) {
+		if (typeof node.$ref !== "string" || !node.$ref.trim()) errors.push(`${nodeScope} $ref must be a non-empty string`);
+		else if (!isDynamicRefExpression(node.$ref) && !pack.pipelines?.[node.$ref]) errors.push(`${nodeScope} $ref references unknown pipeline '${node.$ref}'`);
+		return true;
+	}
+	if (!isRecord(node.$)) {
+		errors.push(`${nodeScope}.$ must be an object`);
+		return true;
+	}
+	for (const key of Object.keys(node.$)) if (!SUPPORTED_REF_META_KEYS.has(key)) errors.push(`${nodeScope} uses unsupported $ meta key '${key}'`);
+	if (typeof node.$.ref !== "string" || !node.$.ref.trim()) errors.push(`${nodeScope} $.ref must be a non-empty string`);
+	else if (!isDynamicRefExpression(node.$.ref) && !pack.pipelines?.[node.$.ref]) errors.push(`${nodeScope} $.ref references unknown pipeline '${node.$.ref}'`);
+	if (node.$.default !== undefined) {
+		if (typeof node.$.default !== "string" || !node.$.default.trim()) errors.push(`${nodeScope} $.default must be a non-empty string when provided`);
+		else if (!pack.pipelines?.[node.$.default]) errors.push(`${nodeScope} $.default references unknown pipeline '${node.$.default}'`);
+	}
+	return true;
+}
+
 function validateNode(scope: string, id: string, node: RuntimePipelineNode, errors: string[], pack: ExecutionRuntimePack): void {
 	const nodeScope = `${scope}.${id}`;
+	if (validateRefNode(nodeScope, node, errors, pack)) return;
 	if (!node.kind) errors.push(`${nodeScope} is missing kind`);
 	else if (!BUILT_IN_NODE_KINDS.has(node.kind) && !PROVIDER_QUALIFIED_NODE_KIND.test(node.kind)) errors.push(`${nodeScope} references unknown node kind '${node.kind}'`);
 	if (node.kind === "agent.pi") {
@@ -184,7 +226,7 @@ function validateNode(scope: string, id: string, node: RuntimePipelineNode, erro
 		if (!node.prompt) errors.push(`${nodeScope} must reference a prompt`);
 	}
 	if (node.kind === "loop") {
-		if (!node.each) errors.push(`${nodeScope} loop must define each`);
+		if (node.mode === "parallel" && !node.each) errors.push(`${nodeScope} parallel loop must define each`);
 		if (node.mode && !["sequential", "parallel"].includes(node.mode)) errors.push(`${nodeScope} loop mode must be sequential or parallel`);
 		const hasNode = Object.prototype.hasOwnProperty.call(node, "node");
 		const hasNodes = Object.prototype.hasOwnProperty.call(node, "nodes");
@@ -255,6 +297,7 @@ export function runtimeToSandcastleConfig(pack = loadExecutionRuntimePack(), def
 		defaultSandbox,
 		defaultModel,
 		defaultPipeline: defaults.defaultPipeline || "simple-loop",
+		entrypoint: defaults.entrypoint || String(pack.defaults?.entrypoint || "work-process-waves"),
 		defaultAgent,
 		maxWorkers,
 		maxIterations,

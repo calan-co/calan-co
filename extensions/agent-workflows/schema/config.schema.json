@@ -24,6 +24,10 @@
       "type": "string",
       "minLength": 1
     },
+    "entrypoint": {
+      "type": "string",
+      "minLength": 1
+    },
     "defaultAgent": {
       "type": "string",
       "enum": ["claude-code", "pi", "codex", "cursor", "opencode", "copilot"]
@@ -119,9 +123,10 @@
     },
     "concreteNode": {
       "type": "object",
-      "required": ["kind"],
       "additionalProperties": false,
       "properties": {
+        "$": { "$ref": "#/$defs/refMeta" },
+        "$ref": { "type": "string", "minLength": 1 },
         "kind": {
           "type": "string",
           "anyOf": [
@@ -162,18 +167,35 @@
       },
       "allOf": [
         {
+          "if": { "not": { "anyOf": [{ "required": ["$"] }, { "required": ["$ref"] }] } },
+          "then": { "required": ["kind"] }
+        },
+        {
+          "if": { "anyOf": [{ "required": ["$"] }, { "required": ["$ref"] }] },
+          "then": {
+            "not": { "anyOf": [{ "required": ["kind"] }, { "required": ["node"] }, { "required": ["nodes"] }, { "required": ["inputs"] }, { "required": ["role"] }, { "required": ["prompt"] }, { "required": ["promptOverride"] }, { "required": ["workSource"] }, { "required": ["issueTracker"] }, { "required": ["each"] }, { "required": ["mode"] }, { "required": ["max"] }, { "required": ["image"] }, { "required": ["strategy"] }, { "required": ["when"] }, { "required": ["overrides"] }] }
+          }
+        },
+        {
+          "if": { "required": ["$"] },
+          "then": { "not": { "required": ["$ref"] } }
+        },
+        {
           "if": { "properties": { "kind": { "const": "agent.pi" } }, "required": ["kind"] },
           "then": { "required": ["role", "prompt"] }
         },
         {
           "if": { "properties": { "kind": { "const": "loop" } }, "required": ["kind"] },
           "then": {
-            "required": ["each"],
             "oneOf": [
               { "required": ["node"], "not": { "required": ["nodes"] } },
               { "required": ["nodes"], "not": { "required": ["node"] } }
             ]
           }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "loop" }, "mode": { "const": "parallel" } }, "required": ["kind", "mode"] },
+          "then": { "required": ["each"] }
         },
         {
           "if": { "properties": { "kind": { "enum": ["composite", "git.worktree"] } }, "required": ["kind"] },
@@ -184,6 +206,15 @@
           "then": { "required": ["image"] }
         }
       ]
+    },
+    "refMeta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref"],
+      "properties": {
+        "ref": { "type": "string", "minLength": 1 },
+        "default": { "type": "string", "minLength": 1 }
+      }
     },
     "containerImage": {
       "type": "object",
@@ -199,6 +230,8 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "$": { "$ref": "#/$defs/refMeta" },
+        "$ref": { "type": "string", "minLength": 1 },
         "kind": {
           "type": "string",
           "anyOf": [

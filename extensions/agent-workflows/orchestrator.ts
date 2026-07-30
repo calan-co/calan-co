@@ -1,9 +1,11 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { executeGraphWorkflow, type GraphWorkflowNode } from "./graph-executor.ts";
 
 const WORK_PROCESS_RUN_KIND = "work-process";
 const WORK_PROCESS_RUNS_DIR = ".pi/sandcastle/runs";
 const DEFAULT_WORK_PROCESS_PIPELINE = "simple-loop";
+const DEFAULT_WORK_PROCESS_ENTRYPOINT_PIPELINE = "work-process-waves";
 
 export interface WorkItem {
 	id: string;
@@ -52,7 +54,7 @@ export interface WorkExecutionGroup {
 export interface WorkProcessWorkerStatus {
 	index: number;
 	role: string;
-	status: "running" | "completed" | "failed";
+	status: "running" | "completed" | "failed" | "skipped";
 	branch?: string;
 	commits?: string[];
 	logPath?: string;
@@ -114,6 +116,7 @@ export interface RunWorkProcessInput {
 	explicitPipeline?: string;
 	planId?: string;
 	defaultPipeline?: string;
+	entrypoint?: string;
 	maxIterations?: number;
 	now?: () => number;
 	createRunId?: (startedAt: number) => string;
@@ -123,6 +126,8 @@ export interface RunWorkProcessDeps {
 	readPlanRecord?: (cwd: string, planId: string) => any;
 	plan: (cwd: string, query: string) => Promise<WorkPlanResult>;
 	execute: (cwd: string, input: WorkProcessExecutionInput) => Promise<WorkProcessExecutionResult>;
+	resolveEntrypointPipeline?: (pipeline: string) => GraphWorkflowNode | undefined;
+	resolveWavePipeline?: (pipeline: string) => GraphWorkflowNode | undefined;
 	writeRecord?: (cwd: string, record: WorkProcessRunRecord) => string;
 }
 
@@ -480,6 +485,46 @@ function closedItemIds(execution: WorkProcessExecutionResult): Set<string> {
 		.map((outcome) => outcome.itemId));
 }
 
+function executionHasRepositoryEffects(execution: WorkProcessExecutionResult): boolean {
+	if ((execution.branches || []).length > 0) return true;
+	if ((execution.workerStatuses || []).some((status) => (status.commits || []).length > 0 || Boolean(status.branch))) return true;
+	const effects = (execution as { effects?: unknown }).effects;
+	return Array.isArray(effects) && effects.some((effect) => typeof effect === "string" && !effect.startsWith("log:"));
+}
+
+class WorkWaveLoopComplete extends Error {
+	constructor() {
+		super("Work wave loop complete");
+		this.name = "WorkWaveLoopComplete";
+	}
+}
+
+class WorkWavePolicyViolation extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "WorkWavePolicyViolation";
+	}
+}
+
+function createWorkProcessWavesWorkflow(max: number): GraphWorkflowNode {
+	return {
+		kind: "composite",
+		nodes: {
+			waves: {
+				kind: "loop",
+				mode: "sequential",
+				max,
+				node: { $ref: "$.defaultPipeline" },
+			},
+		},
+	};
+}
+
+function configuredWorkWaveMax(workflow: GraphWorkflowNode, fallback: number): number {
+	const candidates = Object.values(workflow.nodes || {}).filter((node) => node?.kind === "loop" && node.mode !== "parallel" && Number.isInteger(node.max));
+	return Number(candidates[0]?.max || fallback);
+}
+
 function mergeWorkProcessRecords(base: WorkProcessRunRecord | undefined, wave: WorkProcessRunRecord): WorkProcessRunRecord {
 	if (!base) return wave;
 	const workerOffset = base.workerStatuses?.length || 0;
@@ -499,21 +544,21 @@ function mergeWorkProcessRecords(base: WorkProcessRunRecord | undefined, wave: W
 	};
 }
 
-function selectExecutableIteration(plan: WorkPlanResult, attempted: Set<string>, advisoryNotes: string[]): { iteration?: WorkPlanIteration; repeatedIds: string[]; omittedIds: string[] } {
-	const repeated = new Set<string>();
+function selectExecutableIteration(plan: WorkPlanResult, closed: Set<string>, advisoryNotes: string[]): { iteration?: WorkPlanIteration; closedReadyIds: string[]; omittedIds: string[] } {
+	const closedReady = new Set<string>();
 	const omitted = new Set<string>();
 	for (const planIteration of plan.iterations || []) {
 		const filtered = filterExecutableIteration(planIteration);
 		for (const id of filtered.omittedIds) omitted.add(id);
 		const executableItems = filtered.iteration.items || [];
-		for (const item of executableItems) if (attempted.has(item.id)) repeated.add(item.id);
-		const nextItems = executableItems.filter((item) => !attempted.has(item.id));
-		if (nextItems.length) {
+		for (const item of executableItems) if (closed.has(item.id)) closedReady.add(item.id);
+		if (closedReady.size) return { closedReadyIds: [...closedReady], omittedIds: [...omitted] };
+		if (executableItems.length) {
 			if (filtered.omittedIds.length) advisoryNotes.push(`Work readiness was revalidated before execution; omitted non-executable Work Items: ${filtered.omittedIds.join(", ")}.`);
-			return { iteration: { ...filtered.iteration, items: nextItems }, repeatedIds: [...repeated], omittedIds: [...omitted] };
+			return { iteration: { ...filtered.iteration, items: executableItems }, closedReadyIds: [], omittedIds: [...omitted] };
 		}
 	}
-	return { repeatedIds: [...repeated], omittedIds: [...omitted] };
+	return { closedReadyIds: [...closedReady], omittedIds: [...omitted] };
 }
 
 export async function runWorkProcess(input: RunWorkProcessInput, deps: RunWorkProcessDeps): Promise<RunWorkProcessResult> {
@@ -540,15 +585,19 @@ export async function runWorkProcess(input: RunWorkProcessInput, deps: RunWorkPr
 	}
 
 	const pipeline = selectWorkProcessPipeline({ explicitPipeline: input.explicitPipeline, defaultPipeline: input.defaultPipeline });
+	const entrypoint = input.entrypoint || DEFAULT_WORK_PROCESS_ENTRYPOINT_PIPELINE;
 	const startedAt = now();
 	const runId = (input.createRunId || createDefaultRunId)(startedAt);
 	const writeRecord = deps.writeRecord || writeWorkProcessRunRecord;
-	const attempted = new Set<string>();
+	const closed = new Set<string>();
 	const maxWaves = Math.max(1, input.maxIterations || 1);
 	let aggregateRecord: WorkProcessRunRecord | undefined;
 	let recordPath = "";
+	let waveCount = 0;
+	let stoppedAfterNonDone = false;
 
-	for (let wave = 0; wave < maxWaves; wave++) {
+	const runOneWave = async (): Promise<WorkProcessRunRecord> => {
+		const wave = waveCount;
 		let effectivePlan = planResult;
 		if (input.planId && wave === 0) {
 			const currentPlan = await deps.plan(input.cwd, planResult.query || input.query);
@@ -556,11 +605,11 @@ export async function runWorkProcess(input: RunWorkProcessInput, deps: RunWorkPr
 			if (!firstIteration) throw new Error("No Work Items were selected for processing.");
 			effectivePlan = { ...planResult, iterations: [revalidateCachedPlanIteration({ planId: input.planId, plannedIteration: firstIteration, currentPlan, advisoryNotes })] };
 		}
-		const selection = selectExecutableIteration(effectivePlan, attempted, advisoryNotes);
+		const selection = selectExecutableIteration(effectivePlan, closed, advisoryNotes);
+		if (selection.closedReadyIds.length) throw new Error(`Work Source returned already-closed Work as ready: ${selection.closedReadyIds.join(", ")}. Refusing to repeat completed work.`);
 		if (!selection.iteration) {
-			if (selection.repeatedIds.length) throw new Error(`Work cycle guard stopped processing because ready Work Items repeated: ${selection.repeatedIds.join(", ")}. Ensure the Work Source close/validate hook marks completed work before re-running.`);
 			if (!aggregateRecord) throw new Error(`No currently executable Work Items were selected for processing. Omitted non-executable Work Items: ${selection.omittedIds.join(", ") || "none"}.`);
-			return { record: aggregateRecord, recordPath, advisoryNotes };
+			throw new WorkWaveLoopComplete();
 		}
 
 		const waveRecord = createWorkProcessRecord({
@@ -587,16 +636,28 @@ export async function runWorkProcess(input: RunWorkProcessInput, deps: RunWorkPr
 			const finalWaveRecord = applyWorkProcessResult(waveRecord, execution, now());
 			aggregateRecord = mergeWorkProcessRecords(aggregateRecord, finalWaveRecord);
 			writeRecord(input.cwd, aggregateRecord);
+			waveCount += 1;
 			const waveItemIds = itemIdSet(selection.iteration.items);
-			for (const id of waveItemIds) attempted.add(id);
-			if (aggregateRecord.status !== "done") return { record: aggregateRecord, recordPath, advisoryNotes };
-			const closed = closedItemIds(execution);
-			if (![...waveItemIds].every((id) => closed.has(id))) {
-				advisoryNotes.push("Work wave processing stopped after the current wave because the execution result did not confirm Work Source closure for every item.");
-				return { record: aggregateRecord, recordPath, advisoryNotes };
+			if (aggregateRecord.status !== "done") {
+				stoppedAfterNonDone = true;
+				throw new WorkWaveLoopComplete();
 			}
+			for (const id of closedItemIds(execution)) closed.add(id);
 			planResult = await deps.plan(input.cwd, input.query);
+			const readyAfterWave = itemIdSet(collectPlanItems(planResult));
+			for (const id of waveItemIds) {
+				if (!readyAfterWave.has(id)) closed.add(id);
+			}
+			const effectfulStillReady = [...waveItemIds].filter((id) => readyAfterWave.has(id) && !closed.has(id));
+			if (effectfulStillReady.length && executionHasRepositoryEffects(execution)) {
+				const endedAt = now();
+				aggregateRecord = { ...aggregateRecord, status: "error", updatedAt: endedAt, endedAt };
+				writeRecord(input.cwd, aggregateRecord);
+				throw new WorkWavePolicyViolation(`Work Items produced repository effects but are still reported ready without closure evidence: ${effectfulStillReady.join(", ")}. Refusing to repeat implementation; close the Work Source item or recover from the completed branch instead.`);
+			}
+			return aggregateRecord;
 		} catch (error) {
+			if (error instanceof WorkWaveLoopComplete || error instanceof WorkWavePolicyViolation) throw error;
 			const endedAt = now();
 			const errorRecord: WorkProcessRunRecord = {
 				...waveRecord,
@@ -608,10 +669,30 @@ export async function runWorkProcess(input: RunWorkProcessInput, deps: RunWorkPr
 			writeRecord(input.cwd, aggregateRecord);
 			throw error;
 		}
+	};
+
+	const processWorkflow = deps.resolveEntrypointPipeline?.(entrypoint) || createWorkProcessWavesWorkflow(maxWaves);
+	const workWaveLimit = configuredWorkWaveMax(processWorkflow, maxWaves);
+	try {
+		await executeGraphWorkflow(processWorkflow, {
+			input: { defaultPipeline: pipeline },
+			refs: {
+				resolveNamedPipeline: (name) => {
+					const resolved = deps.resolveWavePipeline ? deps.resolveWavePipeline(name) : { kind: "work.wave" };
+					return resolved;
+				},
+			},
+			handlers: {
+				"work.wave": runOneWave,
+			},
+		});
+	} catch (error) {
+		if (!(error instanceof WorkWaveLoopComplete)) throw error;
 	}
-	if (aggregateRecord && input.maxIterations) {
-		const selection = selectExecutableIteration(planResult, attempted, advisoryNotes);
-		if (selection.iteration || selection.repeatedIds.length) throw new Error(`Work wave limit exceeded after ${maxWaves} iteration(s). Increase maxIterations only after confirming completed work is closing in the Work Source.`);
+	if (aggregateRecord && !stoppedAfterNonDone && waveCount >= workWaveLimit) {
+		const selection = selectExecutableIteration(planResult, closed, advisoryNotes);
+		if (selection.closedReadyIds.length) throw new Error(`Work Source returned already-closed Work as ready: ${selection.closedReadyIds.join(", ")}. Refusing to repeat completed work.`);
+		if (selection.iteration) throw new Error(`Work wave limit exceeded after ${workWaveLimit} iteration(s). Increase the process workflow loop max only after confirming repeated or remaining work should continue.`);
 	}
 	if (aggregateRecord) return { record: aggregateRecord, recordPath, advisoryNotes };
 	throw new Error("No Work Items were selected for processing.");

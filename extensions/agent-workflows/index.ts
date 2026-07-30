@@ -162,6 +162,7 @@ interface SandcastleConfig {
 	defaultSandbox?: AgentDef["sandbox"];
 	defaultModel?: string;
 	defaultPipeline?: string;
+	entrypoint?: string;
 	defaultAgent?: string;
 	maxWorkers?: number;
 	maxIterations?: number;
@@ -449,7 +450,7 @@ interface BacklogProcessPlanDeps {
 			executionGroups: WorkExecutionGroup[];
 			recordPath: string;
 		},
-	) => Promise<{ branches?: string[]; logs?: string[]; workerStatuses?: Array<{ index: number; role: string; status: "running" | "completed" | "failed"; branch?: string; commits?: string[]; logPath?: string; error?: string }>; workSourceMutations?: WorkSourceMutationOutcome[]; status?: BacklogProcessRecord["status"] }>;
+	) => Promise<{ branches?: string[]; logs?: string[]; workerStatuses?: Array<{ index: number; role: string; status: "running" | "completed" | "failed" | "skipped"; branch?: string; commits?: string[]; logPath?: string; error?: string }>; workSourceMutations?: WorkSourceMutationOutcome[]; status?: BacklogProcessRecord["status"] }>;
 	now?: () => number;
 }
 
@@ -487,7 +488,7 @@ interface RunState {
 	proc?: SandcastleProcess;
 }
 
-type RootConfigKey = "defaultSandbox" | "defaultModel" | "defaultPipeline" | "defaultAgent" | "maxWorkers" | "maxIterations" | "workSource" | "workSourceSetupCommand" | "issueTracker" | "issueTrackerSetupCommand" | "imageNamePattern";
+type RootConfigKey = "defaultSandbox" | "defaultModel" | "defaultPipeline" | "entrypoint" | "defaultAgent" | "maxWorkers" | "maxIterations" | "workSource" | "workSourceSetupCommand" | "issueTracker" | "issueTrackerSetupCommand" | "imageNamePattern";
 type EditableAgentField = "description" | "kind" | "model" | "sandbox" | "maxIterations" | "branch";
 
 const CONFIG_DIR = ".pi/sandcastle";
@@ -498,7 +499,7 @@ const RESULTS_DIR = `${CONFIG_DIR}/results`;
 const SUPPORTED_SANDBOXES = new Set(["docker", "podman", "vercel", "no-sandbox"]);
 const DEFAULT_SANDBOX: NonNullable<AgentDef["sandbox"]> = "docker";
 const DEFAULT_MODEL = "Agent Default";
-const ROOT_CONFIG_KEYS: RootConfigKey[] = ["defaultSandbox", "defaultModel", "defaultPipeline", "defaultAgent", "maxWorkers", "maxIterations", "workSource", "workSourceSetupCommand", "imageNamePattern"];
+const ROOT_CONFIG_KEYS: RootConfigKey[] = ["defaultSandbox", "defaultModel", "defaultPipeline", "entrypoint", "defaultAgent", "maxWorkers", "maxIterations", "workSource", "workSourceSetupCommand", "imageNamePattern"];
 const EDITABLE_AGENT_FIELDS: EditableAgentField[] = ["description", "kind", "model", "sandbox", "maxIterations", "branch"];
 const RUNS_DIR = `${CONFIG_DIR}/runs`;
 const PLANS_DIR = `${CONFIG_DIR}/plans`;
@@ -1122,7 +1123,7 @@ async function defaultPlanBacklogProcessing(cwd: string, query: string): Promise
 function hydrateConfigDefaults(raw: string): { text: string; changed: boolean; changes: string[] } {
 	let text = raw;
 	const changes: string[] = [];
-	for (const [key, value] of Object.entries({ defaultPipeline: "simple-loop", defaultAgent: "claude-code", maxWorkers: 5, maxIterations: 10, workSource: "github-issues" })) {
+	for (const [key, value] of Object.entries({ defaultPipeline: "simple-loop", entrypoint: "work-process-waves", defaultAgent: "claude-code", maxWorkers: 5, maxIterations: 10, workSource: "github-issues" })) {
 		if (!new RegExp(`^${key}:`, "m").test(text)) {
 			text = setConfigValueInText(text, key, value);
 			changes.push(`added ${key}`);
@@ -1629,6 +1630,41 @@ function assertGraphNativeConfig(cwd: string, cfg: SandcastleConfig): void {
 	if (issues.length) throw new Error(`Invalid Agent Workflows configuration in ${join(cwd, CONFIG_PATH)}:\n- ${issues.join("\n- ")}`);
 }
 
+function validateConfigGraphNodes(nodes: Record<string, PipelineNodeDef> | undefined, path: string): string[] {
+	const issues: string[] = [];
+	for (const [nodeId, node] of Object.entries(nodes || {})) {
+		const nodePath = `${path}.${nodeId}`;
+		const refMeta = (node as any).$;
+		const refValue = (node as any).$ref;
+		if (refMeta !== undefined || refValue !== undefined) {
+			if (node.kind !== undefined) issues.push(`${nodePath} must not combine $ref metadata with kind.`);
+			if (node.node !== undefined || node.nodes !== undefined) issues.push(`${nodePath} must not combine $ref metadata with child nodes.`);
+			if (refMeta !== undefined && refValue !== undefined) issues.push(`${nodePath} must not combine $ and $ref metadata.`);
+			if (refValue !== undefined && (typeof refValue !== "string" || !refValue.trim())) issues.push(`${nodePath}.$ref must be a non-empty string.`);
+			if (refMeta !== undefined) {
+				if (!isRecord(refMeta)) issues.push(`${nodePath}.$ must be an object.`);
+				else {
+					for (const key of Object.keys(refMeta)) if (!["ref", "default"].includes(key)) issues.push(`${nodePath} uses unsupported $ meta key '${key}'.`);
+					if (typeof refMeta.ref !== "string" || !refMeta.ref.trim()) issues.push(`${nodePath}.$.ref must be a non-empty string.`);
+					if (refMeta.default !== undefined && (typeof refMeta.default !== "string" || !refMeta.default.trim())) issues.push(`${nodePath}.$.default must be a non-empty string when provided.`);
+				}
+			}
+			for (const key of Object.keys(node)) if (!["$", "$ref", "needs", "capabilities", "with"].includes(key)) issues.push(`${nodePath} uses unsupported $ref node field '${key}'.`);
+			continue;
+		}
+		if (!node.kind) issues.push(`${nodePath}.kind is required.`);
+		if (node.kind === "loop") {
+			if (node.mode === "parallel" && node.each === undefined) issues.push(`${nodePath}.each is required for parallel loop nodes.`);
+			if (node.node === undefined && node.nodes === undefined) issues.push(`${nodePath} loop must define node or nodes.`);
+			if (node.node !== undefined && node.nodes !== undefined) issues.push(`${nodePath} loop must define exactly one of node or nodes.`);
+		}
+		if ((node.kind === "composite" || node.kind === "git.worktree") && (!node.nodes || Object.keys(node.nodes).length === 0)) issues.push(`${nodePath}.nodes is required.`);
+		issues.push(...validateConfigGraphNodes(node.nodes, `${nodePath}.nodes`));
+		if (node.node) issues.push(...validateConfigGraphNodes({ node: node.node }, nodePath));
+	}
+	return issues;
+}
+
 function validateConfig(cwd: string, cfg: SandcastleConfig): string[] {
 	const issues: string[] = [];
 	const configPath = join(cwd, CONFIG_PATH);
@@ -1637,6 +1673,7 @@ function validateConfig(cwd: string, cfg: SandcastleConfig): string[] {
 	else issues.push(...validateRawConfigText(readFileSync(configPath, "utf8")));
 	if (!existsSync(runnerPath)) issues.push(`Missing runner scaffold: ${RUNNER_PATH}`);
 	issues.push(...validateAgainstSchema(configForSchemaValidation(cfg), loadConfigSchema()));
+	for (const [pipelineName, pipeline] of Object.entries(cfg.pipelines || {})) issues.push(...validateConfigGraphNodes(pipeline.nodes, `config.pipelines.${pipelineName}.nodes`));
 	if (!Object.keys(cfg.agents).length) issues.push("No roles configured.");
 	for (const [name, agent] of Object.entries(cfg.agents)) {
 		if (!agent.description) issues.push(`Role '${name}' is missing a description.`);
@@ -1679,6 +1716,7 @@ function normalizeConfig(cfg: Partial<SandcastleConfig>): SandcastleConfig {
 		defaultSandbox: cfg.defaultSandbox ?? DEFAULT_SANDBOX,
 		defaultModel: normalizeModelSetting(cfg.defaultModel),
 		defaultPipeline: cfg.defaultPipeline ?? "simple-loop",
+		entrypoint: cfg.entrypoint ?? "work-process-waves",
 		defaultAgent: cfg.defaultAgent ?? "claude-code",
 		maxWorkers: cfg.maxWorkers ?? 5,
 		maxIterations: cfg.maxIterations ?? 10,
@@ -1978,7 +2016,7 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 		}
 		const trimmed = line.trim();
 		if (!trimmed || trimmed.startsWith("#")) continue;
-		const top = trimmed.match(/^(defaultSandbox|defaultModel|defaultPipeline|defaultAgent|maxWorkers|maxIterations|workSource|workSourceSetupCommand|issueTracker|issueTrackerSetupCommand|imageNamePattern):\s*(.*)$/);
+		const top = trimmed.match(/^(defaultSandbox|defaultModel|defaultPipeline|entrypoint|defaultAgent|maxWorkers|maxIterations|workSource|workSourceSetupCommand|issueTracker|issueTrackerSetupCommand|imageNamePattern):\s*(.*)$/);
 		if (top) {
 			const key = top[1] as RootConfigKey;
 			setField(cfg, key, parseScalar(top[2]) as SandcastleConfig[typeof key]);
@@ -2805,7 +2843,7 @@ function registerScRunCommand(
 interface PipelineRunStepRecord {
 	index: number;
 	role: string;
-	status: "running" | "completed" | "failed";
+	status: "running" | "completed" | "failed" | "skipped";
 	maxIterations?: number;
 	branch?: string;
 	commits: string[];
@@ -2820,7 +2858,7 @@ interface PipelineRunStepRecord {
 interface PipelineRunNodeRecord {
 	nodePath: string;
 	kind: string;
-	status: "completed" | "failed";
+	status: "completed" | "failed" | "skipped";
 	resultType?: string;
 	role?: string;
 	branch?: string;
@@ -3049,7 +3087,7 @@ function collectGraphNodeRecords(result: NodeResult, path = "root"): PipelineRun
 	const record: PipelineRunNodeRecord = {
 		nodePath: path,
 		kind: result.kind,
-		status: result.status === "succeeded" ? "completed" : "failed",
+		status: result.status === "skipped" ? "skipped" : result.status === "succeeded" ? "completed" : "failed",
 		resultType: result.type,
 		...(nodeResultString(result, "role") ? { role: nodeResultString(result, "role") } : {}),
 		...(nodeResultBranch(result) ? { branch: nodeResultBranch(result) } : {}),
@@ -3288,7 +3326,7 @@ export async function executePipeline(
 		...((cfg.workSource || cfg.issueTracker) === "doc-vader" ? createDocVaderWorkSourceHooks() : []),
 		...(deps.graphHooks || []),
 	];
-	const graphHooks = discoverHooksByCapability(configuredGraphHooks, graphHookCapabilities);
+	const graphHooks = configuredGraphHooks;
 	const record: PipelineRunRecord = {
 		id,
 		kind: PIPELINE_RUN_KIND,
@@ -3402,6 +3440,13 @@ export async function executePipeline(
 				input: deps.graphInput ?? prompt,
 				hooks: graphHooks,
 				hookCapabilities: graphHookCapabilities,
+				refs: {
+					resolveNamedPipeline: (name) => {
+						const target = cfg.pipelines[name];
+						if (!target || !pipelineHasGraphNodes(target)) return undefined;
+						return { kind: "composite", nodes: target.nodes } as GraphWorkflowNode;
+					},
+				},
 				hookContext: {
 					global: { cwd, runId: id, pipeline: pipelineName, recordPath, logDir },
 					runtime: { executor: "graph", adapter: "sandcastle", cwd, pipeline: pipelineName, runId: id, recordPath, logDir },
@@ -3691,6 +3736,7 @@ function selectableValuesForPath(cfg: SandcastleConfig, path: string): string[] 
 	const parts = splitConfigPath(path);
 	const values = schemaEnumForPath(path)
 		|| (path === "defaultPipeline" ? ["simple-loop", "sequential-reviewer", "parallel-planner", "parallel-planner-with-review", "archive"] : undefined)
+		|| (path === "entrypoint" ? ["work-process-waves"] : undefined)
 		|| (path === "defaultAgent" ? ["claude-code", "pi", "codex", "cursor", "opencode", "copilot"] : undefined)
 		|| (path === "workSource" ? ["github-issues", "custom", "beads", "doc-vader"] : undefined)
 		|| (parts[0] === "pipelines" && parts[2] === "nodes" && parts.at(-1) === "role" ? Object.keys(cfg.agents) : undefined)
@@ -3700,7 +3746,7 @@ function selectableValuesForPath(cfg: SandcastleConfig, path: string): string[] 
 }
 
 function allowsCustomValueForPath(path: string): boolean {
-	return !["defaultPipeline", "defaultAgent", "workSource", "issueTracker"].includes(path);
+	return !["defaultPipeline", "entrypoint", "defaultAgent", "workSource", "issueTracker"].includes(path);
 }
 
 function coerceConfigValue(path: string, rawValue: string): unknown {
@@ -3740,6 +3786,7 @@ function friendlyConfigLabel(pathOrField: string): string {
 		defaultSandbox: "Sandbox",
 		defaultModel: "Model",
 		defaultPipeline: "Default Pipeline",
+		entrypoint: "Entrypoint",
 		defaultAgent: "Default Agent",
 		maxWorkers: "Max Workers",
 		maxIterations: "Max Iterations",
@@ -3846,7 +3893,7 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 		const defaultsScreen = (): Screen => ({
 			title: "RUNTIME DEFAULTS",
 			subtitle: "User-configurable fallback settings; local environment details live under Actions",
-			items: [field("defaultSandbox"), field("defaultModel"), field("defaultPipeline"), field("defaultAgent"), field("maxWorkers"), field("maxIterations"), field("workSource"), field("workSourceSetupCommand"), field("imageNamePattern")],
+			items: [field("defaultSandbox"), field("defaultModel"), field("defaultPipeline"), field("entrypoint"), field("defaultAgent"), field("maxWorkers"), field("maxIterations"), field("workSource"), field("workSourceSetupCommand"), field("imageNamePattern")],
 		});
 
 		const agentsScreen = (): Screen => ({
@@ -4660,10 +4707,10 @@ Work views and processing:
 		].join("\n");
 		const statusRows = new Map<number, RunState[]>();
 		const cfg = await loadConfig(cwd);
-		const processPipeline = cfg.pipelines[input.pipeline];
-		const useGraphStatusRows = Boolean(processPipeline && pipelineHasGraphNodes(processPipeline));
+		const entrypoint = cfg.pipelines[input.pipeline];
+		const useGraphStatusRows = Boolean(entrypoint && pipelineHasGraphNodes(entrypoint));
 		if (!useGraphStatusRows) {
-			for (const [index, step] of (processPipeline?.steps || []).entries()) {
+			for (const [index, step] of (entrypoint?.steps || []).entries()) {
 				const parallelSlots = input.parallel && step.role === "implementer" ? Math.max(1, Number(cfg.maxWorkers || 5)) : 1;
 				const rows = Array.from({ length: parallelSlots }, (_, fanoutIndex) => {
 					const item = input.parallel && step.role === "implementer" ? input.items[fanoutIndex] : undefined;
@@ -5136,7 +5183,7 @@ Work views and processing:
 						explicitPipeline,
 						planId,
 						defaultPipeline: cfg.defaultPipeline,
-						maxIterations: cfg.maxIterations,
+						entrypoint: cfg.entrypoint,
 						now: () => getBacklogTimestamp(backlogDeps.now),
 						createRunId: createBacklogRunId,
 					},
@@ -5144,6 +5191,11 @@ Work views and processing:
 						readPlanRecord: readBacklogPlanRecord,
 						plan: planBacklogProcessing,
 						execute: (cwd, input) => executeBacklogProcessing(cwd, input, ctx),
+						resolveEntrypointPipeline: (name) => {
+							const target = cfg.pipelines[name];
+							return target?.nodes ? { kind: "composite", nodes: target.nodes } : undefined;
+						},
+						resolveWavePipeline: (name) => cfg.pipelines[name] ? { kind: "work.wave" } : undefined,
 						writeRecord: writeWorkProcessRunRecord,
 					},
 				);

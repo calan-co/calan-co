@@ -70,6 +70,27 @@ test('parseSimpleYaml supports composite pipeline map-form nodes', () => {
   assert.deepEqual(parsed.pipelines['issue-work'].nodes.merge.needs, ['each-item']);
 });
 
+test('configToYaml round-trips reserved $ref meta nodes', () => {
+  const parsed = parseSimpleYaml([
+    'roles:',
+    '  worker:',
+    '    description: Worker',
+    'pipelines:',
+    '  waves:',
+    '    kind: composite',
+    '    nodes:',
+    '      work:',
+    '        kind: loop',
+    '        max: 2',
+    '        node:',
+    '          $ref: $.defaultPipeline',
+  ].join('\n'));
+  const rendered = configToYaml(parsed);
+  const reparsed = parseSimpleYaml(rendered);
+
+  assert.equal(reparsed.pipelines.waves.nodes.work.node.$ref, '$.defaultPipeline');
+});
+
 test('configToYaml round-trips representative composite pipeline nodes', () => {
   const parsed = parseSimpleYaml(compositeYaml());
   const rendered = configToYaml(parsed);
@@ -125,6 +146,94 @@ test('/work:config-raw set graph node paths merges pack defaults before editing 
   assert.equal(reparsed.pipelines['simple-loop'].nodes.workspace.nodes.run.kind, 'agent.pi');
   assert.equal(reparsed.pipelines['simple-loop'].nodes.workspace.nodes.run.role, 'reviewer');
   assert.equal(notifications.at(-1).type, 'success');
+});
+
+test('/work:config-raw validate accepts composite pipeline map-form nodes and ref nodes', async () => {
+  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-composite-config-'));
+  await fs.mkdir(path.join(repoRoot, '.pi/sandcastle'), { recursive: true });
+  await fs.writeFile(path.join(repoRoot, '.pi/sandcastle', 'run-job.mjs'), '', 'utf8');
+  await fs.writeFile(path.join(repoRoot, '.pi/sandcastle', 'config.yaml'), [
+    compositeYaml(),
+    '  waves:',
+    '    kind: composite',
+    '    nodes:',
+    '      run:',
+    '        kind: loop',
+    '        max: 2',
+    '        node:',
+    '          $ref: $.defaultPipeline',
+  ].join('\n'), 'utf8');
+  const pi = createFakePi();
+  agentWorkflows(pi);
+  const notifications = [];
+
+  await pi.commands.get('work:config-raw')('validate', {
+    cwd: repoRoot,
+    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  });
+
+  assert.equal(notifications[0].type, 'success');
+});
+
+test('/work:config-raw validate rejects graph nodes missing kind and $ ref metadata', async () => {
+  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-invalid-node-config-'));
+  await fs.mkdir(path.join(repoRoot, '.pi/sandcastle'), { recursive: true });
+  await fs.writeFile(path.join(repoRoot, '.pi/sandcastle', 'run-job.mjs'), '', 'utf8');
+  await fs.writeFile(path.join(repoRoot, '.pi/sandcastle', 'config.yaml'), [
+    'roles:',
+    '  implementer:',
+    '    description: Implementer',
+    'pipelines:',
+    '  bad:',
+    '    kind: composite',
+    '    nodes:',
+    '      missing-kind:',
+    '        role: implementer',
+    '        prompt: implement-work',
+  ].join('\n'), 'utf8');
+  const pi = createFakePi();
+  agentWorkflows(pi);
+  const notifications = [];
+
+  await pi.commands.get('work:config-raw')('validate', {
+    cwd: repoRoot,
+    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  });
+
+  assert.equal(notifications[0].type, 'error');
+  assert.match(notifications[0].message, /config\.pipelines\.bad\.nodes\.missing-kind\.kind is required/);
+});
+
+test('/work:config-raw validate rejects parallel loop nodes without each', async () => {
+  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-invalid-loop-config-'));
+  await fs.mkdir(path.join(repoRoot, '.pi/sandcastle'), { recursive: true });
+  await fs.writeFile(path.join(repoRoot, '.pi/sandcastle', 'run-job.mjs'), '', 'utf8');
+  await fs.writeFile(path.join(repoRoot, '.pi/sandcastle', 'config.yaml'), [
+    'roles:',
+    '  implementer:',
+    '    description: Implementer',
+    'pipelines:',
+    '  bad:',
+    '    kind: composite',
+    '    nodes:',
+    '      loop:',
+    '        kind: loop',
+    '        mode: parallel',
+    '        node:',
+    '          kind: script',
+    '          run: echo hi',
+  ].join('\n'), 'utf8');
+  const pi = createFakePi();
+  agentWorkflows(pi);
+  const notifications = [];
+
+  await pi.commands.get('work:config-raw')('validate', {
+    cwd: repoRoot,
+    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  });
+
+  assert.equal(notifications[0].type, 'error');
+  assert.match(notifications[0].message, /config\.pipelines\.bad\.nodes\.loop\.each is required for parallel loop nodes/);
 });
 
 test('/work:config-raw validate accepts composite pipeline map-form nodes', async () => {

@@ -20,6 +20,7 @@ export interface ConfigShadowSnapshot {
 	defaultSandbox?: ConfigAgentDef["sandbox"];
 	defaultModel?: string;
 	defaultPipeline?: string;
+	entrypoint?: string;
 	defaultAgent?: string;
 	maxWorkers?: number;
 	maxIterations?: number;

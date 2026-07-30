@@ -63,6 +63,66 @@ test('fails closed when a node needs a non-sibling or dependency cycle', async (
   );
 });
 
+test('evaluates CEL when mixins and skips false nodes without running handlers', async () => {
+  const calls = [];
+  const result = await executeGraphWorkflow({
+    kind: 'composite',
+    nodes: {
+      enabled: { kind: 'script', when: 'input.enabled == true', run: 'enabled' },
+      disabled: { kind: 'script', when: 'input.enabled == false', run: 'disabled' },
+    },
+  }, {
+    input: { enabled: true },
+    handlers: {
+      script: ({ node }) => {
+        calls.push(node.run);
+        return { output: node.run };
+      },
+    },
+  });
+
+  assert.deepEqual(calls, ['enabled']);
+  assert.equal(result.children.enabled.status, 'succeeded');
+  assert.equal(result.children.disabled.status, 'skipped');
+  assert.equal(result.children.disabled.type, 'SkippedResult');
+  assert.match(result.children.disabled.reason, /when evaluated to false/);
+});
+
+test('CEL when mixin can read needs and skips dependents of skipped needs', async () => {
+  const calls = [];
+  const result = await executeGraphWorkflow({
+    kind: 'composite',
+    nodes: {
+      review: { kind: 'review' },
+      close: { kind: 'close', needs: ['review'], when: 'needs.review.accepted == true' },
+      merge: { kind: 'git.merge', needs: ['close'] },
+    },
+  }, {
+    handlers: {
+      review: () => ({ accepted: false }),
+      close: () => { calls.push('close'); return { closed: true, effects: ['close:wi-1'] }; },
+      'git.merge': () => { calls.push('merge'); return { merged: ['close'], effects: ['merge:close'] }; },
+    },
+  });
+
+  assert.deepEqual(calls, []);
+  assert.equal(result.children.review.status, 'succeeded');
+  assert.equal(result.children.close.status, 'skipped');
+  assert.equal(result.children.merge.status, 'skipped');
+  assert.match(result.children.merge.reason, /skipped dependency: close/);
+});
+
+test('CEL when mixin fails closed for invalid or non-boolean expressions', async () => {
+  await assert.rejects(
+    executeGraphWorkflow({ kind: 'composite', nodes: { bad: { kind: 'script', when: 'input.enabled' } } }, { input: { enabled: 'yes' } }),
+    /when must evaluate to boolean/,
+  );
+  await assert.rejects(
+    executeGraphWorkflow({ kind: 'composite', nodes: { bad: { kind: 'script', when: 'missing == true' } } }),
+    /when evaluation failed/,
+  );
+});
+
 test('runs sequential loops without each up to max iterations', async () => {
   const iterations = [];
   const result = await executeGraphWorkflow({
@@ -89,6 +149,71 @@ test('runs sequential loops without each up to max iterations', async () => {
   assert.equal(result.children.retry.type, 'LoopResult');
   assert.equal(result.children.retry.mode, 'sequential');
   assert.equal(result.children.retry.iterations.length, 3);
+});
+
+test('executes dynamic named-pipeline $ref nodes with runtime target resolution and hooks', async () => {
+  const seen = [];
+  const hookNodes = [];
+  const result = await executeGraphWorkflow({
+    kind: 'composite',
+    nodes: {
+      wave: { $ref: '$.defaultPipeline' },
+    },
+  }, {
+    input: { defaultPipeline: 'reviewed-wave' },
+    refs: {
+      resolveNamedPipeline(name) {
+        seen.push(`resolve:${name}`);
+        if (name === 'reviewed-wave') return { kind: 'composite', nodes: { run: { kind: 'agent', capabilities: ['agent'] } } };
+      },
+    },
+    hooks: [{ id: 'agent-hook', phase: 'beforeNode', capabilities: ['agent'], run: ({ node }) => hookNodes.push(node.kind) }],
+    handlers: {
+      agent: async () => {
+        seen.push('agent');
+        return { output: 'ok' };
+      },
+    },
+  });
+
+  assert.deepEqual(seen, ['resolve:reviewed-wave', 'agent']);
+  assert.deepEqual(hookNodes, ['agent']);
+  assert.equal(result.children.wave.type, 'CompositeResult');
+  assert.equal(result.children.wave.children.run.type, 'AgentResult');
+});
+
+test('fails closed for unknown, cyclic, and excessive-depth dynamic $ref targets', async () => {
+  await assert.rejects(
+    executeGraphWorkflow({ kind: 'composite', nodes: { wave: { $ref: 'missing-wave' } } }, {
+      refs: { resolveNamedPipeline: () => undefined },
+    }),
+    /root\.nodes\.wave \$ref target 'missing-wave' is unknown/,
+  );
+
+  await assert.rejects(
+    executeGraphWorkflow({ kind: 'composite', nodes: { wave: { $ref: 'a' } } }, {
+      refs: {
+        resolveNamedPipeline(name) {
+          if (name === 'a') return { $ref: 'b' };
+          if (name === 'b') return { $ref: 'a' };
+        },
+      },
+    }),
+    /attempted to enter \$ref cycle: a -> b -> a/,
+  );
+
+  await assert.rejects(
+    executeGraphWorkflow({ kind: 'composite', nodes: { wave: { $ref: 'a' } } }, {
+      refs: {
+        maxDepth: 1,
+        resolveNamedPipeline(name) {
+          if (name === 'a') return { $ref: 'b' };
+          if (name === 'b') return { kind: 'script' };
+        },
+      },
+    }),
+    /attempted to exceed \$ref max depth 1 before entering 'b'/,
+  );
 });
 
 test('runs loop.each sequentially with max as an item cap', async () => {
