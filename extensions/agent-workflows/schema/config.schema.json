@@ -50,6 +50,18 @@
       "type": "string",
       "minLength": 1
     },
+    "workSourceCommands": {
+      "type": "object",
+      "description": "Explicit command templates for custom Work Source actions. Templates may use {{ id }}, {{ itemId }}, {{ runId }}, {{ pipeline }}, {{ recordPath }}, {{ cwd }}, {{ args }}, and {{ query }} where applicable.",
+      "additionalProperties": false,
+      "properties": {
+        "ready": { "type": "string", "minLength": 1 },
+        "list": { "type": "string", "minLength": 1 },
+        "inspect": { "type": "string", "minLength": 1 },
+        "validate": { "type": "string", "minLength": 1 },
+        "close": { "type": "string", "minLength": 1 }
+      }
+    },
     "imageNamePattern": {
       "type": "string",
       "minLength": 1

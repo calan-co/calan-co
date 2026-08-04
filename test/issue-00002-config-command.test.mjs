@@ -97,10 +97,10 @@ test('issue 00002 registers /work:config-raw and manages repo-local config', () 
     assert.equal(forceNotifications[0].type, 'success');
     assert.match(forceNotifications[0].message, /Overwrote:/);
     assert.equal(readFileSync(configPath, 'utf8').includes('extraRoot: keep-me'), false);
-    assert.match(readFileSync(configPath, 'utf8'), /^roles:/m);
-    assert.match(readFileSync(configPath, 'utf8'), /systemPrompt: \|/);
+    assert.doesNotMatch(readFileSync(configPath, 'utf8'), /^roles:/m);
+    assert.doesNotMatch(readFileSync(configPath, 'utf8'), /systemPrompt: \|/);
     assert.doesNotMatch(readFileSync(configPath, 'utf8'), /^    sandbox: docker/m);
-    assert.match(readFileSync(configPath, 'utf8'), /^pipelines:/m);
+    assert.doesNotMatch(readFileSync(configPath, 'utf8'), /^pipelines:/m);
 
     writeFileSync(runnerPath, 'const importUserPackage = () => {};\n');
     const showNotifications = await invoke('');

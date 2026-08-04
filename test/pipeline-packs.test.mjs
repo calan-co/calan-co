@@ -6,7 +6,7 @@ import { loadPipelinePacks, packsToConfig, buildDefaultConfigText, configToYaml 
 test('pipeline packs are discovered from the Agent Workflows execution runtime pack', () => {
   const packs = loadPipelinePacks();
   const names = packs.map((pack) => pack.name).sort();
-  assert.deepEqual(names, ['archive', 'blank', 'parallel-planner', 'parallel-planner-with-review', 'sequential-reviewer', 'simple-loop']);
+  assert.deepEqual(names, ['archive', 'blank', 'parallel-planner', 'parallel-planner-with-review', 'sequential-reviewer', 'simple-loop', 'work-process-waves']);
   const runtime = loadExecutionRuntimePack();
   assert.ok(runtime.prompts['implement-work'].template.length > 20);
   assert.equal(runtime.roles.planner.kind, 'planWork');
@@ -37,9 +37,20 @@ test('pipeline packs map into agent-workflows agent and pipeline inventory', () 
   assert.equal(cfg.pipelines['parallel-planner'].nodes.merge.kind, 'git.merge');
   assert.equal(cfg.pipelines['parallel-planner-with-review'].nodes.implement.node.kind, 'git.worktree');
   assert.equal(cfg.pipelines['parallel-planner-with-review'].nodes.implement.node.nodes.review.needs[0], 'implement');
+  assert.equal(cfg.pipelines['parallel-planner-with-review'].nodes.implement.node.nodes.close.kind, 'work.close');
   assert.equal(cfg.pipelines['parallel-planner-with-review'].nodes.merge.kind, 'git.merge');
   assert.equal(cfg.pipelines['parallel-planner'].steps, undefined);
   assert.equal(cfg.pipelines['parallel-planner-with-review'].steps, undefined);
+});
+
+test('effectful work-process pack pipelines include explicit close gates', () => {
+  const cfg = packsToConfig();
+
+  assert.equal(cfg.pipelines['simple-loop'].nodes.workspace.nodes.close.kind, 'work.close');
+  assert.equal(cfg.pipelines['sequential-reviewer'].nodes.workspace.nodes.close.kind, 'work.close');
+  assert.equal(cfg.pipelines['parallel-planner'].nodes.implement.node.nodes.close.kind, 'work.close');
+  assert.match(cfg.pipelines['parallel-planner'].nodes.merge.when, /children\.close\.closed/);
+  assert.equal(cfg.pipelines['parallel-planner-with-review'].nodes.implement.node.nodes.close.kind, 'work.close');
 });
 
 test('configToYaml renders graph-native default workflow definitions without steps arrays', () => {

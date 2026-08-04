@@ -242,6 +242,16 @@
                 "runRole",
                 "agent.pi"
               ]
+            },
+            "close": {
+              "kind": "work.close",
+              "needs": [
+                "run"
+              ],
+              "when": "needs.run.accepted == true",
+              "capabilities": [
+                "work.close"
+              ]
             }
           },
           "capabilities": [
@@ -281,6 +291,16 @@
                 "runRole",
                 "agent.pi"
               ]
+            },
+            "close": {
+              "kind": "work.close",
+              "needs": [
+                "review"
+              ],
+              "when": "needs.review.accepted == true",
+              "capabilities": [
+                "work.close"
+              ]
             }
           },
           "capabilities": [
@@ -312,6 +332,16 @@
                   "runRole",
                   "agent.pi"
                 ]
+              },
+              "close": {
+                "kind": "work.close",
+                "needs": [
+                  "implement"
+                ],
+                "when": "needs.implement.accepted == true",
+                "capabilities": [
+                  "work.close"
+                ]
               }
             },
             "capabilities": [
@@ -332,6 +362,7 @@
           "overrides": {
             "maxIterations": 1
           },
+          "when": "needs.implement.mergeableResults.exists(r, has(r.children.close.closed) && r.children.close.closed == true)",
           "capabilities": [
             "merge",
             "git.merge"

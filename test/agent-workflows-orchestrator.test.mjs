@@ -324,6 +324,9 @@ test('runWorkProcess fails closed when effectful done work remains ready without
       /Work Items produced repository effects but are still reported ready without closure evidence: wi-effect/,
     );
     assert.equal(executeInputs.length, 1);
+    const record = JSON.parse(readFileSync(join(cwd, '.pi/sandcastle/runs/run-effectful-unclosed.json'), 'utf8'));
+    assert.equal(record.status, 'error');
+    assert.match(record.error, /Work Items produced repository effects but are still reported ready without closure evidence: wi-effect/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

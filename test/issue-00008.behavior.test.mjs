@@ -84,6 +84,7 @@ const processInputs = ${JSON.stringify(backlogProcessInputs, null, 2)};
 const notifications = [];
 const commands = new Map();
 const calls = [];
+const planCallsByQuery = new Map();
 const api = {
   registerCommand(name, spec) {
     commands.set(name, spec);
@@ -96,8 +97,10 @@ agentWorkflows(api, {
   work: {
     now: () => 1710000000000 + calls.length,
     plan: async (_cwd, query) => {
+      const count = planCallsByQuery.get(query) || 0;
+      planCallsByQuery.set(query, count + 1);
       const iteration = query === 'review' ? planIterations.review : planIterations.default;
-      return { query, iterations: [iteration] };
+      return { query, iterations: count === 0 ? [iteration] : [] };
     },
     execute: async (_cwd, input) => {
       calls.push({
@@ -111,6 +114,7 @@ agentWorkflows(api, {
       return {
         branches: input.items.map((item) => 'branch-' + item.id),
         logs: input.items.map((item) => 'log-' + item.id + '.txt'),
+        workSourceMutations: input.items.map((item) => ({ itemId: item.id, action: 'close', status: 'succeeded' })),
         status: 'done',
       };
     },
@@ -227,11 +231,15 @@ test('work:process reports one worker row per graph agent in the completion summ
   const cwd = mkdtempSync(join(os.tmpdir(), 'pi-work-process-worker-status-'));
   try {
     mkdirSync(join(cwd, '.pi', 'sandcastle'), { recursive: true });
+    mkdirSync(join(cwd, '.pi/sandcastle/worktrees/implement'), { recursive: true });
     mkdirSync(join(cwd, 'backlog'), { recursive: true });
     writeFileSync(join(cwd, '.pi', 'sandcastle', 'config.yaml'), [
       'defaultPipeline: implement',
       'defaultSandbox: no-sandbox',
       'defaultModel: test-model',
+      'workSource: custom',
+      'workSourceCommands:',
+      `  close: rm ${join(cwd, 'backlog', '00008-work.md')}`,
       'roles:',
       '  researcher:',
       '    provider: claude-code',
@@ -258,6 +266,9 @@ test('work:process reports one worker row per graph agent in the completion summ
       '            needs: [research]',
       '            role: builder',
       '            prompt: $INPUT',
+      '          close:',
+      '            kind: work.close',
+      '            needs: [build]',
     ].join('\n'));
     writeFileSync(join(cwd, 'backlog', '00008-work.md'), `---\nid: wi-00008\ntitle: Worker Status\ntags:\n  - afk\n---\n\n## Goal\n\nReport workers.`);
 
@@ -310,7 +321,7 @@ test('work:process reports one worker row per graph agent in the completion summ
     assert.match(message, /^Work process backlog-/);
     assert.match(message, /Status: ✓ done/);
     assert.match(message, /Pipeline: implement/);
-    assert.match(message, /Execution workers: 1/);
+    assert.match(message, /Execution workers: 2/);
     assert.match(message, /completed\s+builder\s+0s · .*completed · 1 commit\(s\)/);
     assert.match(message, /node root\.nodes\.workspace\.nodes\.build/);
     assert.match(message, /Approved changes merged:/);
@@ -565,8 +576,6 @@ test('work:process selects pipeline deterministically and writes durable run rec
 
   const expectedCalls = [
     { query: 'review', pipeline: 'simple-loop', items: ['00008', '00009'], parallel: true },
-    { query: 'auth bugs', pipeline: 'implement', items: ['00008'], parallel: false },
-    { query: 'label:small', pipeline: 'review', items: ['00008'], parallel: false },
   ];
   assert.equal(calls.length, expectedCalls.length);
 
@@ -578,20 +587,6 @@ test('work:process selects pipeline deterministically and writes durable run rec
   }
 
   assert.equal(records.length, expectedCalls.length);
-  assertBacklogRunRecord(byQuery.get('auth bugs'), {
-    pipeline: 'implement',
-    resolvedItems: 1,
-    branchItemIds: ['00008'],
-    branches: ['branch-00008'],
-    logs: ['log-00008.txt'],
-  });
-  assertBacklogRunRecord(byQuery.get('label:small'), {
-    pipeline: 'review',
-    resolvedItems: 1,
-    branchItemIds: ['00008'],
-    branches: ['branch-00008'],
-    logs: ['log-00008.txt'],
-  });
   assertBacklogRunRecord(byQuery.get('review'), {
     pipeline: 'simple-loop',
     resolvedItems: 2,

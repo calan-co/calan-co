@@ -284,7 +284,7 @@ test('/work:config-raw validate accepts composite pipeline map-form nodes', asyn
   assert.equal(notifications[0].type, 'success');
 });
 
-test('/work:config-raw reset without path replaces stale config with graph-native defaults', async () => {
+test('/work:config-raw reset without path replaces stale config with root-only system defaults', async () => {
   const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-reset-config-'));
   await fs.mkdir(path.join(repoRoot, '.pi/sandcastle'), { recursive: true });
   await fs.writeFile(path.join(repoRoot, '.pi/sandcastle', 'run-job.mjs'), '', 'utf8');
@@ -309,10 +309,11 @@ test('/work:config-raw reset without path replaces stale config with graph-nativ
   await pi.commands.get('work:config-raw')('reset', ctx);
   await pi.commands.get('work:config-raw')('validate', ctx);
 
-  const reparsed = parseSimpleYaml(await fs.readFile(path.join(repoRoot, '.pi/sandcastle', 'config.yaml'), 'utf8'));
-  assert.equal(reparsed.pipelines['parallel-planner-with-review'].kind, 'composite');
-  assert.ok(reparsed.pipelines['parallel-planner-with-review'].nodes.implement);
-  assert.equal(reparsed.pipelines['parallel-planner-with-review'].steps, undefined);
+  const raw = await fs.readFile(path.join(repoRoot, '.pi/sandcastle', 'config.yaml'), 'utf8');
+  const reparsed = parseSimpleYaml(raw);
+  assert.equal(reparsed.defaultPipeline, 'simple-loop');
+  assert.equal(reparsed.pipelines['parallel-planner-with-review'], undefined);
+  assert.doesNotMatch(raw, /^pipelines:/m);
   assert.equal(notifications.at(-1).type, 'success');
 });
 

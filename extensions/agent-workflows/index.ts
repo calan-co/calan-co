@@ -159,6 +159,15 @@ interface PromptDef {
 	template?: string;
 }
 
+interface WorkSourceCommandConfig {
+	ready?: string;
+	list?: string;
+	inspect?: string;
+	validate?: string;
+	close?: string;
+	[key: string]: string | undefined;
+}
+
 interface SandcastleConfig {
 	defaultSandbox?: AgentDef["sandbox"];
 	defaultModel?: string;
@@ -169,6 +178,7 @@ interface SandcastleConfig {
 	maxIterations?: number;
 	workSource?: string;
 	workSourceSetupCommand?: string;
+	workSourceCommands?: WorkSourceCommandConfig;
 	issueTracker?: string;
 	issueTrackerSetupCommand?: string;
 	imageNamePattern?: string;
@@ -496,7 +506,7 @@ interface RunState {
 	proc?: SandcastleProcess;
 }
 
-type RootConfigKey = "defaultSandbox" | "defaultModel" | "defaultPipeline" | "entrypoint" | "defaultAgent" | "maxWorkers" | "maxIterations" | "workSource" | "workSourceSetupCommand" | "issueTracker" | "issueTrackerSetupCommand" | "imageNamePattern";
+type RootConfigKey = "defaultSandbox" | "defaultModel" | "defaultPipeline" | "entrypoint" | "defaultAgent" | "maxWorkers" | "maxIterations" | "workSource" | "workSourceSetupCommand" | "workSourceCommands" | "issueTracker" | "issueTrackerSetupCommand" | "imageNamePattern";
 type EditableAgentField = "description" | "kind" | "model" | "sandbox" | "maxIterations" | "branch";
 
 const CONFIG_DIR = ".pi/sandcastle";
@@ -507,7 +517,7 @@ const RESULTS_DIR = `${CONFIG_DIR}/results`;
 const SUPPORTED_SANDBOXES = new Set(["docker", "podman", "vercel", "no-sandbox"]);
 const DEFAULT_SANDBOX: NonNullable<AgentDef["sandbox"]> = "docker";
 const DEFAULT_MODEL = "Agent Default";
-const ROOT_CONFIG_KEYS: RootConfigKey[] = ["defaultSandbox", "defaultModel", "defaultPipeline", "entrypoint", "defaultAgent", "maxWorkers", "maxIterations", "workSource", "workSourceSetupCommand", "imageNamePattern"];
+const ROOT_CONFIG_KEYS: RootConfigKey[] = ["defaultSandbox", "defaultModel", "defaultPipeline", "entrypoint", "defaultAgent", "maxWorkers", "maxIterations", "workSource", "workSourceSetupCommand", "workSourceCommands", "imageNamePattern"];
 const EDITABLE_AGENT_FIELDS: EditableAgentField[] = ["description", "kind", "model", "sandbox", "maxIterations", "branch"];
 const RUNS_DIR = `${CONFIG_DIR}/runs`;
 const PLANS_DIR = `${CONFIG_DIR}/plans`;
@@ -1084,7 +1094,7 @@ function readWorkItems(cwd: string): WorkItem[] {
 const readBacklogItems = readWorkItems;
 
 
-const SAMPLE_CONFIG = configToYaml(packsToConfig());
+const SAMPLE_CONFIG = buildDefaultConfigText();
 
 function matchesWorkQuery(item: WorkItem, query: string): boolean {
 	const raw = query.trim().toLowerCase();
@@ -1304,6 +1314,7 @@ function formatConfigValue(value: unknown): string {
 function readConfigValue(cfg: SandcastleConfig, path: string): unknown {
 	const parts = splitConfigPath(path);
 	if (parts.length === 1 && isRootConfigKey(parts[0])) return cfg[parts[0]];
+	if (parts[0] === "workSourceCommands" && parts.length === 2) return cfg.workSourceCommands?.[parts[1]];
 	if (parts[0] === "roles" && parts.length === 3 && isEditableAgentField(parts[2])) {
 		return cfg.agents[parts[1]]?.[parts[2]];
 	}
@@ -1315,6 +1326,7 @@ function readConfigValue(cfg: SandcastleConfig, path: string): unknown {
 function supportedConfigPath(path: string): boolean {
 	const parts = splitConfigPath(path);
 	if (parts.length === 1) return isRootConfigKey(parts[0]);
+	if (parts[0] === "workSourceCommands" && parts.length === 2 && ["ready", "list", "inspect", "validate", "close"].includes(parts[1])) return true;
 	if (parts[0] === "roles" && parts.length === 3 && isEditableAgentField(parts[2])) return true;
 	if (parts[0] === "pipelines" && parts.length === 3 && ["description", "model", "sandbox"].includes(parts[2])) return true;
 	if (parts[0] === "pipelines" && parts[2] === "nodes" && parts.length >= 5 && ["role", "prompt", "promptOverride", "model", "sandbox", "maxIterations"].includes(parts.at(-1)!)) return true;
@@ -1381,6 +1393,12 @@ function setConfigValueInText(raw: string, path: string, value: unknown): string
 		const model = new ConfigShadowModel(mergeWithPackDefaults(normalizeConfig(parseSimpleYaml(raw))));
 		model.setConfigValue(path, value);
 		return configToYaml(model.snapshot());
+	}
+
+	if (parts[0] === "workSourceCommands" && parts.length === 2) {
+		const cfg = normalizeConfig(parseSimpleYaml(raw));
+		cfg.workSourceCommands = { ...(cfg.workSourceCommands || {}), [parts[1]]: String(value ?? "") };
+		return configToYaml(cfg);
 	}
 
 	if (parts[0] === "roles" && parts.length === 3) {
@@ -1738,6 +1756,7 @@ function normalizeConfig(cfg: Partial<SandcastleConfig>): SandcastleConfig {
 		maxIterations: cfg.maxIterations ?? 10,
 		workSource: cfg.workSource ?? cfg.issueTracker ?? "github-issues",
 		workSourceSetupCommand: cfg.workSourceSetupCommand ?? cfg.issueTrackerSetupCommand,
+		workSourceCommands: cfg.workSourceCommands,
 		issueTracker: cfg.issueTracker,
 		issueTrackerSetupCommand: cfg.issueTrackerSetupCommand,
 		imageNamePattern: cfg.imageNamePattern ?? "sandcastle:<repo-dir-name>",
@@ -2038,6 +2057,11 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 			setField(cfg, key, parseScalar(top[2]) as SandcastleConfig[typeof key]);
 			continue;
 		}
+		if (/^workSourceCommands:\s*$/.test(line)) {
+			section = "workSourceCommands";
+			cfg.workSourceCommands = {};
+			continue;
+		}
 		const sectionMatch = line.match(/^(roles|prompts|pipelines):\s*$/);
 		if (sectionMatch) {
 			section = sectionMatch[1];
@@ -2047,6 +2071,13 @@ export function parseSimpleYaml(raw: string): SandcastleConfig {
 			currentPipelineStep = null;
 			currentBranchStrategy = null;
 			continue;
+		}
+		if (section === "workSourceCommands") {
+			const field = line.match(/^\s{2}([A-Za-z0-9_-]+):\s*(.*)$/);
+			if (field) {
+				(cfg.workSourceCommands ||= {})[field[1]] = parseScalar(field[2]);
+				continue;
+			}
 		}
 		if (section === "prompts") {
 			const promptMatch = line.match(/^  (\S.*):\s*$/);
@@ -3294,10 +3325,31 @@ function renderWorkCommandTemplate(command: string, values: Record<string, unkno
 	return command.replace(/\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}/g, (_match, key) => String(values[key] ?? ""));
 }
 
+function configuredWorkSourceCommand(cfg: Pick<SandcastleConfig, "workSourceCommands">, action: string): string | undefined {
+	const command = cfg.workSourceCommands?.[action];
+	return typeof command === "string" && command.trim().length > 0 ? command : undefined;
+}
+
 function defaultWorkCloseCommand(workSource: string | undefined): string | undefined {
 	if (workSource === "github-issues") return "gh issue close {{ id }}";
 	if (workSource === "beads") return "bd close {{ id }}";
 	return undefined;
+}
+
+function customCommandMutationAdapter(cfg: Pick<SandcastleConfig, "workSourceCommands">): WorkSourceMutationAdapter | undefined {
+	const validateCommand = configuredWorkSourceCommand(cfg, "validate");
+	const closeCommand = configuredWorkSourceCommand(cfg, "close");
+	if (!validateCommand && !closeCommand) return undefined;
+	const runMutationCommand = async (template: string, input: { itemId: string; cwd: string; runId: string; pipeline: string; recordPath: string; item?: WorkItem }) => {
+		const command = renderWorkCommandTemplate(template, { id: input.itemId, itemId: input.itemId, cwd: input.cwd, runId: input.runId, pipeline: input.pipeline, recordPath: input.recordPath });
+		const result = await runShellCommand(command, { cwd: input.cwd, env: { ITEM_ID: input.itemId, WORK_ITEM_ID: input.itemId, RUN_ID: input.runId, PIPELINE: input.pipeline, RECORD_PATH: input.recordPath } });
+		if (result.exitCode !== 0) throw new Error(result.stderr || result.stdout || `command exited ${result.exitCode}`);
+		return result;
+	};
+	return {
+		...(validateCommand ? { validate: (input: { itemId: string; cwd: string; runId: string; pipeline: string; recordPath: string; item?: WorkItem }) => runMutationCommand(validateCommand, input) } : {}),
+		...(closeCommand ? { close: (input: { itemId: string; cwd: string; runId: string; pipeline: string; recordPath: string; item?: WorkItem }) => runMutationCommand(closeCommand, input) } : {}),
+	};
 }
 
 function commandEvidence(value: unknown): Partial<ShellCommandResult> {
@@ -3543,12 +3595,16 @@ export async function executePipeline(
 						let command = explicitCommand ? renderWorkCommandTemplate(explicitCommand, { id: itemId, itemId, runId: id, pipeline: pipelineName, recordPath }) : undefined;
 						let evidence: Partial<ShellCommandResult> = {};
 						if (!command) {
-							const adapter = deps.workSourceAdapter || ((cfg.workSource || cfg.issueTracker) === "doc-vader" ? createDocVaderWorkSourceAdapter() : undefined);
-							if (adapter?.close) evidence = commandEvidence(await adapter.close({ itemId, cwd: closeCwd, runId: id, pipeline: pipelineName, recordPath, item }));
+							const configuredCommand = configuredWorkSourceCommand(cfg, "close");
+							if (configuredCommand) command = renderWorkCommandTemplate(configuredCommand, { id: itemId, itemId, runId: id, pipeline: pipelineName, recordPath });
 							else {
-								const defaultCommand = defaultWorkCloseCommand(cfg.workSource || cfg.issueTracker);
-								if (!defaultCommand) throw new Error(`${context.path} cannot close Work Item ${itemId}: no Work Source close adapter or command configured`);
-								command = renderWorkCommandTemplate(defaultCommand, { id: itemId, itemId, runId: id, pipeline: pipelineName, recordPath });
+								const adapter = deps.workSourceAdapter || ((cfg.workSource || cfg.issueTracker) === "doc-vader" ? createDocVaderWorkSourceAdapter() : undefined);
+								if (adapter?.close) evidence = commandEvidence(await adapter.close({ itemId, cwd: closeCwd, runId: id, pipeline: pipelineName, recordPath, item }));
+								else {
+									const defaultCommand = defaultWorkCloseCommand(cfg.workSource || cfg.issueTracker);
+									if (!defaultCommand) throw new Error(`${context.path} cannot close Work Item ${itemId}: no Work Source close adapter or command configured`);
+									command = renderWorkCommandTemplate(defaultCommand, { id: itemId, itemId, runId: id, pipeline: pipelineName, recordPath });
+								}
 							}
 						}
 						if (command) evidence = await runShellCommand(command, { cwd: closeCwd, env });
@@ -4473,6 +4529,13 @@ Work views and processing:
 	async function readConfiguredReadyWork(cwd: string, args: string): Promise<string> {
 		if (backlogDeps.ready) return backlogDeps.ready(cwd, args);
 		const cfg = await loadConfig(cwd);
+		const readyCommand = configuredWorkSourceCommand(cfg, "ready") || configuredWorkSourceCommand(cfg, "list");
+		if (readyCommand) {
+			const rendered = renderWorkCommandTemplate(readyCommand, { args, query: args, cwd });
+			const result = await runShellCommand(rendered, { cwd });
+			if (result.exitCode !== 0) throw new Error(`Configured Work Source ready command failed: ${result.stderr || result.stdout || `command exited ${result.exitCode}`}`);
+			return result.stdout.trim();
+		}
 		if ((cfg.workSource || cfg.issueTracker) === "doc-vader") return (await runProcess(cwd, "dv", ["work", "ready", ...tokenizeCommandArgs(args)])).stdout.trim();
 		return renderReadyWork(await planBacklogProcessing(cwd, args));
 	}
@@ -4728,6 +4791,8 @@ Work views and processing:
 	async function configuredWorkSourceMutationAdapter(cwd: string): Promise<WorkSourceMutationAdapter | undefined> {
 		if (backlogDeps.workSourceAdapter) return backlogDeps.workSourceAdapter;
 		const cfg = await loadConfig(cwd);
+		const customAdapter = customCommandMutationAdapter(cfg);
+		if (customAdapter) return customAdapter;
 		if ((cfg.workSource || cfg.issueTracker) === "doc-vader") return createDocVaderWorkSourceAdapter();
 		return undefined;
 	}

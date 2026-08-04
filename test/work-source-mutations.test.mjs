@@ -233,6 +233,101 @@ test('/work:process can close work through an explicit graph work.close node bef
   }
 });
 
+test('custom Work Source commands can provide ready and close actions', async () => {
+  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-custom-source-'));
+  const worktreePath = path.join(repoRoot, '.pi/sandcastle/worktrees/custom-close');
+  const statePath = path.join(repoRoot, 'custom-source-state.log');
+  const commandPath = path.join(repoRoot, 'custom-source.mjs');
+  try {
+    await fs.mkdir(path.join(repoRoot, '.pi/sandcastle'), { recursive: true });
+    await fs.mkdir(worktreePath, { recursive: true });
+    await fs.writeFile(commandPath, [
+      'import { appendFileSync } from "node:fs";',
+      'const [action, statePath, id, flag, runId] = process.argv.slice(2);',
+      'if (action === "ready") console.log("custom-ready-output");',
+      'if (action === "close") appendFileSync(statePath, `${id}:${flag}:${runId}:${process.cwd()}\\n`);',
+    ].join('\n'), 'utf8');
+    await fs.writeFile(path.join(repoRoot, '.pi/sandcastle/config.yaml'), [
+      'defaultPipeline: graph-close',
+      'defaultSandbox: no-sandbox',
+      'defaultModel: test-model',
+      'workSource: custom',
+      'workSourceCommands:',
+      `  ready: node ${commandPath} ready ${statePath}`,
+      `  close: node ${commandPath} close ${statePath} {{ itemId }} --run {{ runId }}`,
+      'roles:',
+      '  implementer:',
+      '    provider: claude-code',
+      '    sandbox: no-sandbox',
+      '    model: test-model',
+      'pipelines:',
+      '  graph-close:',
+      '    kind: composite',
+      '    nodes:',
+      '      work:',
+      '        kind: git.worktree',
+      '        nodes:',
+      '          implement:',
+      '            kind: agent.pi',
+      '            role: implementer',
+      '            prompt: Implement $INPUT',
+      '          close:',
+      '            kind: work.close',
+      '            needs: [implement]',
+      '            when: needs.implement.accepted == true',
+      '      merge:',
+      '        kind: git.merge',
+      '        needs: [work]',
+      '        when: has(needs.work.children.close.closed) && needs.work.children.close.closed == true',
+    ].join('\n'), 'utf8');
+
+    const commands = new Map();
+    const notifications = [];
+    let planCalls = 0;
+    let gitHead = 'base';
+    agentWorkflows({ registerCommand(name, spec) { commands.set(name, spec); }, on() {}, registerTool() {} }, {
+      work: {
+        now: () => 1710000300000,
+        plan: async (_cwd, query) => {
+          planCalls += 1;
+          return planCalls === 1 ? { query, iterations: [{ items: [{ id: 'wi-1', title: 'First item', tags: [] }] }] } : { query, iterations: [] };
+        },
+      },
+      pipeline: {
+        now: () => 1700000030000,
+        createWorktree: async () => ({
+          branch: 'sandcastle/custom-close',
+          worktreePath,
+          close: async () => ({}),
+          run: async (options) => ({ iterations: [], commits: [{ sha: 'sha-1' }], branch: 'sandcastle/custom-close', stdout: 'ACCEPT', logFilePath: options.logging.path }),
+        }),
+        loadSandboxProvider: async (kind) => ({ kind }),
+        makeAgent: (model, provider) => ({ model, provider }),
+        runGit: async (args) => {
+          if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return { status: 0, stdout: 'main\n', stderr: '' };
+          if (args[0] === 'rev-parse' && args[1] === 'HEAD') return { status: 0, stdout: `${gitHead}\n`, stderr: '' };
+          if (args[0] === 'merge') { gitHead = 'merged'; return { status: 0, stdout: 'merged\n', stderr: '' }; }
+          return { status: 0, stdout: '', stderr: '' };
+        },
+      },
+    });
+
+    const ctx = { cwd: repoRoot, ui: { notify(message, type = 'info') { notifications.push({ message, type }); }, setWidget() {} } };
+    await commands.get('work:ready').handler('', ctx);
+    assert.equal(notifications.at(-1).message, 'custom-ready-output');
+
+    await commands.get('work:process').handler('demo', ctx);
+    const record = await readProcessRecord(repoRoot);
+    assert.equal(record.status, 'done', notifications.at(-1)?.message);
+    const state = await fs.readFile(statePath, 'utf8');
+    assert.match(state, /^wi-1:--run:[a-z0-9-]+-graph-close:/);
+    assert.match(state, /\.pi\/sandcastle\/worktrees\/custom-close\n$/);
+    assert.deepEqual(record.workSourceMutations.map((entry) => `${entry.itemId}:${entry.action}:${entry.status}`), ['wi-1:close:succeeded']);
+  } finally {
+    await fs.rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
 test('/work:process does not close an item when Work Source validation fails', async () => {
   const fixture = await setup({ failValidate: true });
   try {

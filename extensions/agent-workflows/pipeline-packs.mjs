@@ -109,6 +109,7 @@ export function configToYaml(config) {
     `maxIterations: ${yamlScalar(config.maxIterations || 10)}`,
     `workSource: ${yamlScalar(config.workSource || config.issueTracker)}`,
     ...(config.workSourceSetupCommand || config.issueTrackerSetupCommand ? [`workSourceSetupCommand: ${yamlScalar(config.workSourceSetupCommand || config.issueTrackerSetupCommand)}`] : []),
+    ...(config.workSourceCommands ? [`workSourceCommands:`, ...yamlObjectLines(config.workSourceCommands, 2)] : []),
     `imageNamePattern: ${yamlScalar(config.imageNamePattern || 'sandcastle:<repo-dir-name>')}`,
     '',
     'roles:',
@@ -149,6 +150,7 @@ export function buildDefaultConfigText(defaults = {}) {
     `maxIterations: ${yamlScalar(cfg.maxIterations || 10)}`,
     `workSource: ${yamlScalar(cfg.workSource || cfg.issueTracker)}`,
     ...(cfg.workSourceSetupCommand || cfg.issueTrackerSetupCommand ? [`workSourceSetupCommand: ${yamlScalar(cfg.workSourceSetupCommand || cfg.issueTrackerSetupCommand)}`] : []),
+    ...(cfg.workSourceCommands ? [`workSourceCommands:`, ...yamlObjectLines(cfg.workSourceCommands, 2)] : []),
     `imageNamePattern: ${yamlScalar(cfg.imageNamePattern || 'sandcastle:<repo-dir-name>')}`,
     '',
   ].join('\n');

@@ -44,7 +44,7 @@ test('/work:config owns config subcommands and /work:config-raw remains a compat
 
     await config.handler('init', ctx);
     assert.equal(notifications.at(-1).type, 'success');
-    assert.match(readFileSync(join(cwd, '.pi/sandcastle/config.yaml'), 'utf8'), /^pipelines:/m);
+    assert.doesNotMatch(readFileSync(join(cwd, '.pi/sandcastle/config.yaml'), 'utf8'), /^pipelines:/m);
 
     await config.handler('show', ctx);
     assert.equal(notifications.at(-1).type, 'info');

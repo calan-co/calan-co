@@ -100,6 +100,7 @@ export interface LegacyConfigLike {
 	maxWorkers?: number;
 	maxIterations?: number;
 	workSource?: string;
+	workSourceCommands?: Record<string, string>;
 	issueTracker?: string;
 	imageNamePattern?: string;
 	prompts?: Record<string, RuntimePrompt>;
@@ -312,6 +313,7 @@ export function runtimeToSandcastleConfig(pack = loadExecutionRuntimePack(), def
 		maxWorkers,
 		maxIterations,
 		workSource: defaults.workSource || defaults.issueTracker || String(pack.defaults?.workSource || pack.defaults?.issueTracker || "github-issues"),
+		workSourceCommands: (defaults as any).workSourceCommands,
 		imageNamePattern: defaults.imageNamePattern || "sandcastle:<repo-dir-name>",
 		prompts: pack.prompts,
 		agents,

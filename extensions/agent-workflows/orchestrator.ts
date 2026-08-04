@@ -89,6 +89,8 @@ export interface WorkProcessRunRecord {
 	startedAt: number;
 	updatedAt: number;
 	endedAt?: number;
+	error?: string;
+	message?: string;
 }
 
 export interface WorkProcessExecutionInput {
@@ -651,19 +653,23 @@ export async function runWorkProcess(input: RunWorkProcessInput, deps: RunWorkPr
 			const effectfulStillReady = [...waveItemIds].filter((id) => readyAfterWave.has(id) && !closed.has(id));
 			if (effectfulStillReady.length && executionHasRepositoryEffects(execution)) {
 				const endedAt = now();
-				aggregateRecord = { ...aggregateRecord, status: "error", updatedAt: endedAt, endedAt };
+				const message = `Work Items produced repository effects but are still reported ready without closure evidence: ${effectfulStillReady.join(", ")}. Refusing to repeat implementation; close the Work Source item or recover from the completed branch instead.`;
+				aggregateRecord = { ...aggregateRecord, status: "error", updatedAt: endedAt, endedAt, error: message, message };
 				writeRecord(input.cwd, aggregateRecord);
-				throw new WorkWavePolicyViolation(`Work Items produced repository effects but are still reported ready without closure evidence: ${effectfulStillReady.join(", ")}. Refusing to repeat implementation; close the Work Source item or recover from the completed branch instead.`);
+				throw new WorkWavePolicyViolation(message);
 			}
 			return aggregateRecord;
 		} catch (error) {
 			if (error instanceof WorkWaveLoopComplete || error instanceof WorkWavePolicyViolation) throw error;
 			const endedAt = now();
+			const message = error instanceof Error ? error.message : String(error);
 			const errorRecord: WorkProcessRunRecord = {
 				...waveRecord,
 				status: "error",
 				updatedAt: endedAt,
 				endedAt,
+				error: message,
+				message,
 			};
 			aggregateRecord = mergeWorkProcessRecords(aggregateRecord, errorRecord);
 			writeRecord(input.cwd, aggregateRecord);
