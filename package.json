@@ -7,7 +7,7 @@
   "scripts": {
     "test": "node --import tsx --test test/*.test.mjs test/*.test.cjs",
     "coverage": "node --experimental-test-coverage --test-coverage-include='extensions/agent-workflows/*.mjs' --test-coverage-include='extensions/agent-workflows/*.ts' --test-coverage-exclude='extensions/agent-workflows/index.ts' --test-coverage-lines=89 --test-coverage-branches=60 --import tsx --test test/*.test.mjs",
-    "check": "node --check extensions/agent-workflows/work-source.mjs && node --check extensions/agent-workflows/run-management.mjs"
+    "check": "node scripts/typecheck.mjs && node --check extensions/agent-workflows/work-source.mjs && node --check extensions/agent-workflows/run-management.mjs"
   },
   "devEngines": {
     "packageManager": {
@@ -27,7 +27,9 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "tsx": "^4.23.0"
+    "@types/node": "^26.1.2",
+    "tsx": "^4.23.0",
+    "typescript": "^7.0.2"
   },
   "keywords": [
     "pi-package"
