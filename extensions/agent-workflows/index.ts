@@ -3264,8 +3264,13 @@ function collectWorkspaceMergeCandidatesFromResult(need: string, result: NodeRes
 }
 
 function isAcceptedReviewText(value: unknown): boolean | undefined {
-	const text = typeof value === "string" ? value.toLowerCase() : "";
+	const raw = typeof value === "string" ? value : "";
+	const text = raw.toLowerCase();
 	if (!text.trim()) return undefined;
+	const explicitReject = raw.match(/\b(?:Recommendation:\s*|Review result:\s*\*\*)Reject(?:ed)?\b/i);
+	const explicitAccept = raw.match(/\b(?:Recommendation:\s*|Review result:\s*\*\*)Accept(?:ed)?\b/i);
+	if (explicitReject && (!explicitAccept || explicitReject.index! < explicitAccept.index!)) return false;
+	if (explicitAccept) return true;
 	if (/\b(reject(?:ed)?|request changes|changes requested|blocker|blocked|do not merge|not accepted|fail(?:ed)?)\b/.test(text)) return false;
 	if (/\b(accept(?:ed)?|approved?|approve|no blockers?|safe to merge|looks good|pass(?:ed)?)\b/.test(text)) return true;
 	return undefined;
