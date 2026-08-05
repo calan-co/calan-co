@@ -5,7 +5,7 @@ import test from 'node:test';
 function runTuiScript(body) {
   const script = String.raw`
     import assert from 'node:assert/strict';
-    import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+    import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
     import { tmpdir } from 'node:os';
     import { join } from 'node:path';
     import agentWorkflows from './extensions/agent-workflows/index.ts';
@@ -133,6 +133,15 @@ test('backlog config TUI top-level no longer exposes Teams menu', () => {
   `);
 });
 
+test('backlog config TUI exposes custom Work Source action commands', () => {
+  runTuiScript(String.raw`
+    enter(); // Runtime Defaults
+    assert.match(text(), /Work Source Ready Command/);
+    assert.match(text(), /Work Source Validate Command/);
+    assert.match(text(), /Work Source Close Command/);
+  `);
+});
+
 test('backlog config TUI escape cancels fixed-domain field editor', () => {
   runTuiScript(String.raw`
     enter(); // Defaults
@@ -154,6 +163,36 @@ test('backlog config TUI ctrl+q force quits from nested edit mode', () => {
     ctrlQ();
     await runPromise;
     assert.deepEqual(notifications, []);
+  `);
+});
+
+test('backlog config TUI batch save persists doc-vader defaults without expanding pipelines', () => {
+  runTuiScript(String.raw`
+    writeFileSync(join(configDir, 'config.yaml'), [
+      'runtimeVersion: 1',
+      'defaultSandbox: docker',
+      'defaultModel: claude-sonnet-4-6',
+      'defaultPipeline: simple-loop',
+      'entrypoint: work-process-waves',
+      'defaultAgent: claude-code',
+      'maxWorkers: 5',
+      'maxIterations: 10',
+      'workSource: github-issues',
+      'imageNamePattern: "sandcastle:<repo-dir-name>"',
+    ].join('\n'));
+    enter(); // Runtime Defaults
+    for (let i = 0; i < 7; i++) down();
+    enter(); // Work Source
+    down(); down(); down(); enter(); // doc-vader
+    esc(); // main
+    esc(); // unsaved changes
+    down(); enter(); // Save without rebuilding
+    await runPromise;
+    const saved = readFileSync(join(configDir, 'config.yaml'), 'utf8');
+    assert.match(saved, /^workSource: doc-vader/m);
+    assert.match(saved, /^workSourceSetupCommand: dv sandcastle init/m);
+    assert.match(saved, /^workSourceCommands:/m);
+    assert.doesNotMatch(saved, /^pipelines:/m);
   `);
 });
 

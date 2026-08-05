@@ -26,6 +26,7 @@ export interface ConfigShadowSnapshot {
 	maxIterations?: number;
 	workSource?: string;
 	workSourceSetupCommand?: string;
+	workSourceCommands?: Record<string, string>;
 	issueTracker?: string;
 	issueTrackerSetupCommand?: string;
 	imageNamePattern?: string;
@@ -46,6 +47,20 @@ function setNestedValue(root: Record<string, unknown>, parts: string[], value: u
 		current = current[part] as Record<string, unknown>;
 	}
 	current[parts.at(-1)!] = value;
+}
+
+function defaultSettingsForWorkSource(workSource: unknown): { workSourceSetupCommand: string; workSourceCommands: Record<string, string> } | undefined {
+	if (workSource !== "doc-vader") return undefined;
+	return {
+		workSourceSetupCommand: "dv sandcastle init",
+		workSourceCommands: {
+			ready: "dv work ready {{ args }}",
+			list: "dv work list",
+			inspect: "dv work show {{ itemId }}",
+			validate: "dv work validate {{ itemId }}",
+			close: "dv work close {{ itemId }}",
+		},
+	};
 }
 
 function renameRoleReferences(value: unknown, oldName: string, newName: string): void {
@@ -78,8 +93,17 @@ export class ConfigShadowModel extends ShadowModelBase<ConfigShadowSnapshot> {
 	setConfigValue(path: string, value: unknown): void {
 		const before = this.capture();
 		const parts = path.split(".");
-		if (parts.length === 1) (this.state as any)[parts[0]] = value;
-		else if (parts[0] === "roles" && parts.length === 3) {
+		if (parts.length === 1) {
+			(this.state as any)[parts[0]] = value;
+			const workSourceSettings = parts[0] === "workSource" ? defaultSettingsForWorkSource(value) : undefined;
+			if (workSourceSettings) {
+				this.state.workSourceSetupCommand = workSourceSettings.workSourceSetupCommand;
+				this.state.workSourceCommands = workSourceSettings.workSourceCommands;
+			}
+		} else if (parts[0] === "workSourceCommands" && parts.length === 2) {
+			this.state.workSourceCommands ||= {};
+			this.state.workSourceCommands[parts[1]] = String(value ?? "");
+		} else if (parts[0] === "roles" && parts.length === 3) {
 			this.state.agents[parts[1]] ||= { name: parts[1] };
 			if (value === "default" && ["model", "sandbox"].includes(parts[2])) delete (this.state.agents[parts[1]] as any)[parts[2]];
 			else (this.state.agents[parts[1]] as any)[parts[2]] = value;

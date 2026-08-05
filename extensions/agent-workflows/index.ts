@@ -1346,6 +1346,20 @@ function defaultConfigValue(path: string): unknown {
 	return undefined;
 }
 
+function defaultSettingsForWorkSource(workSource: unknown): Pick<SandcastleConfig, "workSourceSetupCommand" | "workSourceCommands"> | undefined {
+	if (workSource !== "doc-vader") return undefined;
+	return {
+		workSourceSetupCommand: "dv sandcastle init",
+		workSourceCommands: {
+			ready: "dv work ready {{ args }}",
+			list: "dv work list",
+			inspect: "dv work show {{ itemId }}",
+			validate: "dv work validate {{ itemId }}",
+			close: "dv work close {{ itemId }}",
+		},
+	};
+}
+
 function removeConfigValueInText(raw: string, path: string): string {
 	const parts = splitConfigPath(path);
 	if (parts[0] !== "roles" || parts.length !== 3) return raw;
@@ -1374,6 +1388,14 @@ function setConfigValueInText(raw: string, path: string, value: unknown): string
 
 	if (parts.length === 1) {
 		const key = parts[0];
+		const workSourceSettings = key === "workSource" ? defaultSettingsForWorkSource(value) : undefined;
+		if (workSourceSettings) {
+			const cfg = normalizeConfig(parseSimpleYaml(raw));
+			cfg.workSource = String(value);
+			cfg.workSourceSetupCommand = workSourceSettings.workSourceSetupCommand;
+			cfg.workSourceCommands = workSourceSettings.workSourceCommands;
+			return configHasExpandedRuntimeSections(raw) ? configToYaml(cfg) : buildDefaultConfigText(cfg);
+		}
 		const replacement = `${key}: ${formatScalarForYaml(value)}`;
 		for (let i = 0; i < lines.length; i++) {
 			if (new RegExp(`^${escapeRegExp(key)}:\\s*`).test(lines[i])) {
@@ -1398,7 +1420,7 @@ function setConfigValueInText(raw: string, path: string, value: unknown): string
 	if (parts[0] === "workSourceCommands" && parts.length === 2) {
 		const cfg = normalizeConfig(parseSimpleYaml(raw));
 		cfg.workSourceCommands = { ...(cfg.workSourceCommands || {}), [parts[1]]: String(value ?? "") };
-		return configToYaml(cfg);
+		return configHasExpandedRuntimeSections(raw) ? configToYaml(cfg) : buildDefaultConfigText(cfg);
 	}
 
 	if (parts[0] === "roles" && parts.length === 3) {
@@ -1524,6 +1546,22 @@ function appendPipelineText(raw: string, name: string): string {
 function resetConfigText(raw: string, path?: string): string {
 	if (!path) return SAMPLE_CONFIG;
 	return setConfigValueInText(raw, path, defaultConfigValue(path));
+}
+
+function configHasExpandedRuntimeSections(raw: string): boolean {
+	return /^(roles|prompts|pipelines):\s*$/m.test(raw);
+}
+
+function actionTouchesExpandedRuntime(action: BacklogConfigAction): boolean {
+	if (["add-agent", "rename-agent", "delete-agent", "add-pipeline", "rename-pipeline", "delete-pipeline", "replace-config", "apply-pack"].includes(action.type)) return true;
+	if (action.type === "set-config") return action.path.startsWith("roles.") || action.path.startsWith("pipelines.");
+	if (action.type === "batch") return action.actions.some(actionTouchesExpandedRuntime);
+	return false;
+}
+
+function configToPersistedYaml(config: SandcastleConfig, originalRaw: string, actions: BacklogConfigAction[]): string {
+	if (!configHasExpandedRuntimeSections(originalRaw) && !actions.some(actionTouchesExpandedRuntime)) return buildDefaultConfigText(config);
+	return configToYaml(config);
 }
 
 function loadConfigSchema(): any {
@@ -2631,7 +2669,20 @@ function scaffoldStatePath(cwd: string): string {
 	return join(cwd, SCAFFOLD_STATE_PATH);
 }
 
+function configuredWorkSource(cfg: SandcastleConfig): string {
+	return cfg.workSource || cfg.issueTracker || "github-issues";
+}
+
+function sandcastleCliIssueTracker(workSource: string): string {
+	return workSource === "doc-vader" ? "custom" : workSource;
+}
+
+function shouldRunWorkSourceSetup(workSource: string): boolean {
+	return workSource === "custom" || workSource === "doc-vader";
+}
+
 function scaffoldSetupSignature(cfg: SandcastleConfig): Record<string, unknown> {
+	const workSource = configuredWorkSource(cfg);
 	return {
 		runtimeVersion: 1,
 		defaultPipeline: cfg.defaultPipeline || "simple-loop",
@@ -2640,8 +2691,9 @@ function scaffoldSetupSignature(cfg: SandcastleConfig): Record<string, unknown> 
 		maxIterations: cfg.maxIterations || 10,
 		defaultSandbox: imageProviderForSandbox(cfg.defaultSandbox) || "docker",
 		defaultModel: cfg.defaultModel && cfg.defaultModel !== DEFAULT_MODEL ? cfg.defaultModel : DEFAULT_MODEL,
-		issueTracker: cfg.workSource || cfg.issueTracker || "github-issues",
-		issueTrackerSetupCommand: (cfg.workSource || cfg.issueTracker) === "custom" ? (cfg.workSourceSetupCommand || cfg.issueTrackerSetupCommand || "") : "",
+		issueTracker: sandcastleCliIssueTracker(workSource),
+		workSource,
+		issueTrackerSetupCommand: shouldRunWorkSourceSetup(workSource) ? (cfg.workSourceSetupCommand || cfg.issueTrackerSetupCommand || "") : "",
 	};
 }
 
@@ -2674,14 +2726,15 @@ async function ensureSandcastleCliScaffold(cwd: string, cfg: SandcastleConfig, o
 		"--template", cfg.defaultPipeline || "simple-loop",
 		"--agent", cfg.defaultAgent || "claude-code",
 		"--sandbox", sandbox,
-		"--issue-tracker", cfg.workSource || cfg.issueTracker || "github-issues",
+		"--issue-tracker", sandcastleCliIssueTracker(configuredWorkSource(cfg)),
 		"--create-label", "false",
 		"--build-image", "false",
 		"--install-template-deps", "true",
 	];
 	if (cfg.defaultModel && cfg.defaultModel !== DEFAULT_MODEL) args.splice(5, 0, "--model", cfg.defaultModel);
 	await runProcess(cwd, "npx", ["@ai-hero/sandcastle", ...args]);
-	if (options.runIssueTrackerSetup && (cfg.workSource || cfg.issueTracker || "github-issues") === "custom" && (cfg.workSourceSetupCommand || cfg.issueTrackerSetupCommand)) await runProcess(cwd, process.env.SHELL || "sh", ["-lc", cfg.workSourceSetupCommand || cfg.issueTrackerSetupCommand!]);
+	const workSource = configuredWorkSource(cfg);
+	if (options.runIssueTrackerSetup && shouldRunWorkSourceSetup(workSource) && (cfg.workSourceSetupCommand || cfg.issueTrackerSetupCommand)) await runProcess(cwd, process.env.SHELL || "sh", ["-lc", cfg.workSourceSetupCommand || cfg.issueTrackerSetupCommand!]);
 	writeScaffoldSetupSignature(cwd, cfg);
 	return { changes: [options.reinitialize ? "reinitialized .sandcastle/" : "wrote .sandcastle/"] };
 }
@@ -3950,6 +4003,11 @@ function friendlyConfigLabel(pathOrField: string): string {
 		maxIterations: "Max Iterations",
 		workSource: "Work Source",
 		workSourceSetupCommand: "Work Source Setup Command",
+		ready: "Ready Command",
+		list: "List Command",
+		inspect: "Inspect Command",
+		validate: "Validate Command",
+		close: "Close Command",
 		issueTracker: "Issue Tracker",
 		issueTrackerSetupCommand: "Issue Tracker Setup Command",
 		imageNamePattern: "Image Name Pattern",
@@ -3981,7 +4039,7 @@ function describeConfigAction(action: BacklogConfigAction, before: SandcastleCon
 
 function configActionRequiresImageRebuild(action: BacklogConfigAction): boolean {
 	if (["init", "apply-pack", "replace-config", "add-agent", "rename-agent", "delete-agent", "add-pipeline", "rename-pipeline", "delete-pipeline"].includes(action.type)) return true;
-	if (action.type === "set-config") return action.path !== "workSourceSetupCommand" && action.path !== "issueTrackerSetupCommand";
+	if (action.type === "set-config") return action.path !== "workSourceSetupCommand" && action.path !== "issueTrackerSetupCommand" && !action.path.startsWith("workSourceCommands.");
 	if (action.type === "batch") return action.actions.some(configActionRequiresImageRebuild);
 	return false;
 }
@@ -4051,7 +4109,15 @@ async function showBacklogConfigTui(ctx: any): Promise<BacklogConfigAction | nul
 		const defaultsScreen = (): Screen => ({
 			title: "RUNTIME DEFAULTS",
 			subtitle: "User-configurable fallback settings; local environment details live under Actions",
-			items: [field("defaultSandbox"), field("defaultModel"), field("defaultPipeline"), field("entrypoint"), field("defaultAgent"), field("maxWorkers"), field("maxIterations"), field("workSource"), field("workSourceSetupCommand"), field("imageNamePattern")],
+			items: [
+				field("defaultSandbox"), field("defaultModel"), field("defaultPipeline"), field("entrypoint"), field("defaultAgent"), field("maxWorkers"), field("maxIterations"), field("workSource"), field("workSourceSetupCommand"),
+				field("workSourceCommands.ready", "Work Source Ready Command"),
+				field("workSourceCommands.list", "Work Source List Command"),
+				field("workSourceCommands.inspect", "Work Source Inspect Command"),
+				field("workSourceCommands.validate", "Work Source Validate Command"),
+				field("workSourceCommands.close", "Work Source Close Command"),
+				field("imageNamePattern"),
+			],
 		});
 
 		const agentsScreen = (): Screen => ({
@@ -5215,8 +5281,9 @@ Work views and processing:
 			if (!action || action.type === "cancel") return;
 			try {
 				if (action.type === "batch" && action.config) {
+					const originalRaw = existsSync(existingConfigPath(ctx.cwd)) ? readExistingConfigText(ctx.cwd) : "";
 					ensureScaffold(ctx.cwd, { hydrate: true });
-					writeFileSync(join(ctx.cwd, CONFIG_PATH), configToYaml(action.config));
+					writeFileSync(join(ctx.cwd, CONFIG_PATH), configToPersistedYaml(action.config, originalRaw, action.actions));
 					ctx.ui.notify(`Saved ${action.actions.length} Agent Workflows config change(s).${action.rebuildImage ? " Starting sandbox image rebuild." : " Rebuild the sandbox image separately when needed."}`, "success");
 					if (action.rebuildImage) startConfigImageRebuild(ctx, action.config);
 					return;

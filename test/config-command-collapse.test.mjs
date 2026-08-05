@@ -56,6 +56,18 @@ test('/work:config owns config subcommands and /work:config-raw remains a compat
     await config.handler('set defaultModel test-model', ctx);
     assert.deepEqual(notifications.at(-1), { message: 'Updated defaultModel. Rebuild the sandbox image separately when needed.', type: 'success' });
 
+    await config.handler('set workSourceCommands.close "custom close {{ itemId }}"', ctx);
+    assert.equal(notifications.at(-1).type, 'success');
+    assert.match(readFileSync(join(cwd, '.pi/sandcastle/config.yaml'), 'utf8'), /^workSourceCommands:\n  close: "custom close \{\{ itemId \}\}"/m);
+    assert.doesNotMatch(readFileSync(join(cwd, '.pi/sandcastle/config.yaml'), 'utf8'), /^pipelines:/m);
+
+    await config.handler('set workSource doc-vader', ctx);
+    const docVaderConfig = readFileSync(join(cwd, '.pi/sandcastle/config.yaml'), 'utf8');
+    assert.match(docVaderConfig, /^workSource: doc-vader/m);
+    assert.match(docVaderConfig, /^workSourceSetupCommand: dv sandcastle init/m);
+    assert.match(docVaderConfig, /^workSourceCommands:\n  ready: "dv work ready \{\{ args \}\}"\n  list: dv work list\n  inspect: "dv work show \{\{ itemId \}\}"\n  validate: "dv work validate \{\{ itemId \}\}"\n  close: "dv work close \{\{ itemId \}\}"/m);
+    assert.doesNotMatch(docVaderConfig, /^pipelines:/m);
+
     await config.handler('reset defaultModel', ctx);
     assert.deepEqual(notifications.at(-1), { message: 'Reset defaultModel to defaults. Rebuild the sandbox image separately when needed.', type: 'success' });
 

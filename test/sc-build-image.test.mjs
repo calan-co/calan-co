@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -26,6 +26,52 @@ function makeRepo(name = 'doc-vader', defaultSandbox = 'docker', options = {}) {
   ].join('\n'));
   return cwd;
 }
+
+test('/work:build-image maps doc-vader to Sandcastle custom issue tracker and runs setup', async () => {
+  const cwd = makeRepo('doc-vader-scaffold', 'podman', { skipSandcastleDir: true });
+  writeFileSync(join(cwd, '.pi', 'sandcastle', 'config.yaml'), [
+    'defaultSandbox: podman',
+    'defaultModel: test-model',
+    'defaultPipeline: parallel-planner-with-review',
+    'defaultAgent: pi',
+    'workSource: doc-vader',
+    'workSourceSetupCommand: dv sandcastle init',
+  ].join('\n'));
+  const bin = join(cwd, 'bin');
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, 'npx'), `#!/usr/bin/env node\nconst { mkdirSync, writeFileSync } = require('node:fs');\nconst { join } = require('node:path');\nwriteFileSync(join(process.cwd(), 'npx-args.json'), JSON.stringify(process.argv.slice(2)));\nmkdirSync(join(process.cwd(), '.sandcastle'), { recursive: true });\n`);
+  writeFileSync(join(bin, 'dv'), `#!/usr/bin/env node\nconst { writeFileSync } = require('node:fs');\nconst { join } = require('node:path');\nwriteFileSync(join(process.cwd(), 'dv-args.json'), JSON.stringify(process.argv.slice(2)));\n`);
+  chmodSync(join(bin, 'npx'), 0o755);
+  chmodSync(join(bin, 'dv'), 0o755);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${bin}:${originalPath}`;
+  const pi = fakePi();
+  const calls = [];
+  const notifications = [];
+  agentWorkflows(pi, {
+    image: {
+      async buildImage(repo, provider, imageName) {
+        calls.push({ repo, provider, imageName });
+      },
+    },
+  });
+
+  try {
+    await pi.commands.get('work:build-image').handler('', {
+      cwd,
+      ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+    });
+  } finally {
+    process.env.PATH = originalPath;
+  }
+
+  const npxArgs = JSON.parse(readFileSync(join(cwd, 'npx-args.json'), 'utf8'));
+  const issueTrackerIndex = npxArgs.indexOf('--issue-tracker');
+  assert.equal(npxArgs[issueTrackerIndex + 1], 'custom');
+  assert.deepEqual(JSON.parse(readFileSync(join(cwd, 'dv-args.json'), 'utf8')), ['sandcastle', 'init']);
+  assert.equal(calls.length, 1);
+  assert.equal(notifications.at(-1).type, 'success');
+});
 
 test('/work:build-image initializes a missing Sandcastle scaffold before building', async () => {
   const cwd = makeRepo('missing-scaffold', 'podman', { skipSandcastleDir: true });
