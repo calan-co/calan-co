@@ -511,6 +511,7 @@ type EditableAgentField = "description" | "kind" | "model" | "sandbox" | "maxIte
 
 const CONFIG_DIR = ".pi/sandcastle";
 const CONFIG_PATH = `${CONFIG_DIR}/config.yaml`;
+const CONFIG_GITIGNORE_PATH = `${CONFIG_DIR}/.gitignore`;
 const RUNNER_PATH = `${CONFIG_DIR}/run-job.mjs`;
 const JOBS_DIR = `${CONFIG_DIR}/jobs`;
 const RESULTS_DIR = `${CONFIG_DIR}/results`;
@@ -530,6 +531,19 @@ const EDITOR_PREF_PATH = `${CONFIG_DIR}/editor`;
 const SCAFFOLD_STATE_PATH = `${CONFIG_DIR}/scaffold-state.json`;
 const CONFIG_SCHEMA_PATH = new URL("./schema/config.schema.json", import.meta.url);
 const inFlightImageBuilds = new Map<string, Promise<void>>();
+
+const CONFIG_GITIGNORE = [
+	"# Agent Workflows transient state",
+	"/jobs/",
+	"/results/",
+	"/runs/",
+	"/plans/",
+	"/logs/",
+	"/worktrees/",
+	"/scaffold-state.json",
+	"/editor",
+	"",
+].join("\n");
 
 
 const RUNNER_VERSION = "agent-workflows-runner-v10";
@@ -956,6 +970,7 @@ function createInvalidBacklogPlanId(createdAt: number): string {
 }
 
 function writeBacklogPlanRecord(cwd: string, record: any): string {
+	ensureConfigGitignore(cwd);
 	mkdirSync(join(cwd, PLANS_DIR), { recursive: true });
 	const recordPath = join(cwd, PLANS_DIR, `${record.id}.json`);
 	writeFileSync(recordPath, JSON.stringify(record, null, 2));
@@ -1160,12 +1175,20 @@ function runnerNeedsRefresh(path: string): boolean {
 		|| text.includes("const base = pi(model && model !== \"Agent Default\"");
 }
 
-function ensureScaffold(cwd: string, options: { overwrite?: boolean; hydrate?: boolean } = {}): { changes: string[]; overwritten: string[] } {
+function ensureConfigGitignore(cwd: string): boolean {
 	mkdirSync(join(cwd, CONFIG_DIR), { recursive: true });
+	const gitignorePath = join(cwd, CONFIG_GITIGNORE_PATH);
+	if (existsSync(gitignorePath)) return false;
+	writeFileSync(gitignorePath, CONFIG_GITIGNORE);
+	return true;
+}
+
+function ensureScaffold(cwd: string, options: { overwrite?: boolean; hydrate?: boolean } = {}): { changes: string[]; overwritten: string[] } {
+	const wroteGitignore = ensureConfigGitignore(cwd);
 	mkdirSync(join(cwd, JOBS_DIR), { recursive: true });
 	mkdirSync(join(cwd, RESULTS_DIR), { recursive: true });
 	mkdirSync(join(cwd, PIPELINE_RUNS_DIR), { recursive: true });
-	const changes: string[] = [];
+	const changes: string[] = wroteGitignore ? [`wrote ${CONFIG_GITIGNORE_PATH}`] : [];
 	const overwritten: string[] = [];
 	const configPath = join(cwd, CONFIG_PATH);
 	const hadConfig = existsSync(configPath);
@@ -1233,7 +1256,7 @@ function getPreferredEditor(cwd: string): string {
 }
 
 function setPreferredEditor(cwd: string, editor: string): void {
-	mkdirSync(join(cwd, CONFIG_DIR), { recursive: true });
+	ensureConfigGitignore(cwd);
 	writeFileSync(join(cwd, EDITOR_PREF_PATH), `${editor.trim()}\n`);
 }
 
