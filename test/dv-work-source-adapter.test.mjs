@@ -4,6 +4,24 @@ import test from 'node:test';
 import { createDocVaderWorkSourceAdapter, createDocVaderWorkSourceHooks } from '../extensions/agent-workflows/work-source-adapters.mjs';
 import { executeGraphWorkflow } from '../extensions/agent-workflows/graph-executor.ts';
 
+test('Doc-Vader Work Source adapter defaults to current Doc-Vader work command surface', async () => {
+  const calls = [];
+  const adapter = createDocVaderWorkSourceAdapter({
+    runCommand: async (command, args, options) => {
+      calls.push({ command, args, options });
+      return { status: 0, stdout: 'ok', stderr: '' };
+    },
+  });
+
+  await adapter.validate({ itemId: 'wi-123', cwd: '/repo', runId: 'run-1' });
+  await adapter.close({ itemId: 'wi-123', cwd: '/repo', runId: 'run-1' });
+
+  assert.deepEqual(calls.map((call) => [call.command, call.args]), [
+    ['dv', ['work', 'status', 'wi-123']],
+    ['dv', ['work', 'update', 'wi-123', '--status', 'closed']],
+  ]);
+});
+
 test('Doc-Vader Work Source adapter builds validate and close callouts with run metadata', async () => {
   const calls = [];
   const adapter = createDocVaderWorkSourceAdapter({

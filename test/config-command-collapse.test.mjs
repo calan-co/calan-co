@@ -65,7 +65,7 @@ test('/work:config owns config subcommands and /work:config-raw remains a compat
     const docVaderConfig = readFileSync(join(cwd, '.pi/sandcastle/config.yaml'), 'utf8');
     assert.match(docVaderConfig, /^workSource: doc-vader/m);
     assert.match(docVaderConfig, /^workSourceSetupCommand: dv sandcastle init/m);
-    assert.match(docVaderConfig, /^workSourceCommands:\n  ready: "dv work ready \{\{ args \}\}"\n  list: dv work list\n  inspect: "dv work show \{\{ itemId \}\}"\n  validate: "dv work validate \{\{ itemId \}\}"\n  close: "dv work close \{\{ itemId \}\}"/m);
+    assert.match(docVaderConfig, /^workSourceCommands:\n  ready: "dv work ready \{\{ args \}\}"\n  list: dv work list\n  inspect: "dv work show \{\{ itemId \}\}"\n  validate: "dv work status \{\{ itemId \}\}"\n  close: "dv work update \{\{ itemId \}\} --status closed"/m);
     assert.doesNotMatch(docVaderConfig, /^pipelines:/m);
 
     await config.handler('reset defaultModel', ctx);

@@ -513,8 +513,8 @@
       "kind": "doc-vader",
       "listCommand": "dv work list",
       "inspectCommand": "dv work show {{ id }}",
-      "validateCommand": "dv work validate {{ id }}",
-      "closeCommand": "dv work close {{ id }}"
+      "validateCommand": "dv work status {{ id }}",
+      "closeCommand": "dv work update {{ id }} --status closed"
     }
   }
 }

@@ -53,16 +53,16 @@ async function runMutation(action, template, fallback, context, runCommand) {
 
 export function createDocVaderWorkSourceAdapter(options = {}) {
   const runCommand = options.runCommand || defaultRunCommand;
-  const validateCommand = options.validateCommand || process.env.DV_SANDCASTLE_VALIDATE_COMMAND || 'dv work validate {{ id }}';
-  const closeCommand = options.closeCommand || process.env.DV_SANDCASTLE_CLOSE_COMMAND || 'dv work close {{ id }}';
+  const validateCommand = options.validateCommand || process.env.DV_SANDCASTLE_VALIDATE_COMMAND || 'dv work status {{ id }}';
+  const closeCommand = options.closeCommand || process.env.DV_SANDCASTLE_CLOSE_COMMAND || 'dv work update {{ id }} --status closed';
   return {
     kind: 'doc-vader',
     capabilities: ['work-source:doc-vader', 'work.validate', 'work.close'],
     async validate(input) {
-      return runMutation('validate', validateCommand, 'dv work validate {{ id }}', input, runCommand);
+      return runMutation('validate', validateCommand, 'dv work status {{ id }}', input, runCommand);
     },
     async close(input) {
-      return runMutation('close', closeCommand, 'dv work close {{ id }}', input, runCommand);
+      return runMutation('close', closeCommand, 'dv work update {{ id }} --status closed', input, runCommand);
     },
   };
 }

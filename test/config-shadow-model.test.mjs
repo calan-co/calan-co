@@ -60,8 +60,8 @@ test('ConfigShadowModel sets Doc-Vader Work Source action commands when selected
     ready: 'dv work ready {{ args }}',
     list: 'dv work list',
     inspect: 'dv work show {{ itemId }}',
-    validate: 'dv work validate {{ itemId }}',
-    close: 'dv work close {{ itemId }}',
+    validate: 'dv work status {{ itemId }}',
+    close: 'dv work update {{ itemId }} --status closed',
   });
 });
 
