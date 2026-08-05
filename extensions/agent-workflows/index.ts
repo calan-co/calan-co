@@ -3021,6 +3021,7 @@ interface PipelineExecutionDeps {
 	makeAgent?: (model: string, provider?: AgentDef["provider"]) => any;
 	loadSandboxProvider?: (kind: AgentDef["sandbox"] | undefined, options?: Record<string, unknown>) => Promise<any>;
 	runGit?: GitCommandRunner;
+	resolveMergeConflict?: (input: { cwd: string; branch: string; targetBranch: string; error: string; context: GraphNodeExecutionContext }) => Promise<{ resolved: boolean; stdout?: string; stderr?: string; commits?: string[]; logPath?: string }>;
 	onStepUpdate?: (step: PipelineRunStepRecord, record: PipelineRunRecord) => void;
 	onStepStreamEvent?: (step: PipelineRunStepRecord, event: unknown, record: PipelineRunRecord) => void;
 	image?: SandboxImageDeps;
@@ -3424,6 +3425,7 @@ async function mergeGraphWorkspaceBranches(
 	context: GraphNodeExecutionContext,
 	deps: PipelineExecutionDeps,
 	targetCwd: string,
+	options: { resolveConflict?: (input: { branch: string; targetBranch: string; error: string }) => Promise<boolean> } = {},
 ): Promise<Partial<GitMergeResult>> {
 	const mergeInputs = Array.isArray((context.node as any).inputs) ? (context.node as any).inputs.filter((entry: unknown): entry is string => typeof entry === "string" && entry.length > 0) : undefined;
 	let candidates = collectWorkspaceMergeCandidates(context.needs, mergeInputs);
@@ -3435,6 +3437,8 @@ async function mergeGraphWorkspaceBranches(
 	await assertGraphGit(deps, targetCwd, ["rev-parse", "--show-toplevel"], `${context.path} git repository check`);
 	const targetBranch = await assertGraphGit(deps, targetCwd, ["rev-parse", "--abbrev-ref", "HEAD"], `${context.path} target branch check`);
 	let previousHead = await assertGraphGit(deps, targetCwd, ["rev-parse", "HEAD"], `${context.path} target HEAD check`);
+	const dirtyStatus = await assertGraphGit(deps, targetCwd, ["status", "--porcelain", "--untracked-files=no"], `${context.path} target worktree cleanliness check`);
+	if (dirtyStatus.trim()) throw new Error(`${context.path} requires a clean target worktree before merging; dirty paths:\n${dirtyStatus.trim()}`);
 	const startHead = previousHead;
 	const mergedBranches: string[] = [];
 	const mergedCommits: string[] = [];
@@ -3443,8 +3447,19 @@ async function mergeGraphWorkspaceBranches(
 	for (const candidate of candidates) {
 		const result = await runGraphGit(deps, targetCwd, ["merge", "--no-ff", "--no-edit", candidate.branch]);
 		if (result.status !== 0) {
-			await runGraphGit(deps, targetCwd, ["merge", "--abort"]);
-			throw new Error(`${context.path} failed to merge '${candidate.branch}' into '${targetBranch}': ${(result.stderr || result.stdout || "merge conflict").trim()}`);
+			const mergeError = (result.stderr || result.stdout || "merge conflict").trim();
+			const resolved = await options.resolveConflict?.({ branch: candidate.branch, targetBranch, error: mergeError });
+			if (!resolved) {
+				await runGraphGit(deps, targetCwd, ["merge", "--abort"]);
+				await runGraphGit(deps, targetCwd, ["reset", "--hard", startHead]);
+				throw new Error(`${context.path} failed to merge '${candidate.branch}' into '${targetBranch}': ${mergeError}`);
+			}
+			const unresolved = await assertGraphGit(deps, targetCwd, ["diff", "--name-only", "--diff-filter=U"], `${context.path} conflict resolution check`);
+			if (unresolved.trim()) {
+				await runGraphGit(deps, targetCwd, ["merge", "--abort"]);
+				await runGraphGit(deps, targetCwd, ["reset", "--hard", startHead]);
+				throw new Error(`${context.path} merger left unresolved conflicts for '${candidate.branch}': ${unresolved.trim()}`);
+			}
 		}
 		const nextHead = await assertGraphGit(deps, targetCwd, ["rev-parse", "HEAD"], `${context.path} post-merge HEAD check`);
 		if (nextHead !== previousHead) {
@@ -3465,6 +3480,73 @@ async function mergeGraphWorkspaceBranches(
 		commits: mergedCommits,
 		effects,
 	};
+}
+
+async function runMergerConflictRole(input: {
+	cwd: string;
+	cfg: SandcastleConfig;
+	record: PipelineRunRecord;
+	branch: string;
+	targetBranch: string;
+	error: string;
+	contextPath: string;
+	deps: PipelineExecutionDeps;
+}): Promise<boolean> {
+	const roleName = "merger";
+	const role = input.cfg.agents[roleName];
+	if (!role) return false;
+	const runtime = resolveAgentRuntimeSettings(role, input.cfg);
+	const stepRecord: PipelineRunStepRecord = {
+		index: input.record.steps.length,
+		role: roleName,
+		status: "running",
+		maxIterations: 1,
+		commits: [],
+		logPath: buildPipelineStepLogPath(input.record.logDir, input.record.steps.length, roleName),
+		kind: "agent.pi",
+		nodePath: `${input.contextPath}.conflictResolver`,
+		branch: input.branch,
+	};
+	input.record.steps.push(stepRecord);
+	await writePipelineRunRecord(input.record);
+	const mergerPrompt = [
+		"A git merge conflict occurred while merging an accepted Agent Workflows branch.",
+		"Resolve the conflict conservatively in the current repository, run focused validation if practical, then commit the merge resolution.",
+		"Do not start unrelated work.",
+		"",
+		`Target branch: ${input.targetBranch}`,
+		`Conflicting branch: ${input.branch}`,
+		`Merge node: ${input.contextPath}`,
+		"",
+		"Merge error:",
+		input.error,
+	].join("\n");
+	let hostPiRuntime: HostPiAgentRuntime | undefined;
+	try {
+		hostPiRuntime = runtime.provider === "pi" ? createHostPiAgentRuntime() : undefined;
+		const sandbox = hostPiRuntime ? resolveSandboxProvider(runtime.sandbox, hostPiSandboxOptions(input.cwd, input.cfg, hostPiRuntime, runtime.sandbox)) : await (input.deps.loadSandboxProvider || loadPipelineSandboxProvider)(runtime.sandbox, withSandboxRuntimeOptions(runtime.sandbox, { imageName: defaultSandcastleImageName(input.cwd, input.cfg.imageNamePattern) }));
+		const result = await sandcastleRun({
+			agent: hostPiRuntime ? createAgentProviderForRuntime(runtime.model, runtime.provider, { hostPiRuntime, sandbox: runtime.sandbox, claudeCodeFactory: input.deps.claudeCode }) : (input.deps.makeAgent ? input.deps.makeAgent(runtime.model, runtime.provider) : createAgentProviderForRuntime(runtime.model, runtime.provider, { sandbox: runtime.sandbox, claudeCodeFactory: input.deps.claudeCode })),
+			sandbox,
+			cwd: input.cwd,
+			prompt: role.systemPrompt ? `${role.systemPrompt}\n\n## Delegated task\n\n${mergerPrompt}` : mergerPrompt,
+			maxIterations: 1,
+			name: `agent-workflows-merger:${input.record.id}`,
+			logging: { type: "file", path: stepRecord.logPath, verbose: true },
+		});
+		stepRecord.status = "completed";
+		stepRecord.commits = getPipelineCommitShas(result.commits);
+		stepRecord.logPath = result.logFilePath || stepRecord.logPath;
+		await writePipelineRunRecord(input.record);
+		return true;
+	} catch (error) {
+		stepRecord.status = "failed";
+		stepRecord.error = error instanceof Error ? error.message : String(error);
+		await writePipelineRunRecord(input.record);
+		return false;
+	} finally {
+		if (hostPiRuntime?.dir) rmSync(hostPiRuntime.dir, { recursive: true, force: true });
+	}
 }
 
 export async function executePipeline(
@@ -3719,7 +3801,12 @@ export async function executePipeline(
 							await laneWorktree.close().catch(() => undefined);
 						}
 					},
-					"git.merge": async (context) => mergeGraphWorkspaceBranches(context, deps, worktree?.worktreePath || cwd),
+					"git.merge": async (context) => mergeGraphWorkspaceBranches(context, deps, worktree?.worktreePath || cwd, {
+						resolveConflict: async ({ branch, targetBranch, error }) => {
+							if (deps.resolveMergeConflict) return (await deps.resolveMergeConflict({ cwd: worktree?.worktreePath || cwd, branch, targetBranch, error, context })).resolved;
+							return runMergerConflictRole({ cwd: worktree?.worktreePath || cwd, cfg, record, branch, targetBranch, error, contextPath: context.path, deps });
+						},
+					}),
 				},
 			}) as CompositeResult;
 			record.nodes = collectGraphNodeRecords(graphResult);

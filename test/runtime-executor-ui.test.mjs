@@ -572,6 +572,155 @@ test('executePipeline graph git.merge fails closed when an effectful input branc
   );
 });
 
+test('executePipeline graph git.merge refuses dirty target worktree before merging', async () => {
+  const repoRoot = await createGraphRepo(baseGraphConfig([
+    '  graph:',
+    '    kind: composite',
+    '    nodes:',
+    '      workspace:',
+    '        kind: git.worktree',
+    '        nodes:',
+    '          implement:',
+    '            kind: agent.pi',
+    '            role: implementer',
+    '            prompt: Implement $INPUT',
+    '      merge:',
+    '        kind: git.merge',
+    '        needs: [workspace]',
+  ]));
+  const gitCalls = [];
+
+  await assert.rejects(
+    executePipeline(repoRoot, 'graph', 'dirty target merge', {
+      now: () => 1700000004700,
+      createWorktree: async () => fakeWorktree(repoRoot, async (options) => ({
+        iterations: [],
+        commits: [{ sha: 'fake-sha' }],
+        branch: 'feature/dirty',
+        stdout: '',
+        logFilePath: options.logging.path,
+      }), { branch: 'feature/dirty' }),
+      loadSandboxProvider: async (kind) => ({ kind }),
+      makeAgent: (model, provider) => ({ model, provider }),
+      runGit: async (args) => {
+        gitCalls.push(args);
+        if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return { status: 0, stdout: `${repoRoot}\n`, stderr: '' };
+        if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return { status: 0, stdout: 'main\n', stderr: '' };
+        if (args[0] === 'rev-parse' && args[1] === 'HEAD') return { status: 0, stdout: 'base-head\n', stderr: '' };
+        if (args[0] === 'status') return { status: 0, stdout: ' M .pi/sandcastle/config.yaml\n', stderr: '' };
+        if (args[0] === 'merge') return { status: 0, stdout: 'merged\n', stderr: '' };
+        return { status: 0, stdout: '', stderr: '' };
+      },
+    }),
+    /requires a clean target worktree/,
+  );
+  assert.equal(gitCalls.some((args) => args[0] === 'merge'), false);
+});
+
+test('executePipeline graph git.merge delegates conflicts to merger resolver before completing', async () => {
+  const repoRoot = await createGraphRepo(baseGraphConfig([
+    '  graph:',
+    '    kind: composite',
+    '    nodes:',
+    '      workspace:',
+    '        kind: git.worktree',
+    '        nodes:',
+    '          implement:',
+    '            kind: agent.pi',
+    '            role: implementer',
+    '            prompt: Implement $INPUT',
+    '      merge:',
+    '        kind: git.merge',
+    '        needs: [workspace]',
+  ]));
+  const resolverCalls = [];
+  let head = 'base-head';
+  const gitCalls = [];
+
+  const record = await executePipeline(repoRoot, 'graph', 'merge with resolver', {
+    now: () => 1700000004750,
+    createWorktree: async () => fakeWorktree(repoRoot, async (options) => ({
+      iterations: [],
+      commits: [{ sha: 'feature-sha' }],
+      branch: 'feature/conflict',
+      stdout: '',
+      logFilePath: options.logging.path,
+    }), { branch: 'feature/conflict' }),
+    resolveMergeConflict: async (input) => {
+      resolverCalls.push(input);
+      head = 'resolved-merge-head';
+      return { resolved: true, commits: [head] };
+    },
+    runGit: async (args) => {
+      gitCalls.push(args);
+      if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return { status: 0, stdout: `${repoRoot}\n`, stderr: '' };
+      if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return { status: 0, stdout: 'main\n', stderr: '' };
+      if (args[0] === 'rev-parse' && args[1] === 'HEAD') return { status: 0, stdout: `${head}\n`, stderr: '' };
+      if (args[0] === 'status') return { status: 0, stdout: '', stderr: '' };
+      if (args[0] === 'merge') return { status: 1, stdout: 'CONFLICT (content): file.txt\n', stderr: '' };
+      if (args[0] === 'diff') return { status: 0, stdout: '', stderr: '' };
+      return { status: 0, stdout: '', stderr: '' };
+    },
+    loadSandboxProvider: async (kind) => ({ kind }),
+    makeAgent: (model, provider) => ({ model, provider }),
+  });
+
+  assert.equal(record.status, 'completed');
+  assert.equal(resolverCalls.length, 1);
+  assert.equal(resolverCalls[0].branch, 'feature/conflict');
+  assert.equal(gitCalls.some((args) => args[0] === 'merge' && args[1] === '--abort'), false);
+  assert.deepEqual(record.nodes.find((node) => node.nodePath === 'root.nodes.merge').mergedBranches, ['feature/conflict']);
+});
+
+test('executePipeline graph git.merge aborts and resets when resolver leaves conflicts', async () => {
+  const repoRoot = await createGraphRepo(baseGraphConfig([
+    '  graph:',
+    '    kind: composite',
+    '    nodes:',
+    '      workspace:',
+    '        kind: git.worktree',
+    '        nodes:',
+    '          implement:',
+    '            kind: agent.pi',
+    '            role: implementer',
+    '            prompt: Implement $INPUT',
+    '      merge:',
+    '        kind: git.merge',
+    '        needs: [workspace]',
+  ]));
+  const gitCalls = [];
+
+  await assert.rejects(
+    executePipeline(repoRoot, 'graph', 'unresolved merge with resolver', {
+      now: () => 1700000004775,
+      createWorktree: async () => fakeWorktree(repoRoot, async (options) => ({
+        iterations: [],
+        commits: [{ sha: 'feature-sha' }],
+        branch: 'feature/unresolved',
+        stdout: '',
+        logFilePath: options.logging.path,
+      }), { branch: 'feature/unresolved' }),
+      resolveMergeConflict: async () => ({ resolved: true }),
+      runGit: async (args) => {
+        gitCalls.push(args);
+        if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return { status: 0, stdout: `${repoRoot}\n`, stderr: '' };
+        if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return { status: 0, stdout: 'main\n', stderr: '' };
+        if (args[0] === 'rev-parse' && args[1] === 'HEAD') return { status: 0, stdout: 'base-head\n', stderr: '' };
+        if (args[0] === 'status') return { status: 0, stdout: '', stderr: '' };
+        if (args[0] === 'merge' && args[1] === '--no-ff') return { status: 1, stdout: 'CONFLICT (content): file.txt\n', stderr: '' };
+        if (args[0] === 'diff') return { status: 0, stdout: 'file.txt\n', stderr: '' };
+        return { status: 0, stdout: '', stderr: '' };
+      },
+      loadSandboxProvider: async (kind) => ({ kind }),
+      makeAgent: (model, provider) => ({ model, provider }),
+    }),
+    /merger left unresolved conflicts/,
+  );
+
+  assert.equal(gitCalls.some((args) => args[0] === 'merge' && args[1] === '--abort'), true);
+  assert.equal(gitCalls.some((args) => args[0] === 'reset' && args[1] === '--hard' && args[2] === 'base-head'), true);
+});
+
 test('executePipeline graph git.merge fails closed on merge conflicts', async () => {
   const repoRoot = await createGraphRepo(baseGraphConfig([
     '  graph:',

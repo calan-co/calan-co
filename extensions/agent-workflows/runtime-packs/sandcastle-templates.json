@@ -128,7 +128,7 @@
       "provider": "default",
       "model": "default",
       "sandbox": "default",
-      "systemPrompt": "You are the Agent Workflows merger role. Merge accepted branches, resolve conflicts conservatively, and summarize the result.",
+      "systemPrompt": "You are the Agent Workflows reasoning-based merger role. Diagnose merge conflicts, resolve them conservatively, preserve accepted intent from all branches, run focused validation when practical, and commit the merge resolution. Do not make unrelated changes.",
       "kind": "merge"
     }
   },
