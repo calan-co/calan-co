@@ -513,6 +513,7 @@ type EditableAgentField = "description" | "kind" | "model" | "sandbox" | "maxIte
 const CONFIG_DIR = ".pi/sandcastle";
 const CONFIG_PATH = `${CONFIG_DIR}/config.yaml`;
 const CONFIG_GITIGNORE_PATH = `${CONFIG_DIR}/.gitignore`;
+const ROOT_GITIGNORE_PATH = ".gitignore";
 const RUNNER_PATH = `${CONFIG_DIR}/run-job.mjs`;
 const JOBS_DIR = `${CONFIG_DIR}/jobs`;
 const RESULTS_DIR = `${CONFIG_DIR}/results`;
@@ -543,6 +544,17 @@ const CONFIG_GITIGNORE = [
 	"/worktrees/",
 	"/scaffold-state.json",
 	"/editor",
+	"",
+].join("\n");
+
+const ROOT_GITIGNORE = [
+	"# Agent Workflows transient state and binaries",
+	".pi/sandcastle/jobs/",
+	".pi/sandcastle/results/",
+	".pi/sandcastle/run-job.mjs",
+	".pi/sandcastle/scaffold-state.json",
+	".pi-subagents/",
+	".doc-vader/runtime/",
 	"",
 ].join("\n");
 
@@ -1186,12 +1198,23 @@ function ensureConfigGitignore(cwd: string): boolean {
 	return true;
 }
 
+function ensureRootGitignore(cwd: string): boolean {
+	const gitignorePath = join(cwd, ROOT_GITIGNORE_PATH);
+	if (existsSync(gitignorePath)) return false;
+	writeFileSync(gitignorePath, ROOT_GITIGNORE);
+	return true;
+}
+
 function ensureScaffold(cwd: string, options: { overwrite?: boolean; hydrate?: boolean } = {}): { changes: string[]; overwritten: string[] } {
 	const wroteGitignore = ensureConfigGitignore(cwd);
+	const wroteRootGitignore = ensureRootGitignore(cwd);
 	mkdirSync(join(cwd, JOBS_DIR), { recursive: true });
 	mkdirSync(join(cwd, RESULTS_DIR), { recursive: true });
 	mkdirSync(join(cwd, PIPELINE_RUNS_DIR), { recursive: true });
-	const changes: string[] = wroteGitignore ? [`wrote ${CONFIG_GITIGNORE_PATH}`] : [];
+	const changes: string[] = [
+		...(wroteGitignore ? [`wrote ${CONFIG_GITIGNORE_PATH}`] : []),
+		...(wroteRootGitignore ? [`wrote ${ROOT_GITIGNORE_PATH}`] : []),
+	];
 	const overwritten: string[] = [];
 	const configPath = join(cwd, CONFIG_PATH);
 	const hadConfig = existsSync(configPath);

@@ -46,18 +46,28 @@ test('/work:config-raw init creates a sandcastle .gitignore for transient files'
     assert.match(gitignore, new RegExp(`^${entry.replaceAll('/', '\\/')}$`, 'm'));
   }
   assert.doesNotMatch(gitignore, /^\/config\.yaml$/m);
+
+  const rootGitignorePath = join(cwd, '.gitignore');
+  assert.equal(existsSync(rootGitignorePath), true);
+  const rootGitignore = readFileSync(rootGitignorePath, 'utf8');
+  for (const entry of ['.pi/sandcastle/jobs/', '.pi/sandcastle/results/', '.pi/sandcastle/run-job.mjs', '.pi/sandcastle/scaffold-state.json', '.pi-subagents/', '.doc-vader/runtime/']) {
+    assert.match(rootGitignore, new RegExp(`^${entry.replaceAll('.', '\\.').replaceAll('/', '\\/')}$`, 'm'));
+  }
 });
 
-test('agent-workflows scaffold preserves an existing sandcastle .gitignore', async () => {
+test('agent-workflows scaffold preserves existing gitignore files', async () => {
   const commands = registerCommands();
   const cwd = mkdtempSync(join(tmpdir(), 'agent-workflows-gitignore-'));
   const configDir = join(cwd, '.pi', 'sandcastle');
   mkdirSync(configDir, { recursive: true });
   const gitignorePath = join(configDir, '.gitignore');
+  const rootGitignorePath = join(cwd, '.gitignore');
   writeFileSync(gitignorePath, 'custom-entry\n', { flag: 'wx' });
+  writeFileSync(rootGitignorePath, 'project-entry\n', { flag: 'wx' });
   const { ctx } = context(cwd);
 
   await commands.get('work:config-raw').handler('init', ctx);
 
   assert.equal(readFileSync(gitignorePath, 'utf8'), 'custom-entry\n');
+  assert.equal(readFileSync(rootGitignorePath, 'utf8'), 'project-entry\n');
 });
