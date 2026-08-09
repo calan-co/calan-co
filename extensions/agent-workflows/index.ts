@@ -211,6 +211,7 @@ interface WorkItem {
 	dependencies: string[];
 	dependsOn: string[];
 	acceptanceCriteria: string[];
+	status?: string;
 	estimate?: number;
 	estimated?: number;
 }
@@ -1099,6 +1100,7 @@ function readWorkItems(cwd: string): WorkItem[] {
 				dependencies,
 				dependsOn: dependencies,
 				acceptanceCriteria,
+				status: frontmatter.status,
 				estimate,
 				estimated: estimate,
 			};
@@ -1133,10 +1135,11 @@ function inferRecommendedPipeline(query: string, items: BacklogItem[]): string {
 }
 
 async function defaultPlanBacklogProcessing(cwd: string, query: string): Promise<BacklogPlanResult> {
-	const allItems = readBacklogItems(cwd);
-	const matchingItems = allItems.filter((item) => matchesBacklogQuery(item, query));
-	const fallbackItems = allItems.slice(0, 1);
+	const readyItems = readBacklogItems(cwd).filter((item) => item.status === "ready");
+	const matchingItems = readyItems.filter((item) => matchesBacklogQuery(item, query));
+	const fallbackItems = readyItems.slice(0, 1);
 	const items = matchingItems.length > 0 ? matchingItems : fallbackItems;
+	if (!items.length) return { query, iterations: [] };
 	const rationale = items.length > 1
 		? "The first recommended iteration contains independent Work Items that can run in parallel."
 		: "The first recommended iteration focuses on the best matching Work Item.";

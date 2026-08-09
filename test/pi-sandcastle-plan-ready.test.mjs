@@ -27,6 +27,68 @@ function makeRepo() {
   return cwd;
 }
 
+test('default local planner selects only explicitly ready Work Items for queries and fallback', async () => {
+  const cwd = makeRepo();
+  mkdirSync(join(cwd, 'backlog'));
+  writeFileSync(join(cwd, 'backlog', '00001-ready.md'), `---
+id: wi-ready
+title: Ready fallback item
+status: ready
+---
+
+## Goal
+
+Ready work.`);
+  writeFileSync(join(cwd, 'backlog', '00002-closed.md'), `---
+id: wi-closed
+title: Closed query match
+status: closed
+---
+
+## Goal
+
+Completed work.`);
+  const pi = fakePi();
+  const notifications = [];
+  agentWorkflows(pi, {});
+
+  await pi.commands.get('work:ready').handler('closed query match', {
+    cwd,
+    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  });
+  await pi.commands.get('work:ready').handler('no matching query', {
+    cwd,
+    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  });
+  assert.doesNotMatch(notifications[0].message, /wi-closed/);
+  assert.match(notifications[0].message, /wi-ready/);
+  assert.match(notifications[1].message, /wi-ready/);
+
+  const noReadyCwd = makeRepo();
+  mkdirSync(join(noReadyCwd, 'backlog'));
+  writeFileSync(join(noReadyCwd, 'backlog', '00003-closed.md'), `---
+id: wi-closed-only
+title: Closed only item
+status: closed
+---
+
+## Goal
+
+Completed work.`);
+  await pi.commands.get('work:ready').handler('', {
+    cwd: noReadyCwd,
+    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  });
+  await pi.commands.get('work:process').handler('', {
+    cwd: noReadyCwd,
+    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  });
+
+  assert.deepEqual(notifications[2], { message: 'Query: (none)', type: 'info' });
+  assert.equal(notifications[3].type, 'error');
+  assert.match(notifications[3].message, /No currently executable Work Items were selected/);
+});
+
 test('Agent Workflows registers /work planning commands without /backlog aliases', async () => {
   const pi = fakePi();
   agentWorkflows(pi, {});
