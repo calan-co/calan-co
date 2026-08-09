@@ -4631,7 +4631,8 @@ export default function agentWorkflows(
 	};
 
 	function refreshWidget() {
-		widgetCtx?.ui.setWidget("agent-workflows", renderWidget(runs));
+		if (!widgetCtx) return;
+		widgetCtx.ui.setWidget("agent-workflows", renderWidget(runs));
 		if ([...runs.values()].some((run) => run.status === "running") && !widgetRefreshTimer) {
 			widgetRefreshTimer = setTimeout(() => {
 				widgetRefreshTimer = undefined;
@@ -5222,6 +5223,11 @@ Work views and processing:
 	});
 
 	pi.on("session_shutdown", () => {
+		if (widgetRefreshTimer) {
+			clearTimeout(widgetRefreshTimer);
+			widgetRefreshTimer = undefined;
+		}
+		widgetCtx = undefined;
 		for (const run of runs.values()) if (run.status === "running") run.proc?.kill("SIGTERM");
 	});
 

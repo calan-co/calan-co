@@ -6,7 +6,7 @@ import test from 'node:test';
 
 import agentWorkflows from '../extensions/agent-workflows/index.ts';
 
-async function setupProcessGraphRepo({ noEffects = false, actualRole = 'implementer' } = {}) {
+async function setupProcessGraphRepo({ noEffects = false, actualRole = 'implementer', onPipelineRun } = {}) {
   const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-process-graph-'));
   await fs.mkdir(path.join(repoRoot, '.pi/sandcastle'), { recursive: true });
   await fs.writeFile(path.join(repoRoot, '.pi/sandcastle/config.yaml'), [
@@ -85,6 +85,7 @@ async function setupProcessGraphRepo({ noEffects = false, actualRole = 'implemen
         close: async () => ({}),
         run: async (options) => {
           runCalls.push(options);
+          await onPipelineRun?.(options);
           const index = runCalls.length;
           return {
             iterations: [],
@@ -118,7 +119,7 @@ async function setupProcessGraphRepo({ noEffects = false, actualRole = 'implemen
     },
   };
   await events.get('session_start')?.({}, ctx);
-  return { repoRoot, commands, ctx, notifications, widgets, runCalls };
+  return { repoRoot, commands, ctx, events, notifications, widgets, runCalls };
 }
 
 async function readWorkProcessRecords(repoRoot) {
@@ -197,6 +198,51 @@ test('work:process graph status rows use actual graph lane agents instead of syn
     assert.ok(allWidgetLines.some((line) => /\bworker\s+\d+s · item wi-2; node root\.nodes\.work\.iterations\.1\.nodes\.implement; lane [^;]+; /.test(line)), 'graph widget should show actual wi-2 worker lane');
     assert.equal(allWidgetLines.some((line) => /implementer/.test(line)), false, 'graph widget must not preallocate stale implementer rows');
   } finally {
+    await fs.rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test('session shutdown cancels widget refresh and prevents stale widget renders', async () => {
+  let releasePipelineRun;
+  let pipelineRunStarted;
+  const pipelineRunStartedPromise = new Promise((resolve) => { pipelineRunStarted = resolve; });
+  const pipelineRunComplete = new Promise((resolve) => { releasePipelineRun = resolve; });
+  const { repoRoot, commands, ctx, events, widgets } = await setupProcessGraphRepo({
+    onPipelineRun: async () => {
+      pipelineRunStarted();
+      await pipelineRunComplete;
+    },
+  });
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const scheduledTimers = [];
+  const clearedTimers = [];
+  globalThis.setTimeout = ((callback, delay, ...args) => {
+    const timer = { callback, delay, args, unref() {} };
+    scheduledTimers.push(timer);
+    return timer;
+  });
+  globalThis.clearTimeout = ((timer) => { clearedTimers.push(timer); });
+
+  try {
+    const processing = commands.get('work:process').handler('graph', ctx);
+    await pipelineRunStartedPromise;
+    assert.equal(scheduledTimers.length, 1, 'running work should schedule a widget refresh');
+
+    events.get('session_shutdown')?.();
+    assert.deepEqual(clearedTimers, [scheduledTimers[0]], 'session shutdown should cancel the pending refresh');
+
+    const widgetCount = widgets.length;
+    scheduledTimers[0].callback(...scheduledTimers[0].args);
+    assert.equal(widgets.length, widgetCount, 'a stale timer callback must not render after shutdown');
+    assert.equal(scheduledTimers.length, 1, 'a stale timer callback must not schedule another refresh');
+
+    releasePipelineRun();
+    await processing;
+  } finally {
+    releasePipelineRun?.();
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
     await fs.rm(repoRoot, { recursive: true, force: true });
   }
 });
