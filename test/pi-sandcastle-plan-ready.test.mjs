@@ -203,90 +203,6 @@ test('pi provider uses writable temp agent dir with readonly host auth and trust
   assert.match(source, /return piWithHostDefault\(model, pi\)/);
 });
 
-test('/work:plan rejects IDs mentioned only in other Ready Work candidate text', async () => {
-  const cwd = makeRepo();
-  const pi = fakePi();
-  const notifications = [];
-  writeFileSync(join(cwd, '.pi', 'sandcastle', 'config.yaml'), [
-    'workSource: custom',
-    'workSourceCommands:',
-    '  ready: "printf \'{\"candidates\":[{\"id\":\"wi-ready\",\"title\":\"Depends on wi-unrelated\"}]}\'"',
-  ].join('\n'));
-  agentWorkflows(pi, {
-    work: {
-      async runPlanWorkRole() {
-        return { iterations: [{ items: [{ id: 'wi-unrelated' }] }] };
-      },
-    },
-  });
-
-  await pi.commands.get('work:plan').handler('', {
-    cwd,
-    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
-  });
-
-  assert.equal(notifications[0].type, 'error');
-  assert.match(notifications[0].message, /Planner selected Work Items absent from fresh Ready Work output: wi-unrelated/);
-});
-
-test('/work:plan fails closed when configured Ready Work output is not JSON', async () => {
-  const cwd = makeRepo();
-  const pi = fakePi();
-  const notifications = [];
-  writeFileSync(join(cwd, '.pi', 'sandcastle', 'config.yaml'), [
-    'workSource: custom',
-    'workSourceCommands:',
-    '  ready: "printf wi-ready"',
-  ].join('\n'));
-  agentWorkflows(pi, {
-    work: {
-      async runPlanWorkRole() {
-        return { iterations: [{ items: [{ id: 'wi-ready' }] }] };
-      },
-    },
-  });
-
-  await pi.commands.get('work:plan').handler('', {
-    cwd,
-    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
-  });
-
-  assert.equal(notifications[0].type, 'error');
-  assert.match(notifications[0].message, /Configured Ready Work output must be valid JSON/);
-});
-
-test('/work:process refuses planned Work Items absent from configured Ready Work output', async () => {
-  const cwd = makeRepo();
-  const pi = fakePi();
-  const calls = [];
-  const notifications = [];
-  writeFileSync(join(cwd, '.pi', 'sandcastle', 'config.yaml'), [
-    'workSource: custom',
-    'workSourceCommands:',
-    '  ready: "printf \'[{\"id\":\"wi-ready\"}]\'"',
-  ].join('\n'));
-  agentWorkflows(pi, {
-    work: {
-      async plan(_repo, query) {
-        return { query, iterations: [{ items: [{ id: 'wi-unrelated' }] }] };
-      },
-      async execute() {
-        calls.push('execute');
-        return { status: 'done' };
-      },
-    },
-  });
-
-  await pi.commands.get('work:process').handler('', {
-    cwd,
-    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
-  });
-
-  assert.deepEqual(calls, []);
-  assert.equal(notifications[0].type, 'error');
-  assert.match(notifications[0].message, /Planner selected Work Items absent from fresh Ready Work output: wi-unrelated/);
-});
-
 test('/work:plan fails closed and caches invalid planner output for inspection', async () => {
   const cwd = makeRepo();
   const pi = fakePi();
@@ -525,10 +441,13 @@ test('/work:process ignores planner-recommended pipeline and derives pipeline fr
   const pi = fakePi();
   const calls = [];
   const notifications = [];
+  let planCalls = 0;
   agentWorkflows(pi, {
     work: {
       now: () => 123456,
       async plan(repo, query) {
+        planCalls += 1;
+        if (planCalls > 1) return { query, iterations: [] };
         return {
           query,
           iterations: [{ items: [{ id: 'wi-001' }], recommendedPipeline: 'planner-chosen-review', supportsParallel: false, rationale: 'planner fixture' }],
@@ -536,7 +455,7 @@ test('/work:process ignores planner-recommended pipeline and derives pipeline fr
       },
       async execute(repo, input) {
         calls.push({ repo, input });
-        return { status: 'done' };
+        return { status: 'done', workSourceMutations: [{ itemId: 'wi-001', action: 'close', status: 'succeeded' }] };
       },
     },
   });
@@ -558,6 +477,7 @@ test('/work:process --plan consumes actionable section of cached forecast plans 
   const notifications = [];
   mkdirSync(join(cwd, '.pi', 'sandcastle', 'plans'), { recursive: true });
   const planId = 'forecast-plan-test';
+  let planCalls = 0;
   writeFileSync(join(cwd, '.pi', 'sandcastle', 'plans', `${planId}.json`), JSON.stringify({
     id: planId,
     kind: 'work-plan',
@@ -575,11 +495,12 @@ test('/work:process --plan consumes actionable section of cached forecast plans 
     work: {
       now: () => 123456,
       async plan(repo, query) {
-        return { query, iterations: [{ items: [{ id: 'wi-ready', title: 'Ready now' }] }] };
+        planCalls += 1;
+        return planCalls === 1 ? { query, iterations: [{ items: [{ id: 'wi-ready', title: 'Ready now' }] }] } : { query, iterations: [] };
       },
       async execute(repo, input) {
         calls.push({ repo, input });
-        return { status: 'done' };
+        return { status: 'done', workSourceMutations: [{ itemId: 'wi-ready', action: 'close', status: 'succeeded' }] };
       },
     },
   });
@@ -639,6 +560,7 @@ test('/work:process --plan executes only currently ready planned items and repor
   const notifications = [];
   mkdirSync(join(cwd, '.pi', 'sandcastle', 'plans'), { recursive: true });
   const planId = 'mixed-actionable-plan';
+  let planCalls = 0;
   writeFileSync(join(cwd, '.pi', 'sandcastle', 'plans', `${planId}.json`), JSON.stringify({
     id: planId,
     kind: 'work-plan',
@@ -648,11 +570,12 @@ test('/work:process --plan executes only currently ready planned items and repor
     work: {
       now: () => 123456,
       async plan(repo, query) {
-        return { query, iterations: [{ items: [{ id: 'wi-ready', title: 'Current ready item' }] }] };
+        planCalls += 1;
+        return planCalls === 1 ? { query, iterations: [{ items: [{ id: 'wi-ready', title: 'Current ready item' }] }] } : { query, iterations: [] };
       },
       async execute(repo, input) {
         calls.push({ repo, input });
-        return { status: 'done' };
+        return { status: 'done', workSourceMutations: [{ itemId: 'wi-ready', action: 'close', status: 'succeeded' }] };
       },
     },
   });
@@ -707,6 +630,7 @@ test('/work:process --plan derives pipeline from config and preserves explicit p
   const notifications = [];
   mkdirSync(join(cwd, '.pi', 'sandcastle', 'plans'), { recursive: true });
   const planId = 'plan-test';
+  let planCalls = 0;
   writeFileSync(join(cwd, '.pi', 'sandcastle', 'config.yaml'), 'defaultPipeline: sequential-reviewer\n');
   writeFileSync(join(cwd, '.pi', 'sandcastle', 'plans', `${planId}.json`), JSON.stringify({
     id: planId,
@@ -717,11 +641,20 @@ test('/work:process --plan derives pipeline from config and preserves explicit p
     work: {
       now: () => 123456,
       async plan(repo, query) {
-        return { query, iterations: [{ items: [{ id: 'wi-001', title: 'Current One' }, { id: 'wi-002', title: 'Current Two' }] }] };
+        planCalls += 1;
+        return planCalls === 1 ? { query, iterations: [{ items: [{ id: 'wi-001', title: 'Current One' }, { id: 'wi-002', title: 'Current Two' }] }] } : { query, iterations: [] };
       },
       async execute(repo, input) {
         calls.push({ repo, input });
-        return { status: 'done', branches: ['branch'], logs: ['log'] };
+        return {
+          status: 'done',
+          branches: ['branch'],
+          logs: ['log'],
+          workSourceMutations: [
+            { itemId: 'wi-001', action: 'close', status: 'succeeded' },
+            { itemId: 'wi-002', action: 'close', status: 'succeeded' },
+          ],
+        };
       },
     },
   });

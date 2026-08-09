@@ -66,6 +66,12 @@ export interface RuntimeRefMeta {
 	default?: string;
 }
 
+export interface RuntimeCloseFinalizer {
+	role?: string;
+	prompt?: string;
+	promptOverride?: string;
+}
+
 export interface RuntimePipelineNode {
 	kind?: string;
 	$?: RuntimeRefMeta;
@@ -76,11 +82,13 @@ export interface RuntimePipelineNode {
 	role?: string;
 	prompt?: string;
 	promptOverride?: string;
+	finalize?: RuntimeCloseFinalizer;
 	workSource?: string;
 	issueTracker?: string;
 	each?: string;
 	mode?: "sequential" | "parallel";
 	max?: number;
+	maxIterations?: number;
 	node?: RuntimePipelineNode;
 	nodes?: Record<string, RuntimePipelineNode>;
 	image?: RuntimeContainerImage;
@@ -233,6 +241,8 @@ function validateNode(scope: string, id: string, node: RuntimePipelineNode, erro
 		}
 	}
 	if (node.kind === "command" && (typeof node.command !== "string" || !node.command.trim())) errors.push(`${nodeScope} command nodes must define command`);
+	if (node.maxIterations !== undefined && (!Number.isInteger(node.maxIterations) || node.maxIterations < 1)) errors.push(`${nodeScope} maxIterations must be a positive integer`);
+	if (node.finalize !== undefined) validateCloseFinalizer(nodeScope, node, errors, pack);
 	if (node.kind === "agent.pi") {
 		if (!node.role) errors.push(`${nodeScope} must reference a role`);
 		if (!node.prompt) errors.push(`${nodeScope} must reference a prompt`);
@@ -254,6 +264,20 @@ function validateNode(scope: string, id: string, node: RuntimePipelineNode, erro
 	if (node.prompt && node.prompt !== "default" && !pack.prompts?.[node.prompt]) errors.push(`${nodeScope} references unknown prompt '${node.prompt}'`);
 	for (const [childId, child] of Object.entries(node.nodes || {})) validateNode(nodeScope, childId, child, errors, pack);
 	if (node.node) validateNode(nodeScope, "node", node.node, errors, pack);
+}
+
+function validateCloseFinalizer(nodeScope: string, node: RuntimePipelineNode, errors: string[], pack: ExecutionRuntimePack): void {
+	if (node.kind !== "work.close") errors.push(`${nodeScope} finalize is supported only on work.close nodes`);
+	if (!isRecord(node.finalize)) {
+		errors.push(`${nodeScope} finalize must be an object`);
+		return;
+	}
+	const finalizer = node.finalize;
+	const hasPrompt = typeof finalizer.prompt === "string" && finalizer.prompt.trim().length > 0;
+	const hasPromptOverride = typeof finalizer.promptOverride === "string" && finalizer.promptOverride.trim().length > 0;
+	if (!hasPrompt && !hasPromptOverride) errors.push(`${nodeScope} finalize must define prompt or promptOverride`);
+	if (finalizer.role !== undefined && finalizer.role !== "default" && !pack.roles?.[finalizer.role]) errors.push(`${nodeScope} finalize references unknown role '${finalizer.role}'`);
+	if (finalizer.prompt !== undefined && finalizer.prompt !== "default" && !pack.prompts?.[finalizer.prompt]) errors.push(`${nodeScope} finalize references unknown prompt '${finalizer.prompt}'`);
 }
 
 export function listRuntimePipelines(pack = loadExecutionRuntimePack()): Array<{ name: string; description: string }> {

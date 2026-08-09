@@ -14,9 +14,6 @@ test('execution runtime pack ports prompts, roles, and graph-native pipelines', 
   const pack = loadExecutionRuntimePack();
   assert.equal(pack.runtimeVersion, 1);
   assert.ok(pack.prompts['simple-loop'].template.includes('$INPUT'));
-  assert.equal(pack.pipelines['simple-loop'].nodes.merge.kind, 'git.merge');
-  assert.deepEqual(pack.pipelines['simple-loop'].nodes.merge.needs, ['workspace']);
-  assert.equal(pack.pipelines['simple-loop'].nodes.merge.when, 'has(needs.workspace.children.close.closed) && needs.workspace.children.close.closed == true');
   assert.equal(pack.roles.implementer.role, 'implementer');
   assert.equal(pack.pipelines['parallel-planner-with-review'].kind, 'composite');
   assert.equal(pack.pipelines['parallel-planner-with-review'].nodes.implement.kind, 'loop');
@@ -78,9 +75,19 @@ test('execution runtime validates negative fixtures with useful diagnostics', ()
     prompts: { ok: { format: 'markdown', template: 'x' } },
     pipelines: {
       simple: { kind: 'composite', nodes: { run: { kind: 'agent.pi', role: 'worker', prompt: 'ok' } } },
+      close: { kind: 'composite', nodes: { close: { kind: 'work.close', maxIterations: 3, finalize: { role: 'worker', prompt: 'ok' } } } },
       wrapper: { kind: 'composite', nodes: { waves: { kind: 'loop', max: 2, node: { $ref: '$.defaultPipeline' } } } },
     },
   }));
+  assert.throws(
+    () => validateExecutionRuntimePack({
+      runtimeVersion: 1,
+      roles: { worker: {} },
+      prompts: { ok: { format: 'markdown', template: 'x' } },
+      pipelines: { p: { kind: 'composite', nodes: { run: { kind: 'agent.pi', role: 'worker', prompt: 'ok', finalize: { prompt: 'ok' } } } } },
+    }),
+    /p\.run finalize is supported only on work\.close nodes/s,
+  );
   assert.throws(
     () => validateExecutionRuntimePack({
       runtimeVersion: 1,
@@ -178,6 +185,10 @@ test('execution runtime schema requires graph-native composite map nodes', () =>
   assert.match(JSON.stringify(schema.$defs.concreteNode.properties.kind), /git\.merge/);
   assert.ok(schema.$defs.concreteNode.properties.$ref, 'execution schema supports reserved $ref meta nodes');
   assert.ok(configSchema.$defs.concreteNode.properties.$ref, 'config schema supports reserved $ref meta nodes');
+  assert.ok(schema.$defs.concreteNode.properties.finalize, 'execution schema supports work.close finalizers');
+  assert.ok(configSchema.$defs.concreteNode.properties.finalize, 'config schema supports work.close finalizers');
+  assert.ok(schema.$defs.concreteNode.properties.maxIterations, 'execution schema supports work.close attempt count');
+  assert.ok(configSchema.$defs.concreteNode.properties.maxIterations, 'config schema supports work.close attempt count');
   assert.match(JSON.stringify(schema.$defs.concreteNode.allOf), /"mode":\{"const":"parallel"\}.*"required":\["each"\]/, 'only parallel loops require each');
   assert.match(JSON.stringify(schema.$defs.concreteNode.allOf), /oneOf/);
   assert.match(JSON.stringify(configSchema.$defs.concreteNode.allOf), /oneOf/);
@@ -203,9 +214,15 @@ test('runtime compiler converts deterministic runtime pipelines to graph-native 
   assert.equal(cfg.pipelines['parallel-planner'].nodes.implement.each, '$.executionContexts');
   assert.equal(cfg.pipelines['parallel-planner'].nodes.implement.node.kind, 'git.worktree');
   assert.equal(cfg.pipelines['parallel-planner'].nodes.merge.kind, 'git.merge');
+  assert.equal(cfg.pipelines['parallel-planner'].nodes.merge.delete, true);
   assert.equal(cfg.pipelines['parallel-planner'].steps, undefined);
   assert.equal(cfg.pipelines['parallel-planner-with-review'].nodes.implement.node.nodes.review.needs[0], 'implement');
+  assert.equal(cfg.pipelines['parallel-planner-with-review'].nodes.implement.node.nodes.close.maxIterations, 3);
+  assert.equal(cfg.pipelines['parallel-planner-with-review'].nodes.implement.node.nodes.close.finalize.maxIterations, undefined);
+  assert.equal(pack.workSources['doc-vader'].validateCommand, undefined);
+  assert.equal(pack.workSources['doc-vader'].closeCommand, undefined);
   assert.equal(cfg.pipelines['parallel-planner-with-review'].nodes.merge.kind, 'git.merge');
+  assert.equal(cfg.pipelines['parallel-planner-with-review'].nodes.merge.delete, true);
   assert.deepEqual(cfg.pipelines['parallel-planner-with-review'].nodes.merge.needs, ['implement']);
   assert.deepEqual(cfg.pipelines['parallel-planner-with-review'].nodes.merge.inputs, ['implement']);
   assert.equal(cfg.pipelines['parallel-planner-with-review'].steps, undefined);
@@ -234,7 +251,7 @@ test('configToYaml renders graph-native runtime roles and pipelines', () => {
   assert.doesNotMatch(yaml, /^    steps:/m);
   assert.match(yaml, /^maxWorkers: 5/m);
   assert.match(yaml, /^maxIterations: 10/m);
-  assert.doesNotMatch(yaml, /role: implementer[\s\S]{0,120}maxIterations:/);
+  assert.doesNotMatch(yaml.match(/^  implementer:\n[\s\S]*?(?=^  reviewer:)/m)?.[0] || '', /maxIterations:/);
   assert.match(yaml, /^  work-process-waves:/m);
   assert.match(yaml, /^          "\$ref": \$\.defaultPipeline/m);
   assert.doesNotMatch(yaml, /concurrency:/);

@@ -9,6 +9,12 @@ test('pipeline packs are discovered from the Agent Workflows execution runtime p
   assert.deepEqual(names, ['archive', 'blank', 'parallel-planner', 'parallel-planner-with-review', 'sequential-reviewer', 'simple-loop', 'work-process-waves']);
   const runtime = loadExecutionRuntimePack();
   assert.ok(runtime.prompts['implement-work'].template.length > 20);
+  assert.match(runtime.roles.implementer.systemPrompt, /commit/i);
+  assert.match(runtime.roles.worker.systemPrompt, /commit/i);
+  assert.match(runtime.prompts['implement-work'].template, /git hooks or commitlint reject/i);
+  assert.match(runtime.prompts['simple-loop'].template, /git hooks or commitlint reject/i);
+  assert.match(runtime.prompts['finalize-work-close'].template, /commit/i);
+  assert.match(runtime.prompts['implement-work'].template, /Do not bypass hooks/i);
   assert.equal(runtime.roles.planner.kind, 'planWork');
   assert.equal(runtime.pipelines['parallel-planner'].steps, undefined);
   assert.equal(runtime.pipelines['parallel-planner'].nodes.implement.kind, 'loop');

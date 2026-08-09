@@ -14,6 +14,12 @@ export interface WorkflowRefMeta {
 	default?: string;
 }
 
+export interface WorkflowCloseFinalizer {
+	role?: string;
+	prompt?: string;
+	promptOverride?: string;
+}
+
 export interface WorkflowNodeModel {
 	kind?: string;
 	$?: WorkflowRefMeta;
@@ -24,7 +30,10 @@ export interface WorkflowNodeModel {
 	mode?: "sequential" | "parallel";
 	each?: unknown;
 	max?: number;
+	maxIterations?: number;
 	with?: Record<string, unknown>;
+	finalize?: WorkflowCloseFinalizer;
+	delete?: boolean;
 	[key: string]: unknown;
 }
 
@@ -156,6 +165,25 @@ function validateMergeInputs(path: string, needs: string[], siblingContracts: Ma
 	}
 }
 
+function validateMergeDelete(path: string, node: WorkflowNodeModel, kind: string | undefined, ctx: ValidationContext): void {
+	if (node.delete === undefined) return;
+	if (kind !== "git.merge") addError(ctx, path, "delete is supported only on git.merge nodes");
+	if (typeof node.delete !== "boolean") addError(ctx, `${path}.delete`, "must be a boolean");
+}
+
+function validateCloseFinalizer(path: string, node: WorkflowNodeModel, kind: string | undefined, ctx: ValidationContext): void {
+	if (!Object.prototype.hasOwnProperty.call(node, "finalize")) return;
+	if (kind !== "work.close") addError(ctx, path, "finalize is supported only on work.close nodes");
+	if (!isRecord(node.finalize)) {
+		addError(ctx, `${path}.finalize`, "must be an object");
+		return;
+	}
+	const finalizer = node.finalize;
+	const hasPrompt = typeof finalizer.prompt === "string" && finalizer.prompt.trim().length > 0;
+	const hasPromptOverride = typeof finalizer.promptOverride === "string" && finalizer.promptOverride.trim().length > 0;
+	if (!hasPrompt && !hasPromptOverride) addError(ctx, `${path}.finalize`, "must define prompt or promptOverride");
+}
+
 function validateRefMeta(path: string, node: WorkflowNodeModel, ctx: ValidationContext): boolean {
 	if (node.$ === undefined && node.$ref === undefined) return false;
 	if (node.kind !== undefined) addError(ctx, path, "must not combine $ref metadata with kind");
@@ -201,6 +229,9 @@ function validateNode(
 	if (Object.prototype.hasOwnProperty.call(node, "id")) addError(ctx, path, "must not define id; node ids are map keys");
 	validateWhenMixin(path, node, ctx);
 	if (kind === "command" && (typeof node.command !== "string" || !node.command.trim())) addError(ctx, path, "command nodes must define a non-empty command string");
+	if (node.maxIterations !== undefined && (!Number.isInteger(node.maxIterations) || node.maxIterations < 1)) addError(ctx, path, "maxIterations must be a positive integer");
+	validateCloseFinalizer(path, node, kind, ctx);
+	validateMergeDelete(path, node, kind, ctx);
 
 	validateNeeds(path, node, siblingIds, ctx);
 

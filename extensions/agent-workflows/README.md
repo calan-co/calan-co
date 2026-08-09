@@ -207,7 +207,10 @@ The executor normalizes node outputs into typed results:
 - `AgentResult` — role/provider output; not mergeable by itself.
 - `WorkspaceResult` — produced by `git.worktree`; mergeable only when trusted and backed by commits or non-log repository effects.
 - `GitMergeResult` — produced by `git.merge` after deterministic local merge commands.
+- `WorkCloseResult` — produced by `work.close` mutations against the configured Work Source.
 - `LoopResult` / `CompositeResult` — aggregate lane/child results and mergeable workspace children.
+
+A `work.close` node may declare an optional `finalize` prompt. For `work.close`, `maxIterations` is the maximum number of close attempts. After each failed provider close attempt before the last, the configured finalizer role/prompt runs in the current worktree with the latest provider error and Work Item detail. This is a narrow close-node compatibility shim, not a general hook or provider capability system.
 
 Effect and merge checks fail closed when inputs are empty, log-only, missing a branch, untrusted, unmergeable, or conflicting. Parallel loops wait for all started lanes to settle so cleanup can run before failure is reported.
 

@@ -203,6 +203,7 @@ interface WorkItemSource {
 interface WorkItem {
 	id: string;
 	title: string;
+	status?: string;
 	summary?: string;
 	body?: string;
 	tags: string[];
@@ -211,7 +212,6 @@ interface WorkItem {
 	dependencies: string[];
 	dependsOn: string[];
 	acceptanceCriteria: string[];
-	status?: string;
 	estimate?: number;
 	estimated?: number;
 }
@@ -1095,6 +1095,7 @@ function readWorkItems(cwd: string): WorkItem[] {
 			return {
 				id,
 				title,
+				status: frontmatter.status,
 				summary,
 				body,
 				tags,
@@ -1112,7 +1113,6 @@ function readWorkItems(cwd: string): WorkItem[] {
 				dependencies,
 				dependsOn: dependencies,
 				acceptanceCriteria,
-				status: frontmatter.status,
 				estimate,
 				estimated: estimate,
 			};
@@ -1395,18 +1395,9 @@ function defaultConfigValue(path: string): unknown {
 	return undefined;
 }
 
-function defaultSettingsForWorkSource(workSource: unknown): Pick<SandcastleConfig, "workSourceSetupCommand" | "workSourceCommands"> | undefined {
+function defaultSettingsForWorkSource(workSource: unknown): Pick<SandcastleConfig, "workSourceSetupCommand"> | undefined {
 	if (workSource !== "doc-vader") return undefined;
-	return {
-		workSourceSetupCommand: "dv sandcastle init",
-		workSourceCommands: {
-			ready: "dv work ready {{ args }}",
-			list: "dv work list",
-			inspect: "dv work show {{ itemId }}",
-			validate: "dv work status {{ itemId }}",
-			close: "dv work update {{ itemId }} --status closed",
-		},
-	};
+	return { workSourceSetupCommand: "dv sandcastle init" };
 }
 
 function removeConfigValueInText(raw: string, path: string): string {
@@ -1442,7 +1433,7 @@ function setConfigValueInText(raw: string, path: string, value: unknown): string
 			const cfg = normalizeConfig(parseSimpleYaml(raw));
 			cfg.workSource = String(value);
 			cfg.workSourceSetupCommand = workSourceSettings.workSourceSetupCommand;
-			cfg.workSourceCommands = workSourceSettings.workSourceCommands;
+			delete cfg.workSourceCommands;
 			return configHasExpandedRuntimeSections(raw) ? configToYaml(cfg) : buildDefaultConfigText(cfg);
 		}
 		const replacement = `${key}: ${formatScalarForYaml(value)}`;
@@ -3017,6 +3008,7 @@ interface PipelineRunNodeRecord {
 	effects?: string[];
 	mergedBranches?: string[];
 	mergedCommits?: string[];
+	warnings?: string[];
 	accepted?: boolean;
 	closed?: boolean;
 	exitCode?: number;
@@ -3153,6 +3145,18 @@ function collectPipelineNodeCapabilities(nodes: Record<string, PipelineNodeDef> 
 	return [...capabilities];
 }
 
+function pipelineContainsNodeKind(pipeline: PipelineDef | undefined, kind: string): boolean {
+	return Boolean(pipeline && collectPipelineNodeCapabilities(pipeline.nodes).includes(`node.kind:${kind}`));
+}
+
+async function assertCleanTargetWorktreeBeforeMerge(cwd: string, pipelineName: string, cfg: SandcastleConfig, deps: PipelineExecutionDeps = {}): Promise<void> {
+	const pipeline = cfg.pipelines[pipelineName];
+	if (!pipelineContainsNodeKind(pipeline, "git.merge")) return;
+	await assertGraphGit(deps, cwd, ["rev-parse", "--show-toplevel"], `Pipeline '${pipelineName}' git repository check`);
+	const dirtyStatus = await assertGraphGit(deps, cwd, ["status", "--porcelain", "--untracked-files=no"], `Pipeline '${pipelineName}' target worktree cleanliness check`);
+	if (dirtyStatus.trim()) throw new Error(`Pipeline '${pipelineName}' requires a clean target worktree before starting; dirty paths:\n${dirtyStatus.trim()}`);
+}
+
 function buildGraphHookCapabilities(pipeline: PipelineDef, deps: PipelineExecutionDeps): string[] {
 	const pack = loadExecutionRuntimePack();
 	return [...new Set([
@@ -3266,6 +3270,7 @@ function collectGraphNodeRecords(result: NodeResult, path = "root"): PipelineRun
 		...(nodeResultStringArray(result, "effects").length ? { effects: nodeResultStringArray(result, "effects") } : {}),
 		...(Array.isArray((result as any).mergedBranches) ? { mergedBranches: (result as any).mergedBranches.filter((entry: unknown): entry is string => typeof entry === "string" && entry.length > 0) } : {}),
 		...(Array.isArray((result as any).mergedCommits) ? { mergedCommits: (result as any).mergedCommits.filter((entry: unknown): entry is string => typeof entry === "string" && entry.length > 0) } : {}),
+		...(Array.isArray((result as any).warnings) ? { warnings: (result as any).warnings.filter((entry: unknown): entry is string => typeof entry === "string" && entry.length > 0) } : {}),
 		...(typeof (result as any).accepted === "boolean" ? { accepted: (result as any).accepted } : {}),
 		...(typeof (result as any).closed === "boolean" ? { closed: (result as any).closed } : {}),
 		...(typeof (result as any).exitCode === "number" ? { exitCode: (result as any).exitCode } : {}),
@@ -3470,6 +3475,14 @@ function commandEvidence(value: unknown): Partial<ShellCommandResult> {
 	} : {};
 }
 
+class WorkCloseAttemptRejected extends Error {
+	constructor(message: string, options?: { cause?: unknown }) {
+		super(message);
+		this.name = "WorkCloseAttemptRejected";
+		if (options && "cause" in options) (this as Error & { cause?: unknown }).cause = options.cause;
+	}
+}
+
 async function mergeGraphWorkspaceBranches(
 	context: GraphNodeExecutionContext,
 	deps: PipelineExecutionDeps,
@@ -3492,6 +3505,14 @@ async function mergeGraphWorkspaceBranches(
 	const mergedBranches: string[] = [];
 	const mergedCommits: string[] = [];
 	const effects: string[] = [];
+	const warnings: string[] = [];
+	const deleteMergedSources = (context.node as any).delete === true;
+	const cleanupWarning = (branch: string, reason: string): void => {
+		const recommendation = `Recommended cleanup: git worktree list; then git worktree remove <source-worktree> && git branch -d ${JSON.stringify(branch)}`;
+		const warning = `${context.path} merged '${branch}', but source cleanup failed: ${reason}. ${recommendation}`;
+		warnings.push(warning);
+		console.warn(warning);
+	};
 
 	for (const candidate of candidates) {
 		const result = await runGraphGit(deps, targetCwd, ["merge", "--no-ff", "--no-edit", candidate.branch]);
@@ -3516,6 +3537,36 @@ async function mergeGraphWorkspaceBranches(
 			mergedCommits.push(nextHead);
 			effects.push(`merge:${candidate.branch}`);
 			for (const commit of candidate.commits) effects.push(`commit:${commit}`);
+			if (deleteMergedSources) {
+				const worktreeList = await runGraphGit(deps, targetCwd, ["worktree", "list", "--porcelain"]);
+				if (worktreeList.status !== 0) {
+					cleanupWarning(candidate.branch, (worktreeList.stderr || worktreeList.stdout || "git worktree list failed").trim());
+				} else {
+					const sourceWorktree = worktreeList.stdout.split(/\n\n+/).map((entry) => {
+						const lines = entry.split(/\r?\n/);
+						const path = lines.find((line) => line.startsWith("worktree "))?.slice("worktree ".length);
+						const branch = lines.find((line) => line.startsWith("branch "))?.slice("branch ".length)?.replace("refs/heads/", "");
+						return path && branch === candidate.branch ? path : undefined;
+					}).find((path): path is string => Boolean(path));
+					const sourceIsTarget = sourceWorktree === targetCwd;
+					const sourceStatus = sourceWorktree && !sourceIsTarget ? await runGraphGit(deps, sourceWorktree, ["status", "--porcelain"]) : undefined;
+					if (sourceStatus && (sourceStatus.status !== 0 || sourceStatus.stdout.trim())) {
+						cleanupWarning(candidate.branch, sourceStatus.status !== 0 ? (sourceStatus.stderr || "git status failed").trim() : `source worktree is dirty:\n${sourceStatus.stdout.trim()}`);
+					} else {
+						if (sourceWorktree && !sourceIsTarget) {
+							const removal = await runGraphGit(deps, targetCwd, ["worktree", "remove", sourceWorktree]);
+							if (removal.status !== 0) {
+								cleanupWarning(candidate.branch, (removal.stderr || removal.stdout || "git worktree remove failed").trim());
+								previousHead = nextHead;
+								continue;
+							}
+						}
+						const deletion = await runGraphGit(deps, targetCwd, ["branch", "-d", candidate.branch]);
+						if (deletion.status === 0) effects.push(`delete:${candidate.branch}`);
+						else cleanupWarning(candidate.branch, (deletion.stderr || deletion.stdout || "git branch -d failed").trim());
+					}
+				}
+			}
 		}
 		previousHead = nextHead;
 	}
@@ -3528,6 +3579,7 @@ async function mergeGraphWorkspaceBranches(
 		mergedCommits,
 		commits: mergedCommits,
 		effects,
+		...(warnings.length ? { warnings } : {}),
 	};
 }
 
@@ -3612,7 +3664,6 @@ export async function executePipeline(
 			`Unknown pipeline '${pipelineName}'. Available pipelines: ${available.length ? available.join(", ") : "(none)"}`,
 		);
 	}
-
 	const now = deps.now || Date.now;
 	const startedAtMs = now();
 	const id = `${startedAtMs.toString(36)}-${sanitizePathSegment(pipelineName)}`;
@@ -3660,6 +3711,12 @@ export async function executePipeline(
 		await writePipelineRunRecord(record);
 
 		if (useGraphExecutor) {
+			const inferFinalizeRoleName = (needs: Record<string, NodeResult>): string | undefined => {
+				for (const result of Object.values(needs)) {
+					if (isRecord(result) && typeof (result as any).role === "string" && (result as any).role.length) return (result as any).role;
+				}
+				return undefined;
+			};
 			const runAgentNode = async (context: GraphNodeExecutionContext) => {
 				const node = context.node as PipelineNodeDef;
 				const roleName = node.role;
@@ -3743,6 +3800,46 @@ export async function executePipeline(
 					if (hostPiRuntime?.dir) rmSync(hostPiRuntime.dir, { recursive: true, force: true });
 				}
 			};
+			const runCloseFinalizer = async (context: GraphNodeExecutionContext, input: { itemId: string; item?: WorkItem; error: unknown }): Promise<boolean> => {
+				const finalizer = isRecord((context.node as any).finalize) ? (context.node as any).finalize as Record<string, unknown> : undefined;
+				if (!finalizer) return false;
+				const roleName = typeof finalizer.role === "string" && finalizer.role.length ? finalizer.role : inferFinalizeRoleName(context.needs);
+				if (!roleName) throw new Error(`${context.path} finalize requires a role or a preceding role result`);
+				const configuredPrompt = typeof finalizer.promptOverride === "string" && finalizer.promptOverride.trim()
+					? finalizer.promptOverride
+					: typeof finalizer.prompt === "string" && finalizer.prompt.trim()
+						? resolvePromptText(cfg, finalizer.prompt)
+						: undefined;
+				if (!configuredPrompt) throw new Error(`${context.path} finalize requires prompt or promptOverride`);
+				const closeError = input.error instanceof Error ? input.error.message : String(input.error);
+				const itemSummary = input.item ? JSON.stringify(input.item, null, 2) : "(not available)";
+				const closeFinalizePrompt = [
+					resolvePipelineStepPrompt(configuredPrompt, prompt, prompt),
+					"",
+					"## Close finalization context",
+					`Close node: ${context.path}`,
+					`Work Item: ${input.itemId}`,
+					"",
+					"Provider close prerequisite/error message:",
+					closeError,
+					"",
+					"Work Item detail:",
+					itemSummary,
+					"",
+					"Use the available implementation results, validation output, and artifacts to prepare the Work Item for this close operation. Keep changes narrowly scoped to provider-required close metadata, then leave durable evidence in the worktree or Work Source as appropriate.",
+				].join("\n");
+				await runAgentNode({
+					...context,
+					id: `${context.id}.finalize`,
+					path: `${context.path}.finalize`,
+					node: {
+						kind: "work.close.finalize",
+						role: roleName,
+						promptOverride: closeFinalizePrompt,
+					} as GraphWorkflowNode,
+				});
+				return true;
+			};
 			const graphResult = await executeGraphWorkflow({ kind: "composite", nodes: pipeline.nodes } as GraphWorkflowNode, {
 				input: deps.graphInput ?? prompt,
 				hooks: graphHooks,
@@ -3780,24 +3877,51 @@ export async function executePipeline(
 						const item = workGraphInputItem(context.input, itemId);
 						const closeCwd = typeof context.workspace?.worktreePath === "string" ? context.workspace.worktreePath : cwd;
 						const env = { ITEM_ID: itemId, WORK_ITEM_ID: itemId, RUN_ID: id, PIPELINE: pipelineName, RECORD_PATH: recordPath };
-						const explicitCommand = typeof (context.node as any).command === "string" ? (context.node as any).command : undefined;
-						let command = explicitCommand ? renderWorkCommandTemplate(explicitCommand, { id: itemId, itemId, runId: id, pipeline: pipelineName, recordPath }) : undefined;
-						let evidence: Partial<ShellCommandResult> = {};
-						if (!command) {
-							const configuredCommand = configuredWorkSourceCommand(cfg, "close");
-							if (configuredCommand) command = renderWorkCommandTemplate(configuredCommand, { id: itemId, itemId, runId: id, pipeline: pipelineName, recordPath });
-							else {
-								const adapter = deps.workSourceAdapter || ((cfg.workSource || cfg.issueTracker) === "doc-vader" ? createDocVaderWorkSourceAdapter() : undefined);
-								if (adapter?.close) evidence = commandEvidence(await adapter.close({ itemId, cwd: closeCwd, runId: id, pipeline: pipelineName, recordPath, item }));
+						const runCloseOnce = async (): Promise<Partial<ShellCommandResult>> => {
+							const closeCommandValues = { id: itemId, itemId, cwd: closeCwd, runId: id, pipeline: pipelineName, recordPath };
+							const explicitCommand = typeof (context.node as any).command === "string" ? (context.node as any).command : undefined;
+							let command = explicitCommand ? renderWorkCommandTemplate(explicitCommand, closeCommandValues) : undefined;
+							let evidence: Partial<ShellCommandResult> = {};
+							if (!command) {
+								const configuredCommand = configuredWorkSourceCommand(cfg, "close");
+								if (configuredCommand) command = renderWorkCommandTemplate(configuredCommand, closeCommandValues);
 								else {
-									const defaultCommand = defaultWorkCloseCommand(cfg.workSource || cfg.issueTracker);
-									if (!defaultCommand) throw new Error(`${context.path} cannot close Work Item ${itemId}: no Work Source close adapter or command configured`);
-									command = renderWorkCommandTemplate(defaultCommand, { id: itemId, itemId, runId: id, pipeline: pipelineName, recordPath });
+									const adapter = deps.workSourceAdapter || ((cfg.workSource || cfg.issueTracker) === "doc-vader" ? createDocVaderWorkSourceAdapter() : undefined);
+									if (adapter?.close) {
+										try {
+											evidence = commandEvidence(await adapter.close({ itemId, cwd: closeCwd, runId: id, pipeline: pipelineName, recordPath, item }));
+										} catch (error) {
+											const message = error instanceof Error ? error.message : String(error);
+											throw new WorkCloseAttemptRejected(`${context.path} failed to close Work Item ${itemId}: ${message}`, { cause: error });
+										}
+									} else {
+										const defaultCommand = defaultWorkCloseCommand(cfg.workSource || cfg.issueTracker);
+										if (!defaultCommand) throw new Error(`${context.path} cannot close Work Item ${itemId}: no Work Source close adapter or command configured`);
+										command = renderWorkCommandTemplate(defaultCommand, closeCommandValues);
+									}
 								}
 							}
+							if (command) evidence = await runShellCommand(command, { cwd: closeCwd, env });
+							if ((evidence.exitCode ?? 0) !== 0) {
+								const message = evidence.stderr || evidence.stdout || `command exited ${evidence.exitCode}`;
+								if (evidence.exitCode === 127) throw new Error(`${context.path} failed to execute Work Source close command for ${itemId}: ${message}`);
+								throw new WorkCloseAttemptRejected(`${context.path} failed to close Work Item ${itemId}: ${message}`);
+							}
+							return evidence;
+						};
+						let evidence: Partial<ShellCommandResult> | undefined;
+						const maxCloseAttempts = Number.isInteger((context.node as any).maxIterations) ? Math.max(1, Number((context.node as any).maxIterations)) : 1;
+						for (let attempt = 1; attempt <= maxCloseAttempts; attempt += 1) {
+							try {
+								evidence = await runCloseOnce();
+								break;
+							} catch (error) {
+								if (!(error instanceof WorkCloseAttemptRejected) || attempt >= maxCloseAttempts) throw error;
+								const finalized = await runCloseFinalizer(context, { itemId, item, error });
+								if (!finalized) throw error;
+							}
 						}
-						if (command) evidence = await runShellCommand(command, { cwd: closeCwd, env });
-						if ((evidence.exitCode ?? 0) !== 0) throw new Error(`${context.path} failed to close Work Item ${itemId}: ${evidence.stderr || evidence.stdout || `command exited ${evidence.exitCode}`}`);
+						if (!evidence) throw new Error(`${context.path} failed to close Work Item ${itemId}: close attempts exhausted`);
 						const mutations = isRecord(deps.graphHookNamespaces?.work) && Array.isArray((deps.graphHookNamespaces.work as any).mutations) ? (deps.graphHookNamespaces.work as any).mutations as WorkSourceMutationOutcome[] : undefined;
 						mutations?.push({ itemId, action: "close", status: "succeeded" });
 						return { itemId, accepted: true, closed: true, exitCode: evidence.exitCode ?? 0, stdout: evidence.stdout || "", stderr: evidence.stderr || "", command: evidence.command, effects: [`close:${itemId}`] };
@@ -4734,39 +4858,6 @@ Work views and processing:
 		return lines.join("\n");
 	}
 
-	function hasConfiguredReadyWorkSource(cfg: SandcastleConfig): boolean {
-		return Boolean(backlogDeps.ready || configuredWorkSourceCommand(cfg, "ready") || configuredWorkSourceCommand(cfg, "list") || (cfg.workSource || cfg.issueTracker) === "doc-vader");
-	}
-
-	function readyWorkCandidateItems(readyOutput: string): Record<string, unknown>[] {
-		let parsed: unknown;
-		try {
-			parsed = JSON.parse(readyOutput);
-		} catch {
-			throw new Error("Configured Ready Work output must be valid JSON containing a candidate array.");
-		}
-		const candidates = Array.isArray(parsed)
-			? parsed
-			: isRecord(parsed) && Array.isArray(parsed.candidates)
-				? parsed.candidates
-				: isRecord(parsed) && Array.isArray(parsed.selectable)
-					? parsed.selectable
-					: undefined;
-		if (!candidates || !candidates.every((candidate) => isRecord(candidate) && typeof candidate.id === "string" && candidate.id.trim() === candidate.id && candidate.id.length > 0)) {
-			throw new Error("Configured Ready Work output must be a JSON array or candidates/selectable object containing canonical item IDs.");
-		}
-		return candidates as Record<string, unknown>[];
-	}
-
-	function assertPlanItemsAreInReadyWork(plan: any, readyOutput: string): void {
-		const executablePlan = plan?.actionable || plan;
-		const itemIds = (executablePlan?.iterations || []).flatMap((iteration: any) => (iteration?.items || []).map((item: any) => typeof item === "string" ? item : item?.id))
-			.filter((id: unknown): id is string => typeof id === "string" && id.trim().length > 0);
-		const readyItemIds = new Set(readyWorkCandidateItems(readyOutput).map((item) => item.id as string));
-		const absentIds = itemIds.filter((id) => !readyItemIds.has(id));
-		if (absentIds.length) throw new Error(`Planner selected Work Items absent from fresh Ready Work output: ${[...new Set(absentIds)].join(", ")}.`);
-	}
-
 	async function readConfiguredReadyWork(cwd: string, args: string): Promise<string> {
 		if (backlogDeps.ready) return backlogDeps.ready(cwd, args);
 		const cfg = await loadConfig(cwd);
@@ -4786,16 +4877,11 @@ Work views and processing:
 		const agent = selectPlanWorkRoleName(cfg);
 		const readyOutput = await readConfiguredReadyWork(ctx.cwd, args);
 		const task = `Run the Work planning phase for this repository.\n\nGuardrails: you are running inside an isolated planner workspace created through the normal execution engine. Do not attempt to update the source repository, create branches for execution, or perform Work Source mutations. Any filesystem changes you make are discarded after planning.\n\nRequested plan arguments: ${args || "(none)"}\n\nMax workers available for a single parallel iteration: ${cfg.maxWorkers || 5}. When selecting unblocked-ready-AFK work, plan no more than this many independently executable items in one actionable iteration.\n\nReady Work input from the configured Work Source:\n${readyOutput}\n\nReturn one authoritative Work Plan JSON object using kind \"workPlan\" and scope \"forecast\". Include an actionable Work Plan at field actionable with scope \"actionable\" containing only currently executable work from the Ready Work input. The top-level forecast iterations may map future waves that could become unblocked after earlier iterations complete, but forecast waves are advisory only. Each iteration must contain an items array of objects such as {\"id\": \"wi-001\"}; do not return bare string item ids. Each iteration rationale must be a string; if you have dependency/classification/risk rationale, combine it into one readable rationale string or put details in classifications. Include any HITL constraints and blocked/deferred work summaries when relevant. Do not author execution mechanics such as pipeline names or branch names. End with <promise>COMPLETE</promise>.`;
-		let plan: any;
-		if (backlogDeps.runPlanWorkRole) plan = await backlogDeps.runPlanWorkRole({ cwd: ctx.cwd, args, role: agent, task, ctx });
-		else {
-			const run = await dispatch(ctx.cwd, agent, task, ctx, { branchPrefix: "agent-workflows/planner" });
-			await new Promise<void>((resolve) => run.proc?.on("close", () => resolve()));
-			if (run.status !== "done") throw new Error(`Planner role failed: ${run.lastLine}`);
-			plan = JSON.parse(readFileSync(run.resultPath!, "utf8"));
-		}
-		if (hasConfiguredReadyWorkSource(cfg)) assertPlanItemsAreInReadyWork(plan, readyOutput);
-		return plan;
+		if (backlogDeps.runPlanWorkRole) return backlogDeps.runPlanWorkRole({ cwd: ctx.cwd, args, role: agent, task, ctx });
+		const run = await dispatch(ctx.cwd, agent, task, ctx, { branchPrefix: "agent-workflows/planner" });
+		await new Promise<void>((resolve) => run.proc?.on("close", () => resolve()));
+		if (run.status !== "done") throw new Error(`Planner role failed: ${run.lastLine}`);
+		return JSON.parse(readFileSync(run.resultPath!, "utf8"));
 	}
 
 	async function notifyBacklogPlan(args: string, ctx: any, overrides?: { iterations?: number }): Promise<void> {
@@ -4942,10 +5028,8 @@ Work views and processing:
 	}
 
 	async function planBacklogProcessing(cwd: string, query: string): Promise<BacklogPlanResult> {
-		const plan = backlogDeps.plan ? await backlogDeps.plan(cwd, query) : await defaultPlanBacklogProcessing(cwd, query);
-		const cfg = await loadConfig(cwd);
-		if (hasConfiguredReadyWorkSource(cfg)) assertPlanItemsAreInReadyWork(plan, await readConfiguredReadyWork(cwd, query));
-		return plan;
+		if (backlogDeps.plan) return backlogDeps.plan(cwd, query);
+		return defaultPlanBacklogProcessing(cwd, query);
 	}
 
 	function firstConfiguredAgentName(cfg: SandcastleConfig): string | undefined {
@@ -5593,6 +5677,7 @@ Work views and processing:
 			try {
 				const { query, pipeline: explicitPipeline, planId } = parseBacklogProcessArgs(args);
 				const cfg = await loadConfig(ctx.cwd);
+				await assertCleanTargetWorktreeBeforeMerge(ctx.cwd, deriveProcessPipeline(explicitPipeline, cfg), cfg, deps.pipeline);
 				const { record: finalRecord, recordPath, advisoryNotes = [] } = await runWorkProcess(
 					{
 						cwd: ctx.cwd,

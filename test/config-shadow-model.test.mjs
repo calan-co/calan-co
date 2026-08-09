@@ -49,20 +49,14 @@ test('ConfigShadowModel defaultable set-config removes explicit agent override',
   assert.equal(model.snapshot().agents.planner.model, undefined);
 });
 
-test('ConfigShadowModel sets Doc-Vader Work Source action commands when selected', () => {
+test('ConfigShadowModel selects Doc-Vader without copying generated Sandcastle adapter commands', () => {
   const model = new ConfigShadowModel({ ...baseConfig(), workSourceCommands: { close: 'custom close {{ itemId }}' } });
   model.setConfigValue('workSource', 'doc-vader');
   const snapshot = model.snapshot();
 
   assert.equal(snapshot.workSource, 'doc-vader');
   assert.equal(snapshot.workSourceSetupCommand, 'dv sandcastle init');
-  assert.deepEqual(snapshot.workSourceCommands, {
-    ready: 'dv work ready {{ args }}',
-    list: 'dv work list',
-    inspect: 'dv work show {{ itemId }}',
-    validate: 'dv work status {{ itemId }}',
-    close: 'dv work update {{ itemId }} --status closed',
-  });
+  assert.equal(snapshot.workSourceCommands, undefined);
 });
 
 test('ConfigShadowModel edits pipeline fields and graph node overrides', () => {

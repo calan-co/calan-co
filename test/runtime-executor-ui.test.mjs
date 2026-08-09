@@ -516,6 +516,45 @@ test('executePipeline graph git.merge merges accepted workspace branch content i
   assert.ok(mergeNode.effects?.some((effect) => effect === 'merge:feature/accepted'));
 });
 
+test('executePipeline graph git.merge deletes a clean merged source branch when requested', async () => {
+  const repoRoot = await createGraphRepo(baseGraphConfig([
+    '  graph:',
+    '    kind: composite',
+    '    nodes:',
+    '      workspace:',
+    '        kind: git.worktree',
+    '        nodes:',
+    '          implement:',
+    '            kind: agent.pi',
+    '            role: implementer',
+    '            prompt: Implement $INPUT',
+    '      merge:',
+    '        kind: git.merge',
+    '        needs: [workspace]',
+    '        delete: true',
+  ]), { git: true });
+
+  const record = await executePipeline(repoRoot, 'graph', 'merge and clean up feature branch', {
+    now: () => 1700000004550,
+    createWorktree: async () => fakeWorktree(repoRoot, async (options) => {
+      await runGit(repoRoot, ['checkout', '-B', 'feature/delete-after-merge', 'main']);
+      await fs.writeFile(path.join(repoRoot, 'feature.txt'), 'clean source branch\n', 'utf8');
+      await runGit(repoRoot, ['add', 'feature.txt']);
+      await runGit(repoRoot, ['commit', '-m', 'add clean feature']);
+      const sha = await runGit(repoRoot, ['rev-parse', 'HEAD']);
+      await runGit(repoRoot, ['checkout', 'main']);
+      return { iterations: [], commits: [{ sha }], branch: 'feature/delete-after-merge', stdout: '', logFilePath: options.logging.path };
+    }, { branch: 'feature/delete-after-merge', worktreePath: repoRoot }),
+    loadSandboxProvider: async (kind) => ({ kind }),
+    makeAgent: (model, provider) => ({ model, provider }),
+  });
+
+  assert.equal(record.status, 'completed');
+  assert.equal(await runGit(repoRoot, ['branch', '--list', 'feature/delete-after-merge']), '');
+  const mergeNode = record.nodes.find((node) => node.nodePath === 'root.nodes.merge');
+  assert.ok(mergeNode.effects?.includes('delete:feature/delete-after-merge'));
+});
+
 test('executePipeline fails graph git.merge with no mergeable inputs', async () => {
   const repoRoot = await createGraphRepo(baseGraphConfig([
     '  graph:',

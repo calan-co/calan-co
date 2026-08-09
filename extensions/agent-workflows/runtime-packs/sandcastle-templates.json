@@ -106,14 +106,14 @@
       "provider": "default",
       "model": "default",
       "sandbox": "default",
-      "systemPrompt": "You are the Agent Workflows worker role. Pick one open Work Item, complete it, validate it, and report results."
+      "systemPrompt": "You are the Agent Workflows worker role. Pick one open Work Item, complete it, validate it, commit repository changes meaningfully when present, and report results."
     },
     "implementer": {
       "role": "implementer",
       "provider": "default",
       "model": "default",
       "sandbox": "default",
-      "systemPrompt": "You are the Agent Workflows implementer role. Implement the selected Work Item on an isolated branch and validate your work."
+      "systemPrompt": "You are the Agent Workflows implementer role. Implement the selected Work Item on an isolated branch, validate your work, and leave durable changes in a meaningful git commit when the repository changed."
     },
     "reviewer": {
       "role": "reviewer",
@@ -139,7 +139,7 @@
     },
     "simple-loop": {
       "format": "markdown",
-      "template": "Pick the next open Work Item from the configured Work Source, implement it, validate the result, and close or clearly report the outcome.\n\nUser input:\n$INPUT"
+      "template": "Pick the next open Work Item from the configured Work Source, implement it, validate the result, and close or clearly report the outcome.\n\nBefore finishing, create a meaningful git commit for your changes when the repository changed. Prefer the repository's existing commit style. If git hooks or commitlint reject the commit, read the full error output, revise the commit message or staged changes accordingly, and retry. Do not bypass hooks with --no-verify. If you cannot produce a valid commit after focused retries, leave changes as-is and report the exact failure output. The commit message should summarize the user-visible or architectural change, not merely say that changes were captured.\n\nUser input:\n$INPUT"
     },
     "plan-work": {
       "format": "markdown",
@@ -147,7 +147,7 @@
     },
     "implement-work": {
       "format": "markdown",
-      "template": "Implement the selected Work Item on the assigned branch. Keep changes focused, run relevant tests, and end with a concise result summary.\n\nWork Item:\n$INPUT"
+      "template": "Implement the selected Work Item on the assigned branch. Keep changes focused, run relevant tests, and end with a concise result summary.\n\nBefore finishing, create a meaningful git commit for your changes when the repository changed. Prefer the repository's existing commit style. If git hooks or commitlint reject the commit, read the full error output, revise the commit message or staged changes accordingly, and retry. Do not bypass hooks with --no-verify. If you cannot produce a valid commit after focused retries, leave changes as-is and report the exact failure output. The commit message should summarize the user-visible or architectural change, not merely say that changes were captured.\n\nWork Item:\n$INPUT"
     },
     "review-work": {
       "format": "markdown",
@@ -160,6 +160,10 @@
     "archive-terminal-work": {
       "format": "markdown",
       "template": "Archive or summarize terminal-state Work Items without reopening completed implementation work.\n\nItems:\n$INPUT"
+    },
+    "finalize-work-close": {
+      "format": "markdown",
+      "template": "Prepare the selected Work Item for closure only if the Work Source reports missing close prerequisites. Use implementation results, validation output, and available artifacts to populate provider-required completion metadata. After updating close metadata, run the Work Source close validation or dry-run command when available. If that reports additional blockers, fix those blockers too before finishing; do not stop after only addressing the first reported error. Keep changes narrowly scoped to close preparation and do not broaden implementation scope.\n\nWhen editing markdown Work Item frontmatter, prefer provider-portable terminal metadata: set a numeric actual value, add at least one simple scalar links.evidence entry (for example, a validation command/result string), and mark completed task and acceptance checkboxes as checked when the implementation and validation satisfy them. Avoid nested evidence objects unless the existing Work Source format already uses them.\n\nIf your close-preparation edits change repository files, create a meaningful git commit before finishing. Prefer the repository's existing commit style. If git hooks or commitlint reject the commit, read the full error output, revise the commit message or staged changes accordingly, and retry. Do not bypass hooks with --no-verify. If the Work Source close command later mutates repository files again, report that risk explicitly because the current MVP close flow may still require a post-close capture.\n\nOriginal user input:\n$INPUT"
     }
   },
   "policies": {
@@ -251,23 +255,17 @@
               "when": "needs.run.accepted == true",
               "capabilities": [
                 "work.close"
-              ]
+              ],
+              "finalize": {
+                "role": "worker",
+                "prompt": "finalize-work-close"
+              },
+              "maxIterations": 3
             }
           },
           "capabilities": [
             "worktree",
             "git.worktree"
-          ]
-        },
-        "merge": {
-          "kind": "git.merge",
-          "needs": [
-            "workspace"
-          ],
-          "when": "has(needs.workspace.children.close.closed) && needs.workspace.children.close.closed == true",
-          "capabilities": [
-            "merge",
-            "git.merge"
           ]
         }
       }
@@ -311,7 +309,12 @@
               "when": "needs.review.accepted == true",
               "capabilities": [
                 "work.close"
-              ]
+              ],
+              "finalize": {
+                "role": "implementer",
+                "prompt": "finalize-work-close"
+              },
+              "maxIterations": 3
             }
           },
           "capabilities": [
@@ -352,7 +355,12 @@
                 "when": "needs.implement.accepted == true",
                 "capabilities": [
                   "work.close"
-                ]
+                ],
+                "finalize": {
+                  "role": "implementer",
+                  "prompt": "finalize-work-close"
+                },
+                "maxIterations": 3
               }
             },
             "capabilities": [
@@ -366,6 +374,7 @@
         },
         "merge": {
           "kind": "git.merge",
+          "delete": true,
           "needs": [
             "implement"
           ],
@@ -424,7 +433,12 @@
                 "when": "needs.review.accepted == true",
                 "capabilities": [
                   "work.close"
-                ]
+                ],
+                "finalize": {
+                  "role": "implementer",
+                  "prompt": "finalize-work-close"
+                },
+                "maxIterations": 3
               }
             },
             "capabilities": [
@@ -438,6 +452,7 @@
         },
         "merge": {
           "kind": "git.merge",
+          "delete": true,
           "needs": [
             "implement"
           ],
@@ -521,11 +536,7 @@
       "kind": "custom"
     },
     "doc-vader": {
-      "kind": "doc-vader",
-      "listCommand": "dv work list",
-      "inspectCommand": "dv work show {{ id }}",
-      "validateCommand": "dv work status {{ id }}",
-      "closeCommand": "dv work update {{ id }} --status closed"
+      "kind": "doc-vader"
     }
   }
 }

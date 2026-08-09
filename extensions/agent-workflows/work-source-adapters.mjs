@@ -38,6 +38,10 @@ function commandSpec(template, fallback, context) {
   return { command, args, rendered };
 }
 
+function docVaderSandcastleCommand(action) {
+  return `node .sandcastle/dv4sandcastle.mjs ${action} {{ id }}`;
+}
+
 async function runMutation(action, template, fallback, context, runCommand) {
   const spec = commandSpec(template, fallback, context);
   const result = await runCommand(spec.command, spec.args, { cwd: context.cwd, action, itemId: context.itemId, runId: context.runId, command: spec.rendered });
@@ -53,16 +57,18 @@ async function runMutation(action, template, fallback, context, runCommand) {
 
 export function createDocVaderWorkSourceAdapter(options = {}) {
   const runCommand = options.runCommand || defaultRunCommand;
-  const validateCommand = options.validateCommand || process.env.DV_SANDCASTLE_VALIDATE_COMMAND || 'dv work status {{ id }}';
-  const closeCommand = options.closeCommand || process.env.DV_SANDCASTLE_CLOSE_COMMAND || 'dv work update {{ id }} --status closed';
+  const validateFallback = docVaderSandcastleCommand('validate');
+  const closeFallback = docVaderSandcastleCommand('close');
+  const validateCommand = options.validateCommand || process.env.DV_SANDCASTLE_VALIDATE_COMMAND || validateFallback;
+  const closeCommand = options.closeCommand || process.env.DV_SANDCASTLE_CLOSE_COMMAND || closeFallback;
   return {
     kind: 'doc-vader',
     capabilities: ['work-source:doc-vader', 'work.validate', 'work.close'],
     async validate(input) {
-      return runMutation('validate', validateCommand, 'dv work status {{ id }}', input, runCommand);
+      return runMutation('validate', validateCommand, validateFallback, input, runCommand);
     },
     async close(input) {
-      return runMutation('close', closeCommand, 'dv work update {{ id }} --status closed', input, runCommand);
+      return runMutation('close', closeCommand, closeFallback, input, runCommand);
     },
   };
 }

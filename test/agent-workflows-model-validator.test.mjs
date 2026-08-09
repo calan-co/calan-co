@@ -163,12 +163,18 @@ test('validates loop model-level mode and max semantics', () => {
   assert.match(result.errors.join('\n'), /root.nodes.missingParallelIterator parallel loop must define each/);
 });
 
-test('validates command, work.close, and CEL when mixins', () => {
+test('validates command, work.close, close finalizers, and CEL when mixins', () => {
   const valid = validateWorkflowModel({
     kind: 'composite',
     nodes: {
       check: { kind: 'command', command: 'node --version' },
-      close: { kind: 'work.close', needs: ['check'], when: 'needs.check.exitCode == 0' },
+      close: {
+        kind: 'work.close',
+        needs: ['check'],
+        when: 'needs.check.exitCode == 0',
+        maxIterations: 3,
+        finalize: { role: 'implementer', promptOverride: 'Prepare close metadata.' },
+      },
     },
   });
   assert.equal(valid.valid, true, valid.errors.join('\n'));
@@ -180,11 +186,17 @@ test('validates command, work.close, and CEL when mixins', () => {
     nodes: {
       missingCommand: { kind: 'command' },
       badWhen: { kind: 'work.close', when: 'needs.' },
+      badFinalizeOwner: { kind: 'agent', finalize: { promptOverride: 'nope' } },
+      badCloseAttempts: { kind: 'work.close', maxIterations: 0, finalize: { promptOverride: 'nope' } },
+      badFinalizePrompt: { kind: 'work.close', finalize: {} },
     },
   });
   assert.equal(invalid.valid, false);
   assert.match(invalid.errors.join('\n'), /root.nodes.missingCommand command nodes must define a non-empty command string/);
   assert.match(invalid.errors.join('\n'), /root.nodes.badWhen when must parse as CEL/);
+  assert.match(invalid.errors.join('\n'), /root.nodes.badFinalizeOwner finalize is supported only on work.close nodes/);
+  assert.match(invalid.errors.join('\n'), /root.nodes.badCloseAttempts maxIterations must be a positive integer/);
+  assert.match(invalid.errors.join('\n'), /root.nodes.badFinalizePrompt.finalize must define prompt or promptOverride/);
 });
 
 test('validates reserved $ ref node structure', () => {

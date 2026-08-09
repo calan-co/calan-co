@@ -49,18 +49,9 @@ function setNestedValue(root: Record<string, unknown>, parts: string[], value: u
 	current[parts.at(-1)!] = value;
 }
 
-function defaultSettingsForWorkSource(workSource: unknown): { workSourceSetupCommand: string; workSourceCommands: Record<string, string> } | undefined {
+function defaultSettingsForWorkSource(workSource: unknown): { workSourceSetupCommand: string } | undefined {
 	if (workSource !== "doc-vader") return undefined;
-	return {
-		workSourceSetupCommand: "dv sandcastle init",
-		workSourceCommands: {
-			ready: "dv work ready {{ args }}",
-			list: "dv work list",
-			inspect: "dv work show {{ itemId }}",
-			validate: "dv work status {{ itemId }}",
-			close: "dv work update {{ itemId }} --status closed",
-		},
-	};
+	return { workSourceSetupCommand: "dv sandcastle init" };
 }
 
 function renameRoleReferences(value: unknown, oldName: string, newName: string): void {
@@ -98,7 +89,7 @@ export class ConfigShadowModel extends ShadowModelBase<ConfigShadowSnapshot> {
 			const workSourceSettings = parts[0] === "workSource" ? defaultSettingsForWorkSource(value) : undefined;
 			if (workSourceSettings) {
 				this.state.workSourceSetupCommand = workSourceSettings.workSourceSetupCommand;
-				this.state.workSourceCommands = workSourceSettings.workSourceCommands;
+				delete this.state.workSourceCommands;
 			}
 		} else if (parts[0] === "workSourceCommands" && parts.length === 2) {
 			this.state.workSourceCommands ||= {};

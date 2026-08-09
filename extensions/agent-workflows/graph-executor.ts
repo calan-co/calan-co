@@ -28,6 +28,12 @@ export interface GraphRefNode {
 	[key: string]: unknown;
 }
 
+export interface GraphCloseFinalizer {
+	role?: string;
+	prompt?: string;
+	promptOverride?: string;
+}
+
 export interface GraphWorkflowNode {
 	kind?: string;
 	$?: GraphRefMeta;
@@ -38,8 +44,10 @@ export interface GraphWorkflowNode {
 	mode?: GraphNodeMode;
 	each?: unknown;
 	max?: number;
+	maxIterations?: number;
 	with?: Record<string, unknown>;
 	capabilities?: string[];
+	finalize?: GraphCloseFinalizer;
 	[key: string]: unknown;
 }
 
@@ -124,6 +132,7 @@ export interface GitMergeResult extends BaseNodeResult {
 	commits?: string[];
 	mergedBranches?: string[];
 	mergedCommits?: string[];
+	warnings?: string[];
 }
 
 export type MergeableNodeResult = WorkspaceResult | LoopResult;

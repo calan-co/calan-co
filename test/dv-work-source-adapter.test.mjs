@@ -17,8 +17,8 @@ test('Doc-Vader Work Source adapter defaults to current Doc-Vader work command s
   await adapter.close({ itemId: 'wi-123', cwd: '/repo', runId: 'run-1' });
 
   assert.deepEqual(calls.map((call) => [call.command, call.args]), [
-    ['dv', ['work', 'status', 'wi-123']],
-    ['dv', ['work', 'update', 'wi-123', '--status', 'closed']],
+    ['node', ['.sandcastle/dv4sandcastle.mjs', 'validate', 'wi-123']],
+    ['node', ['.sandcastle/dv4sandcastle.mjs', 'close', 'wi-123']],
   ]);
 });
 

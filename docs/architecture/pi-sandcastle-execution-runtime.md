@@ -136,6 +136,11 @@ Rules:
   - Opens an isolated workspace branch/worktree, runs child nodes inside it, closes it, and returns `WorkspaceResult`.
 - `git.merge`
   - Consumes mergeable/effectful `WorkspaceResult` inputs and merges branches into the target worktree.
+- `work.close`
+  - Mutates the configured Work Source to close the current Work Item.
+  - Interprets `maxIterations` as maximum close attempts.
+  - May declare an optional `finalize` role/prompt that runs after each failed provider close attempt before the final attempt.
+  - This finalizer is intentionally scoped to close-node preparation and is not a generic hook or capability negotiation layer.
 - `docker.container` / `podman.container`
   - Reserved concrete container nodes for future direct container execution.
 

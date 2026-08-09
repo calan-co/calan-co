@@ -563,6 +563,25 @@ function selectExecutableIteration(plan: WorkPlanResult, closed: Set<string>, ad
 	return { closedReadyIds: [...closedReady], omittedIds: [...omitted] };
 }
 
+function selectExecutableIterationIgnoringClosed(plan: WorkPlanResult, closed: Set<string>, advisoryNotes: string[]): { iteration?: WorkPlanIteration; closedReadyIds: string[]; omittedIds: string[] } {
+	const closedReady = new Set<string>();
+	const omitted = new Set<string>();
+	for (const planIteration of plan.iterations || []) {
+		const filtered = filterExecutableIteration(planIteration);
+		for (const id of filtered.omittedIds) omitted.add(id);
+		const executableItems = (filtered.iteration.items || []).filter((item) => {
+			if (!closed.has(item.id)) return true;
+			closedReady.add(item.id);
+			return false;
+		});
+		if (executableItems.length) {
+			if (filtered.omittedIds.length) advisoryNotes.push(`Work readiness was revalidated before execution; omitted non-executable Work Items: ${filtered.omittedIds.join(", ")}.`);
+			return { iteration: { ...filtered.iteration, items: executableItems }, closedReadyIds: [...closedReady], omittedIds: [...omitted] };
+		}
+	}
+	return { closedReadyIds: [...closedReady], omittedIds: [...omitted] };
+}
+
 export async function runWorkProcess(input: RunWorkProcessInput, deps: RunWorkProcessDeps): Promise<RunWorkProcessResult> {
 	const now = input.now || Date.now;
 	let planResult: WorkPlanResult;
@@ -696,8 +715,8 @@ export async function runWorkProcess(input: RunWorkProcessInput, deps: RunWorkPr
 		if (!(error instanceof WorkWaveLoopComplete)) throw error;
 	}
 	if (aggregateRecord && !stoppedAfterNonDone && waveCount >= workWaveLimit) {
-		const selection = selectExecutableIteration(planResult, closed, advisoryNotes);
-		if (selection.closedReadyIds.length) throw new Error(`Work Source returned already-closed Work as ready: ${selection.closedReadyIds.join(", ")}. Refusing to repeat completed work.`);
+		const selection = selectExecutableIterationIgnoringClosed(planResult, closed, advisoryNotes);
+		if (selection.closedReadyIds.length && !selection.iteration) advisoryNotes.push(`Work Source still reported ready after closure: ${selection.closedReadyIds.join(", ")}. Treating the completed wave as authoritative at the workflow limit.`);
 		if (selection.iteration) throw new Error(`Work wave limit exceeded after ${workWaveLimit} iteration(s). Increase the process workflow loop max only after confirming repeated or remaining work should continue.`);
 	}
 	if (aggregateRecord) return { record: aggregateRecord, recordPath, advisoryNotes };

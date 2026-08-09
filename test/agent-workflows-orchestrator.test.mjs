@@ -238,7 +238,36 @@ test('runWorkProcess resolves selected wave pipeline through the work-wave wrapp
   }
 });
 
-test('runWorkProcess fails closed when the Work Source returns already-closed work as ready', async () => {
+test('runWorkProcess completes when already-closed work is only observed after the workflow loop limit', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'agent-workflows-orchestrator-'));
+  let planCalls = 0;
+  try {
+    const result = await runWorkProcess(
+      {
+        cwd,
+        query: 'ready work',
+        defaultPipeline: 'simple-loop',
+        createRunId: () => 'run-complete-at-limit',
+        maxIterations: 1,
+      },
+      {
+        async plan() {
+          planCalls += 1;
+          return { query: 'ready work', iterations: [{ items: [{ id: 'wi-repeat', title: 'Repeat' }] }] };
+        },
+        async execute() { return { status: 'done', branches: ['branch-repeat'], logs: [], workSourceMutations: [{ itemId: 'wi-repeat', action: 'close', status: 'succeeded' }] }; },
+      },
+    );
+
+    assert.equal(result.record.status, 'done');
+    assert.equal(planCalls, 2);
+    assert.match(result.advisoryNotes.join('\n'), /still reported ready after closure/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('runWorkProcess fails closed when the Work Source would repeat already-closed work in a subsequent wave', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'agent-workflows-orchestrator-'));
   let planCalls = 0;
   try {
