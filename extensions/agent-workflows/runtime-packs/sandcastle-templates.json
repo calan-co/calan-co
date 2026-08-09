@@ -258,6 +258,17 @@
             "worktree",
             "git.worktree"
           ]
+        },
+        "merge": {
+          "kind": "git.merge",
+          "needs": [
+            "workspace"
+          ],
+          "when": "has(needs.workspace.children.close.closed) && needs.workspace.children.close.closed == true",
+          "capabilities": [
+            "merge",
+            "git.merge"
+          ]
         }
       }
     },

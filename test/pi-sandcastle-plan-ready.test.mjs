@@ -203,6 +203,90 @@ test('pi provider uses writable temp agent dir with readonly host auth and trust
   assert.match(source, /return piWithHostDefault\(model, pi\)/);
 });
 
+test('/work:plan rejects IDs mentioned only in other Ready Work candidate text', async () => {
+  const cwd = makeRepo();
+  const pi = fakePi();
+  const notifications = [];
+  writeFileSync(join(cwd, '.pi', 'sandcastle', 'config.yaml'), [
+    'workSource: custom',
+    'workSourceCommands:',
+    '  ready: "printf \'{\"candidates\":[{\"id\":\"wi-ready\",\"title\":\"Depends on wi-unrelated\"}]}\'"',
+  ].join('\n'));
+  agentWorkflows(pi, {
+    work: {
+      async runPlanWorkRole() {
+        return { iterations: [{ items: [{ id: 'wi-unrelated' }] }] };
+      },
+    },
+  });
+
+  await pi.commands.get('work:plan').handler('', {
+    cwd,
+    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  });
+
+  assert.equal(notifications[0].type, 'error');
+  assert.match(notifications[0].message, /Planner selected Work Items absent from fresh Ready Work output: wi-unrelated/);
+});
+
+test('/work:plan fails closed when configured Ready Work output is not JSON', async () => {
+  const cwd = makeRepo();
+  const pi = fakePi();
+  const notifications = [];
+  writeFileSync(join(cwd, '.pi', 'sandcastle', 'config.yaml'), [
+    'workSource: custom',
+    'workSourceCommands:',
+    '  ready: "printf wi-ready"',
+  ].join('\n'));
+  agentWorkflows(pi, {
+    work: {
+      async runPlanWorkRole() {
+        return { iterations: [{ items: [{ id: 'wi-ready' }] }] };
+      },
+    },
+  });
+
+  await pi.commands.get('work:plan').handler('', {
+    cwd,
+    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  });
+
+  assert.equal(notifications[0].type, 'error');
+  assert.match(notifications[0].message, /Configured Ready Work output must be valid JSON/);
+});
+
+test('/work:process refuses planned Work Items absent from configured Ready Work output', async () => {
+  const cwd = makeRepo();
+  const pi = fakePi();
+  const calls = [];
+  const notifications = [];
+  writeFileSync(join(cwd, '.pi', 'sandcastle', 'config.yaml'), [
+    'workSource: custom',
+    'workSourceCommands:',
+    '  ready: "printf \'[{\"id\":\"wi-ready\"}]\'"',
+  ].join('\n'));
+  agentWorkflows(pi, {
+    work: {
+      async plan(_repo, query) {
+        return { query, iterations: [{ items: [{ id: 'wi-unrelated' }] }] };
+      },
+      async execute() {
+        calls.push('execute');
+        return { status: 'done' };
+      },
+    },
+  });
+
+  await pi.commands.get('work:process').handler('', {
+    cwd,
+    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  });
+
+  assert.deepEqual(calls, []);
+  assert.equal(notifications[0].type, 'error');
+  assert.match(notifications[0].message, /Planner selected Work Items absent from fresh Ready Work output: wi-unrelated/);
+});
+
 test('/work:plan fails closed and caches invalid planner output for inspection', async () => {
   const cwd = makeRepo();
   const pi = fakePi();

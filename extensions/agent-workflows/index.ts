@@ -4711,6 +4711,39 @@ Work views and processing:
 		return lines.join("\n");
 	}
 
+	function hasConfiguredReadyWorkSource(cfg: SandcastleConfig): boolean {
+		return Boolean(backlogDeps.ready || configuredWorkSourceCommand(cfg, "ready") || configuredWorkSourceCommand(cfg, "list") || (cfg.workSource || cfg.issueTracker) === "doc-vader");
+	}
+
+	function readyWorkCandidateItems(readyOutput: string): Record<string, unknown>[] {
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(readyOutput);
+		} catch {
+			throw new Error("Configured Ready Work output must be valid JSON containing a candidate array.");
+		}
+		const candidates = Array.isArray(parsed)
+			? parsed
+			: isRecord(parsed) && Array.isArray(parsed.candidates)
+				? parsed.candidates
+				: isRecord(parsed) && Array.isArray(parsed.selectable)
+					? parsed.selectable
+					: undefined;
+		if (!candidates || !candidates.every((candidate) => isRecord(candidate) && typeof candidate.id === "string" && candidate.id.trim() === candidate.id && candidate.id.length > 0)) {
+			throw new Error("Configured Ready Work output must be a JSON array or candidates/selectable object containing canonical item IDs.");
+		}
+		return candidates as Record<string, unknown>[];
+	}
+
+	function assertPlanItemsAreInReadyWork(plan: any, readyOutput: string): void {
+		const executablePlan = plan?.actionable || plan;
+		const itemIds = (executablePlan?.iterations || []).flatMap((iteration: any) => (iteration?.items || []).map((item: any) => typeof item === "string" ? item : item?.id))
+			.filter((id: unknown): id is string => typeof id === "string" && id.trim().length > 0);
+		const readyItemIds = new Set(readyWorkCandidateItems(readyOutput).map((item) => item.id as string));
+		const absentIds = itemIds.filter((id) => !readyItemIds.has(id));
+		if (absentIds.length) throw new Error(`Planner selected Work Items absent from fresh Ready Work output: ${[...new Set(absentIds)].join(", ")}.`);
+	}
+
 	async function readConfiguredReadyWork(cwd: string, args: string): Promise<string> {
 		if (backlogDeps.ready) return backlogDeps.ready(cwd, args);
 		const cfg = await loadConfig(cwd);
@@ -4730,11 +4763,16 @@ Work views and processing:
 		const agent = selectPlanWorkRoleName(cfg);
 		const readyOutput = await readConfiguredReadyWork(ctx.cwd, args);
 		const task = `Run the Work planning phase for this repository.\n\nGuardrails: you are running inside an isolated planner workspace created through the normal execution engine. Do not attempt to update the source repository, create branches for execution, or perform Work Source mutations. Any filesystem changes you make are discarded after planning.\n\nRequested plan arguments: ${args || "(none)"}\n\nMax workers available for a single parallel iteration: ${cfg.maxWorkers || 5}. When selecting unblocked-ready-AFK work, plan no more than this many independently executable items in one actionable iteration.\n\nReady Work input from the configured Work Source:\n${readyOutput}\n\nReturn one authoritative Work Plan JSON object using kind \"workPlan\" and scope \"forecast\". Include an actionable Work Plan at field actionable with scope \"actionable\" containing only currently executable work from the Ready Work input. The top-level forecast iterations may map future waves that could become unblocked after earlier iterations complete, but forecast waves are advisory only. Each iteration must contain an items array of objects such as {\"id\": \"wi-001\"}; do not return bare string item ids. Each iteration rationale must be a string; if you have dependency/classification/risk rationale, combine it into one readable rationale string or put details in classifications. Include any HITL constraints and blocked/deferred work summaries when relevant. Do not author execution mechanics such as pipeline names or branch names. End with <promise>COMPLETE</promise>.`;
-		if (backlogDeps.runPlanWorkRole) return backlogDeps.runPlanWorkRole({ cwd: ctx.cwd, args, role: agent, task, ctx });
-		const run = await dispatch(ctx.cwd, agent, task, ctx, { branchPrefix: "agent-workflows/planner" });
-		await new Promise<void>((resolve) => run.proc?.on("close", () => resolve()));
-		if (run.status !== "done") throw new Error(`Planner role failed: ${run.lastLine}`);
-		return JSON.parse(readFileSync(run.resultPath!, "utf8"));
+		let plan: any;
+		if (backlogDeps.runPlanWorkRole) plan = await backlogDeps.runPlanWorkRole({ cwd: ctx.cwd, args, role: agent, task, ctx });
+		else {
+			const run = await dispatch(ctx.cwd, agent, task, ctx, { branchPrefix: "agent-workflows/planner" });
+			await new Promise<void>((resolve) => run.proc?.on("close", () => resolve()));
+			if (run.status !== "done") throw new Error(`Planner role failed: ${run.lastLine}`);
+			plan = JSON.parse(readFileSync(run.resultPath!, "utf8"));
+		}
+		if (hasConfiguredReadyWorkSource(cfg)) assertPlanItemsAreInReadyWork(plan, readyOutput);
+		return plan;
 	}
 
 	async function notifyBacklogPlan(args: string, ctx: any, overrides?: { iterations?: number }): Promise<void> {
@@ -4881,8 +4919,10 @@ Work views and processing:
 	}
 
 	async function planBacklogProcessing(cwd: string, query: string): Promise<BacklogPlanResult> {
-		if (backlogDeps.plan) return backlogDeps.plan(cwd, query);
-		return defaultPlanBacklogProcessing(cwd, query);
+		const plan = backlogDeps.plan ? await backlogDeps.plan(cwd, query) : await defaultPlanBacklogProcessing(cwd, query);
+		const cfg = await loadConfig(cwd);
+		if (hasConfiguredReadyWorkSource(cfg)) assertPlanItemsAreInReadyWork(plan, await readConfiguredReadyWork(cwd, query));
+		return plan;
 	}
 
 	function firstConfiguredAgentName(cfg: SandcastleConfig): string | undefined {

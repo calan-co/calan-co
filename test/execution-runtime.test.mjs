@@ -14,6 +14,9 @@ test('execution runtime pack ports prompts, roles, and graph-native pipelines', 
   const pack = loadExecutionRuntimePack();
   assert.equal(pack.runtimeVersion, 1);
   assert.ok(pack.prompts['simple-loop'].template.includes('$INPUT'));
+  assert.equal(pack.pipelines['simple-loop'].nodes.merge.kind, 'git.merge');
+  assert.deepEqual(pack.pipelines['simple-loop'].nodes.merge.needs, ['workspace']);
+  assert.equal(pack.pipelines['simple-loop'].nodes.merge.when, 'has(needs.workspace.children.close.closed) && needs.workspace.children.close.closed == true');
   assert.equal(pack.roles.implementer.role, 'implementer');
   assert.equal(pack.pipelines['parallel-planner-with-review'].kind, 'composite');
   assert.equal(pack.pipelines['parallel-planner-with-review'].nodes.implement.kind, 'loop');
