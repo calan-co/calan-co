@@ -38,6 +38,7 @@ import { noSandbox } from "@ai-hero/sandcastle/sandboxes/no-sandbox";
 import { podman } from "@ai-hero/sandcastle/sandboxes/podman";
 import { vercel } from "@ai-hero/sandcastle/sandboxes/vercel";
 import { spawn, spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -160,12 +161,27 @@ interface PromptDef {
 }
 
 interface WorkSourceCommandConfig {
-	ready?: string;
-	list?: string;
-	inspect?: string;
-	validate?: string;
-	close?: string;
-	[key: string]: string | undefined;
+	ready?: string | WorkSourceCommandSpec;
+	list?: string | WorkSourceCommandSpec;
+	inspect?: string | WorkSourceCommandSpec;
+	validate?: string | WorkSourceCommandSpec;
+	close?: string | WorkSourceCommandSpec;
+	[key: string]: string | WorkSourceCommandSpec | undefined;
+}
+
+interface WorkSourceCommandSpec {
+	executable: string;
+	args?: string[];
+}
+
+interface WorkSourceRegistration {
+	kind: string;
+	disabled?: boolean;
+	capabilities?: string[];
+	commands?: WorkSourceCommandConfig;
+	package?: string;
+	export?: string;
+	settings?: Record<string, unknown>;
 }
 
 interface SandcastleConfig {
@@ -177,6 +193,7 @@ interface SandcastleConfig {
 	maxWorkers?: number;
 	maxIterations?: number;
 	workSource?: string;
+	workSources?: Record<string, WorkSourceRegistration>;
 	workSourceSetupCommand?: string;
 	workSourceCommands?: WorkSourceCommandConfig;
 	issueTracker?: string;
@@ -560,6 +577,7 @@ const ROOT_GITIGNORE = [
 
 
 const RUNNER_VERSION = "agent-workflows-runner-v10";
+const requireFromHere = createRequire(import.meta.url);
 const RUNNER = String.raw`#!/usr/bin/env node
 // agent-workflows-runner-v10
 import { readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
@@ -1785,6 +1803,7 @@ function validateConfig(cwd: string, cfg: SandcastleConfig): string[] {
 	else issues.push(...validateRawConfigText(readFileSync(configPath, "utf8")));
 	if (!existsSync(runnerPath)) issues.push(`Missing runner scaffold: ${RUNNER_PATH}`);
 	issues.push(...validateAgainstSchema(configForSchemaValidation(cfg), loadConfigSchema()));
+	issues.push(...validateWorkSourceSelectionConfig(cfg));
 	for (const [pipelineName, pipeline] of Object.entries(cfg.pipelines || {})) issues.push(...validateConfigGraphNodes(pipeline.nodes, `config.pipelines.${pipelineName}.nodes`));
 	if (!Object.keys(cfg.agents).length) issues.push("No roles configured.");
 	for (const [name, agent] of Object.entries(cfg.agents)) {
@@ -3438,9 +3457,169 @@ function renderWorkCommandTemplate(command: string, values: Record<string, unkno
 	return command.replace(/\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}/g, (_match, key) => String(values[key] ?? ""));
 }
 
+function renderWorkCommandArgs(args: string[] | undefined, values: Record<string, unknown>): string[] {
+	return (args || []).flatMap((arg) => {
+		const rendered = renderWorkCommandTemplate(arg, values);
+		return rendered === "" ? [] : [rendered];
+	});
+}
+
+function commandSpecLabel(spec: WorkSourceCommandSpec): string {
+	return [spec.executable, ...(spec.args || [])].join(" ");
+}
+
+function getRuntimePackWorkSources(): Record<string, WorkSourceRegistration> {
+	return loadExecutionRuntimePack().workSources || {};
+}
+
+function commandStringToSpec(command: string | undefined): WorkSourceCommandSpec | undefined {
+	if (!command || typeof command !== "string" || !command.trim()) return undefined;
+	const normalized = command.replace(/\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}/g, "{{$1}}");
+	const [executable, ...args] = tokenizeCommandArgs(normalized);
+	if (!executable) return undefined;
+	return { executable, args };
+}
+
+function selectedWorkSourceRegistration(cfg: Pick<SandcastleConfig, "workSource" | "issueTracker" | "workSources" | "workSourceCommands">): { name: string; registration?: WorkSourceRegistration } {
+	const name = String(cfg.workSource || cfg.issueTracker || "").trim();
+	const registrations = { ...getRuntimePackWorkSources(), ...(cfg.workSources || {}) };
+	if (name && cfg.workSourceCommands && Object.keys(cfg.workSourceCommands).length) {
+		const commands: WorkSourceCommandConfig = {};
+		for (const [action, command] of Object.entries(cfg.workSourceCommands)) {
+			if (typeof command === "string") commands[action] = commandStringToSpec(command);
+			else commands[action] = command;
+		}
+		return { name, registration: { kind: "custom-json-command", capabilities: Object.keys(commands).map((action) => `work.${action}`), commands } };
+	}
+	return { name, registration: name ? registrations[name] : undefined };
+}
+
+function requireSelectedWorkSourceRegistration(cfg: Pick<SandcastleConfig, "workSource" | "issueTracker" | "workSources" | "workSourceCommands">): { name: string; registration: WorkSourceRegistration } {
+	const selected = selectedWorkSourceRegistration(cfg);
+	if (!selected.name) throw new Error("No selected Work Source Registration. Set workSource to one configured registration name.");
+	if (!selected.registration) throw new Error(`Selected Work Source Registration '${selected.name}' is not configured.`);
+	if (selected.registration.disabled) throw new Error(`Selected Work Source Registration '${selected.name}' is disabled.`);
+	if (!selected.registration.kind || typeof selected.registration.kind !== "string") throw new Error(`Selected Work Source Registration '${selected.name}' is missing kind.`);
+	const issues = validateWorkSourceRegistrationShape(selected.name, selected.registration, { selected: true });
+	if (issues.length) throw new Error(`Selected Work Source Registration '${selected.name}' is invalid:\n- ${issues.join("\n- ")}`);
+	if (selected.registration.kind === "package") assertPackageRegistrationAvailable(selected.name, selected.registration);
+	return { name: selected.name, registration: selected.registration };
+}
+
+function packageExportName(registration: WorkSourceRegistration): string {
+	return registration.export || "default";
+}
+
+function assertPackageRegistrationAvailable(name: string, registration: WorkSourceRegistration): void {
+	if (!registration.package) throw new Error(`Selected Work Source Registration '${name}' package is required.`);
+	requireFromHere.resolve(registration.package);
+	try {
+		const loaded = requireFromHere(registration.package);
+		const adapter = packageExportName(registration) === "default" ? (loaded.default || loaded) : loaded[packageExportName(registration)];
+		if (!adapter) throw new Error(`export '${packageExportName(registration)}' was not found`);
+		const availableCapabilities = new Set([
+			...(Array.isArray(adapter.capabilities) ? adapter.capabilities : []),
+			...["ready", "list", "inspect", "validate", "close"].filter((action) => typeof adapter[action] === "function").map((action) => `work.${action}`),
+		]);
+		for (const capability of registration.capabilities || []) {
+			if (!availableCapabilities.has(capability)) throw new Error(`capability '${capability}' is not available from export '${packageExportName(registration)}'`);
+		}
+	} catch (error) {
+		throw new Error(`Selected Work Source Registration '${name}' package '${registration.package}' export '${packageExportName(registration)}' is unavailable: ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+
+async function loadPackageWorkSourceAdapter(name: string, registration: WorkSourceRegistration): Promise<Record<string, any>> {
+	if (registration.kind !== "package") throw new Error(`Work Source Registration '${name}' is not a package registration.`);
+	if (!registration.package) throw new Error(`Selected Work Source Registration '${name}' package is required.`);
+	const loaded = await import(registration.package);
+	const adapter = packageExportName(registration) === "default" ? (loaded.default || loaded) : (loaded as any)[packageExportName(registration)];
+	if (!adapter || typeof adapter !== "object") throw new Error(`Selected Work Source Registration '${name}' package export '${packageExportName(registration)}' did not provide an adapter object.`);
+	for (const capability of registration.capabilities || []) {
+		const action = capability.startsWith("work.") ? capability.slice("work.".length) : "";
+		if (action && typeof adapter[action] !== "function") throw new Error(`Selected Work Source Registration '${name}' package export '${packageExportName(registration)}' is missing ${capability}.`);
+	}
+	return adapter;
+}
+
+function configuredRegistrationCommand(cfg: Pick<SandcastleConfig, "workSource" | "issueTracker" | "workSources" | "workSourceCommands">, action: string): WorkSourceCommandSpec | undefined {
+	const { name, registration } = requireSelectedWorkSourceRegistration(cfg);
+	const command = registration.commands?.[action];
+	if (!command) return undefined;
+	if (typeof command === "string") throw new Error(`Selected Work Source Registration '${name}' action '${action}' must use executable plus args, not a shell string.`);
+	if (!command.executable || typeof command.executable !== "string") throw new Error(`Selected Work Source Registration '${name}' action '${action}' is missing executable.`);
+	if (command.args !== undefined && (!Array.isArray(command.args) || !command.args.every((arg) => typeof arg === "string"))) throw new Error(`Selected Work Source Registration '${name}' action '${action}' args must be strings.`);
+	return command;
+}
+
 function configuredWorkSourceCommand(cfg: Pick<SandcastleConfig, "workSourceCommands">, action: string): string | undefined {
 	const command = cfg.workSourceCommands?.[action];
 	return typeof command === "string" && command.trim().length > 0 ? command : undefined;
+}
+
+async function runWorkSourceCommandSpec(cwd: string, spec: WorkSourceCommandSpec, values: Record<string, unknown>, env: Record<string, string> = {}): Promise<ShellCommandResult> {
+	const args = renderWorkCommandArgs(spec.args, values);
+	return new Promise((resolve) => {
+		const child = spawn(spec.executable, args, { cwd, env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"] });
+		const stdout: Buffer[] = [];
+		const stderr: Buffer[] = [];
+		child.stdout?.on("data", (chunk) => stdout.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))));
+		child.stderr?.on("data", (chunk) => stderr.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))));
+		child.on("error", (error) => resolve({ exitCode: 127, stdout: Buffer.concat(stdout).toString("utf8"), stderr: `${Buffer.concat(stderr).toString("utf8")}${error.message}`, command: commandSpecLabel({ executable: spec.executable, args }) }));
+		child.on("close", (code) => resolve({ exitCode: Number(code ?? 1), stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8"), command: commandSpecLabel({ executable: spec.executable, args }) }));
+	});
+}
+
+function validateCommandSpecShape(scope: string, command: unknown): string[] {
+	const issues: string[] = [];
+	if (typeof command === "string") return [`${scope} must use executable plus args, not a shell string.`];
+	if (!isRecord(command)) return [`${scope} must be an object.`];
+	if (typeof command.executable !== "string" || !command.executable.trim()) issues.push(`${scope}.executable is required.`);
+	if (command.args !== undefined && (!Array.isArray(command.args) || !command.args.every((arg) => typeof arg === "string"))) issues.push(`${scope}.args must be an array of strings.`);
+	return issues;
+}
+
+function validateWorkSourceRegistrationShape(name: string, registration: unknown, options: { selected: boolean }): string[] {
+	const issues: string[] = [];
+	if (!isRecord(registration)) return [`workSources.${name} must be an object.`];
+	if (typeof registration.kind !== "string" || !registration.kind.trim()) issues.push(`workSources.${name}.kind is required.`);
+	if (registration.disabled !== undefined && typeof registration.disabled !== "boolean") issues.push(`workSources.${name}.disabled must be boolean.`);
+	if (registration.capabilities !== undefined && (!Array.isArray(registration.capabilities) || !registration.capabilities.every((capability) => typeof capability === "string" && capability.length > 0))) issues.push(`workSources.${name}.capabilities must be non-empty strings.`);
+	if (registration.commands !== undefined) {
+		if (!isRecord(registration.commands)) issues.push(`workSources.${name}.commands must be an object.`);
+		else for (const [action, command] of Object.entries(registration.commands)) issues.push(...validateCommandSpecShape(`workSources.${name}.commands.${action}`, command));
+	}
+	if (registration.kind === "package") {
+		if (typeof registration.package !== "string" || !registration.package.trim()) issues.push(`workSources.${name}.package is required for package registrations.`);
+		if (typeof registration.export !== "string" || !registration.export.trim()) issues.push(`workSources.${name}.export is required for package registrations.`);
+		if (!Array.isArray(registration.capabilities) || registration.capabilities.length === 0) issues.push(`workSources.${name}.capabilities is required for package registrations.`);
+	}
+	if (options.selected && registration.disabled === true) issues.push(`workSources.${name} is disabled and cannot be selected.`);
+	return issues;
+}
+
+function validateWorkSourceSelectionConfig(cfg: SandcastleConfig): string[] {
+	const issues: string[] = [];
+	const selected = selectedWorkSourceRegistration(cfg);
+	if (!selected.name) issues.push("Exactly one Work Source Registration must be selected by workSource.");
+	const registrations = { ...getRuntimePackWorkSources(), ...(cfg.workSources || {}) };
+	for (const [name, registration] of Object.entries(registrations)) issues.push(...validateWorkSourceRegistrationShape(name, registration, { selected: name === selected.name }));
+	if (selected.name && !registrations[selected.name] && !cfg.workSourceCommands) issues.push(`Selected Work Source Registration '${selected.name}' is not configured.`);
+	if (selected.name && selected.registration?.disabled) issues.push(`Selected Work Source Registration '${selected.name}' is disabled.`);
+	if (selected.name && selected.registration?.kind === "package") {
+		try {
+			assertPackageRegistrationAvailable(selected.name, selected.registration);
+		} catch (error) {
+			issues.push(error instanceof Error ? error.message : String(error));
+		}
+	}
+	if (cfg.workSourceCommands) {
+		for (const [action, command] of Object.entries(cfg.workSourceCommands)) {
+			if (typeof command === "string") issues.push(`workSourceCommands.${action} is legacy syntax; use workSources.${selected.name || "<name>"}.commands.${action}.executable and args.`);
+			else issues.push(...validateCommandSpecShape(`workSourceCommands.${action}`, command));
+		}
+	}
+	return issues;
 }
 
 function defaultWorkCloseCommand(workSource: string | undefined): string | undefined {
@@ -3677,9 +3856,7 @@ export async function executePipeline(
 	const makePipelineAgent = deps.makeAgent;
 	const loadSandboxProvider = deps.loadSandboxProvider || loadPipelineSandboxProvider;
 	const graphHookCapabilities = buildGraphHookCapabilities(pipeline, deps);
-	const hasGraphNativeWorkClose = graphHookCapabilities.includes("node.kind:work.close");
 	const configuredGraphHooks = [
-		...((cfg.workSource || cfg.issueTracker) === "doc-vader" && !hasGraphNativeWorkClose ? createDocVaderWorkSourceHooks() : []),
 		...(deps.graphHooks || []),
 	];
 	const graphHooks = configuredGraphHooks;
@@ -3883,21 +4060,34 @@ export async function executePipeline(
 							let command = explicitCommand ? renderWorkCommandTemplate(explicitCommand, closeCommandValues) : undefined;
 							let evidence: Partial<ShellCommandResult> = {};
 							if (!command) {
-								const configuredCommand = configuredWorkSourceCommand(cfg, "close");
-								if (configuredCommand) command = renderWorkCommandTemplate(configuredCommand, closeCommandValues);
-								else {
-									const adapter = deps.workSourceAdapter || ((cfg.workSource || cfg.issueTracker) === "doc-vader" ? createDocVaderWorkSourceAdapter() : undefined);
-									if (adapter?.close) {
+								const adapter = deps.workSourceAdapter || ((cfg.workSource || cfg.issueTracker) === "doc-vader" ? createDocVaderWorkSourceAdapter() : undefined);
+								if (adapter?.close) {
+									try {
+										evidence = commandEvidence(await adapter.close({ itemId, cwd: closeCwd, runId: id, pipeline: pipelineName, recordPath, item }));
+									} catch (error) {
+										const message = error instanceof Error ? error.message : String(error);
+										throw new WorkCloseAttemptRejected(`${context.path} failed to close Work Item ${itemId}: ${message}`, { cause: error });
+									}
+								} else {
+									const selected = requireSelectedWorkSourceRegistration(cfg);
+									if (selected.registration.kind === "package") {
+										const packageAdapter = await loadPackageWorkSourceAdapter(selected.name, selected.registration);
+										if (typeof packageAdapter.close !== "function") throw new Error(`${context.path} cannot close Work Item ${itemId}: selected package Work Source does not provide work.close`);
 										try {
-											evidence = commandEvidence(await adapter.close({ itemId, cwd: closeCwd, runId: id, pipeline: pipelineName, recordPath, item }));
+											evidence = commandEvidence(await packageAdapter.close({ itemId, cwd: closeCwd, runId: id, pipeline: pipelineName, recordPath, item, registration: selected.registration }));
 										} catch (error) {
 											const message = error instanceof Error ? error.message : String(error);
 											throw new WorkCloseAttemptRejected(`${context.path} failed to close Work Item ${itemId}: ${message}`, { cause: error });
 										}
 									} else {
+									const configuredCommand = configuredRegistrationCommand(cfg, "close");
+									if (configuredCommand) {
+										evidence = await runWorkSourceCommandSpec(closeCwd, configuredCommand, closeCommandValues, env);
+									} else {
 										const defaultCommand = defaultWorkCloseCommand(cfg.workSource || cfg.issueTracker);
 										if (!defaultCommand) throw new Error(`${context.path} cannot close Work Item ${itemId}: no Work Source close adapter or command configured`);
 										command = renderWorkCommandTemplate(defaultCommand, closeCommandValues);
+									}
 									}
 								}
 							}
@@ -4861,15 +5051,55 @@ Work views and processing:
 	async function readConfiguredReadyWork(cwd: string, args: string): Promise<string> {
 		if (backlogDeps.ready) return backlogDeps.ready(cwd, args);
 		const cfg = await loadConfig(cwd);
-		const readyCommand = configuredWorkSourceCommand(cfg, "ready") || configuredWorkSourceCommand(cfg, "list");
-		if (readyCommand) {
-			const rendered = renderWorkCommandTemplate(readyCommand, { args, query: args, cwd });
-			const result = await runShellCommand(rendered, { cwd });
-			if (result.exitCode !== 0) throw new Error(`Configured Work Source ready command failed: ${result.stderr || result.stdout || `command exited ${result.exitCode}`}`);
-			return result.stdout.trim();
+		const selected = requireSelectedWorkSourceRegistration(cfg);
+		if (selected.registration.kind === "package") {
+			const adapter = await loadPackageWorkSourceAdapter(selected.name, selected.registration);
+			const method = typeof adapter.ready === "function" ? adapter.ready : adapter.list;
+			if (typeof method !== "function") throw new Error(`Selected Work Source Registration '${selected.name}' package adapter does not provide ready or list.`);
+			const result = await method({ cwd, query: args, args, registration: selected.registration });
+			return typeof result === "string" ? result.trim() : String(result?.text || result?.stdout || "").trim();
 		}
-		if ((cfg.workSource || cfg.issueTracker) === "doc-vader") return (await runProcess(cwd, "dv", ["work", "ready", ...tokenizeCommandArgs(args)])).stdout.trim();
-		return renderReadyWork(await planBacklogProcessing(cwd, args));
+		const readyCommand = configuredRegistrationCommand(cfg, "ready") || configuredRegistrationCommand(cfg, "list");
+		if (!readyCommand) throw new Error(`Selected Work Source Registration '${selected.name}' does not provide a ready or list command.`);
+		const result = await runWorkSourceCommandSpec(cwd, readyCommand, { args, query: args, cwd });
+		if (result.exitCode !== 0) throw new Error(`Selected Work Source Registration '${selected.name}' ready command failed: ${result.stderr || result.stdout || `command exited ${result.exitCode}`}`);
+		return result.stdout.trim();
+	}
+
+	function createConfiguredWorkSourceReadCapability(cwd: string) {
+		return {
+			async list(query = "") {
+				const cfg = await loadConfig(cwd);
+				const selected = requireSelectedWorkSourceRegistration(cfg);
+				if (selected.registration.kind === "package") {
+					const adapter = await loadPackageWorkSourceAdapter(selected.name, selected.registration);
+					const method = typeof adapter.list === "function" ? adapter.list : adapter.ready;
+					if (typeof method !== "function") throw new Error(`Selected Work Source Registration '${selected.name}' package adapter does not provide list or ready.`);
+					const result = await method({ cwd, query, args: query, registration: selected.registration });
+					return typeof result === "string" ? { query: String(query || ""), items: [], text: result } : { query: String(query || ""), items: Array.isArray(result?.items) ? result.items : [], text: String(result?.text || result?.stdout || "") };
+				}
+				const command = configuredRegistrationCommand(cfg, "list") || configuredRegistrationCommand(cfg, "ready");
+				if (!command) throw new Error(`Selected Work Source Registration '${selected.name}' does not provide a list or ready command.`);
+				const result = await runWorkSourceCommandSpec(cwd, command, { args: query, query, cwd });
+				if (result.exitCode !== 0) throw new Error(`Selected Work Source Registration '${selected.name}' list command failed: ${result.stderr || result.stdout || `command exited ${result.exitCode}`}`);
+				return { query: String(query || ""), items: [], text: result.stdout.trim() || "No Work Items matched the query." };
+			},
+			async inspect(target = "") {
+				const cfg = await loadConfig(cwd);
+				const selected = requireSelectedWorkSourceRegistration(cfg);
+				if (selected.registration.kind === "package") {
+					const adapter = await loadPackageWorkSourceAdapter(selected.name, selected.registration);
+					if (typeof adapter.inspect !== "function") throw new Error(`Selected Work Source Registration '${selected.name}' package adapter does not provide inspect.`);
+					const result = await adapter.inspect({ cwd, id: target, itemId: target, target, registration: selected.registration });
+					return typeof result === "string" ? { item: undefined, text: result } : { item: result?.item, text: String(result?.text || result?.stdout || "") };
+				}
+				const command = configuredRegistrationCommand(cfg, "inspect");
+				if (!command) throw new Error(`Selected Work Source Registration '${selected.name}' does not provide an inspect command.`);
+				const result = await runWorkSourceCommandSpec(cwd, command, { id: target, itemId: target, target, args: target, query: target, cwd });
+				if (result.exitCode !== 0) throw new Error(`Selected Work Source Registration '${selected.name}' inspect command failed: ${result.stderr || result.stdout || `command exited ${result.exitCode}`}`);
+				return { item: undefined, text: result.stdout.trim() };
+			},
+		};
 	}
 
 	async function runPlannerPhase(args: string, ctx: any): Promise<any> {
@@ -4887,6 +5117,9 @@ Work views and processing:
 	async function notifyBacklogPlan(args: string, ctx: any, overrides?: { iterations?: number }): Promise<void> {
 		try {
 			const effectiveArgs = overrides?.iterations && !/--iterations(?:=|\s|$)/.test(args) ? `${args} --iterations=${overrides.iterations}`.trim() : args;
+			const cfg = await loadConfig(ctx.cwd);
+			const selectedRegistration = requireSelectedWorkSourceRegistration(cfg);
+			const workSourceRegistration = { name: selectedRegistration.name, kind: selectedRegistration.registration.kind };
 			const plan = await runPlannerPhase(effectiveArgs, ctx);
 			const createdAt = getBacklogTimestamp(backlogDeps.now);
 			const validationErrors = validateExecutablePlanArtifact(plan);
@@ -4897,7 +5130,7 @@ Work views and processing:
 				return;
 			}
 			const normalizedPlan = normalizeWorkPlanArtifact(plan);
-			const record = { id: createBacklogPlanId(createdAt), kind: "work-plan", createdAt, args: effectiveArgs, plan: normalizedPlan };
+			const record = { id: createBacklogPlanId(createdAt), kind: "work-plan", createdAt, args: effectiveArgs, workSourceRegistration, plan: normalizedPlan };
 			const recordPath = writeBacklogPlanRecord(ctx.cwd, record);
 			ctx.ui.notify(`${formatAuthoritativePlan(normalizedPlan)}\n\nCached plan: ${record.id}\nRecord: ${recordPath}`, "info");
 		} catch (error) {
@@ -5328,10 +5561,6 @@ Work views and processing:
 			if (workSourceHookState.mutations?.length) {
 				executionResult.workSourceMutations = workSourceHookState.mutations;
 				if (workSourceHookState.mutations.some((mutation) => mutation.status === "failed")) executionResult.status = "error";
-			} else if (executionResult.status === "done" && !pipelineRun.nodes?.some((node) => node.kind === "work.close")) {
-				const mutationResult = await runWorkSourceMutations({ cwd, runId: input.runId, pipeline: input.pipeline, recordPath: input.recordPath, items: input.items });
-				if (mutationResult.outcomes.length) executionResult.workSourceMutations = mutationResult.outcomes;
-				if (mutationResult.failed) executionResult.status = "error";
 			}
 			return executionResult;
 		} catch (error) {
@@ -5677,6 +5906,7 @@ Work views and processing:
 			try {
 				const { query, pipeline: explicitPipeline, planId } = parseBacklogProcessArgs(args);
 				const cfg = await loadConfig(ctx.cwd);
+				const selectedRegistration = requireSelectedWorkSourceRegistration(cfg);
 				await assertCleanTargetWorktreeBeforeMerge(ctx.cwd, deriveProcessPipeline(explicitPipeline, cfg), cfg, deps.pipeline);
 				const { record: finalRecord, recordPath, advisoryNotes = [] } = await runWorkProcess(
 					{
@@ -5688,6 +5918,7 @@ Work views and processing:
 						entrypoint: cfg.entrypoint,
 						now: () => getBacklogTimestamp(backlogDeps.now),
 						createRunId: createBacklogRunId,
+						workSourceRegistration: { name: selectedRegistration.name, kind: selectedRegistration.registration.kind },
 					},
 					{
 						readPlanRecord: readBacklogPlanRecord,
@@ -5732,7 +5963,7 @@ Work views and processing:
 		handler: async (args, ctx) => notifyBacklogPlan(args, ctx, { iterations: 1 }),
 	});
 
-	registerWorkCommands(pi);
+	registerWorkCommands(pi, { capabilityFactory: createConfiguredWorkSourceReadCapability });
 	pi.registerCommand("work:runs", {
 		description: "List Work Process runs: /work:runs [query]",
 		handler: async (args, ctx) => {
@@ -5774,8 +6005,18 @@ Work views and processing:
 		description: "Resume a Work Process run: /work:resume [run-id]",
 		handler: async (args, ctx) => {
 			const resumeCapability = getBacklogResumeCapability(ctx);
-			const result = await resumeWorkRun(ctx.cwd, args.trim(), resumeCapability);
-			ctx.ui.notify(result.message, result.ok ? "success" : "error");
+			try {
+				const result = await resumeWorkRun(ctx.cwd, args.trim(), resumeCapability, {
+					currentWorkSourceRegistration: async () => {
+						const cfg = await loadConfig(ctx.cwd);
+						const selected = requireSelectedWorkSourceRegistration(cfg);
+						return { name: selected.name, kind: selected.registration.kind };
+					},
+				});
+				ctx.ui.notify(result.message, result.ok ? "success" : "error");
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			}
 		},
 	});
 

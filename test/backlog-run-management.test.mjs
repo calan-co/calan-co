@@ -262,6 +262,36 @@ test('resumes backlog runs through an injected capability and writes the durable
   });
 });
 
+test('resume rejects Work Source Registration drift before invoking provider resume', async () => {
+  await withTempDir(async (cwd) => {
+    await writeBacklogRunRecord(cwd, backlogRun({
+      id: 'run-drift',
+      status: 'failed',
+      updatedAt: 100,
+      sessionId: 'ses-drift',
+      providerSession: { id: 'ses-drift', supportsResume: true },
+      workSourceRegistration: { name: 'issues', kind: 'github-issues' },
+    }));
+
+    let resumeCalls = 0;
+    const result = await resumeBacklogRun(
+      cwd,
+      'run-drift',
+      async () => {
+        resumeCalls += 1;
+        return { ok: true };
+      },
+      { currentWorkSourceRegistration: async () => ({ name: 'tasks', kind: 'beads' }) },
+    );
+
+    assert.equal(result.ok, false);
+    assert.equal(resumeCalls, 0);
+    assert.match(result.message, /Work Source Registration changed/);
+    assert.match(result.message, /issues:github-issues/);
+    assert.match(result.message, /tasks:beads/);
+  });
+});
+
 test('returns clear errors for missing and non-resumable backlog runs without mutation', async () => {
   await withTempDir(async (cwd) => {
     await writeBacklogRunRecord(

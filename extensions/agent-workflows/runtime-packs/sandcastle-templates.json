@@ -522,21 +522,71 @@
   "workSources": {
     "github-issues": {
       "kind": "github-issues",
-      "listCommand": "gh issue list --state open",
-      "inspectCommand": "gh issue view {{ id }}",
-      "closeCommand": "gh issue close {{ id }}"
+      "capabilities": ["work.ready", "work.list", "work.inspect", "work.close"],
+      "commands": {
+        "ready": {
+          "executable": "gh",
+          "args": ["issue", "list", "--state", "open", "--json", "number,title,state,body,url,labels"]
+        },
+        "list": {
+          "executable": "gh",
+          "args": ["issue", "list", "--state", "open", "--json", "number,title,state,body,url,labels"]
+        },
+        "inspect": {
+          "executable": "gh",
+          "args": ["issue", "view", "{{ id }}", "--json", "number,title,state,body,url,labels,comments"]
+        },
+        "close": {
+          "executable": "gh",
+          "args": ["issue", "close", "{{ id }}"]
+        }
+      }
     },
     "beads": {
       "kind": "beads",
-      "listCommand": "bd list --status open",
-      "inspectCommand": "bd show {{ id }}",
-      "closeCommand": "bd close {{ id }}"
+      "capabilities": ["work.ready", "work.list", "work.inspect", "work.close"],
+      "commands": {
+        "ready": {
+          "executable": "bd",
+          "args": ["list", "--status", "open", "--json"]
+        },
+        "list": {
+          "executable": "bd",
+          "args": ["list", "--status", "open", "--json"]
+        },
+        "inspect": {
+          "executable": "bd",
+          "args": ["show", "{{ id }}", "--json"]
+        },
+        "close": {
+          "executable": "bd",
+          "args": ["close", "{{ id }}"]
+        }
+      }
     },
     "custom": {
-      "kind": "custom"
+      "kind": "custom-json-command",
+      "disabled": true,
+      "capabilities": [],
+      "commands": {}
     },
     "doc-vader": {
-      "kind": "doc-vader"
+      "kind": "doc-vader",
+      "capabilities": ["work.ready", "work.validate", "work.close"],
+      "commands": {
+        "ready": {
+          "executable": "dv",
+          "args": ["work", "ready", "{{ args }}"]
+        },
+        "validate": {
+          "executable": "node",
+          "args": [".sandcastle/dv4sandcastle.mjs", "validate", "{{ id }}"]
+        },
+        "close": {
+          "executable": "node",
+          "args": [".sandcastle/dv4sandcastle.mjs", "close", "{{ id }}"]
+        }
+      }
     }
   }
 }

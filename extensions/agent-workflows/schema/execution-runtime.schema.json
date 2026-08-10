@@ -187,29 +187,57 @@
       "required": [
         "kind"
       ],
-      "additionalProperties": true,
+      "additionalProperties": false,
       "properties": {
         "kind": {
           "$ref": "#/$defs/identifier"
         },
-        "adapter": {
-          "$ref": "#/$defs/identifier"
+        "disabled": {
+          "type": "boolean"
         },
-        "listCommand": {
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/identifier"
+          },
+          "uniqueItems": true
+        },
+        "package": {
           "type": "string",
           "minLength": 1
         },
-        "inspectCommand": {
+        "export": {
           "type": "string",
           "minLength": 1
         },
-        "validateCommand": {
+        "commands": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/workSourceCommand"
+          }
+        },
+        "settings": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "workSourceCommand": {
+      "type": "object",
+      "required": [
+        "executable"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "executable": {
           "type": "string",
           "minLength": 1
         },
-        "closeCommand": {
-          "type": "string",
-          "minLength": 1
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       }
     },

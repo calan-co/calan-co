@@ -196,6 +196,20 @@ test('execution runtime schema requires graph-native composite map nodes', () =>
   assert.equal(schema.$defs.containerImage.properties.strategy, undefined);
 });
 
+test('runtime pack declares ordinary named Work Source Registrations with executable argument templates', () => {
+  const pack = loadExecutionRuntimePack();
+  assert.ok(pack.workSources['github-issues']);
+  assert.ok(pack.workSources['beads']);
+  assert.ok(pack.workSources['doc-vader']);
+  assert.equal(pack.defaults.workSource, 'github-issues');
+  assert.equal(pack.workSources['github-issues'].kind, 'github-issues');
+  assert.deepEqual(pack.workSources['github-issues'].commands.ready, {
+    executable: 'gh',
+    args: ['issue', 'list', '--state', 'open', '--json', 'number,title,state,body,url,labels'],
+  });
+  assert.equal(typeof pack.workSources['github-issues'].closeCommand, 'undefined');
+});
+
 test('runtime compiler converts deterministic runtime pipelines to graph-native execution config', () => {
   const pack = loadExecutionRuntimePack();
   const cfg = runtimeToSandcastleConfig(pack, { defaultSandbox: 'podman', defaultPipeline: 'archive' });

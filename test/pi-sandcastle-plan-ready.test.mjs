@@ -27,7 +27,7 @@ function makeRepo() {
   return cwd;
 }
 
-test('default local planner selects only explicitly ready Work Items for queries and fallback', async () => {
+test('default Work readiness fails closed without a selected registration command instead of using local Markdown', async () => {
   const cwd = makeRepo();
   mkdirSync(join(cwd, 'backlog'));
   writeFileSync(join(cwd, 'backlog', '00001-ready.md'), `---
@@ -60,9 +60,10 @@ Completed work.`);
     cwd,
     ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
   });
-  assert.doesNotMatch(notifications[0].message, /wi-closed/);
-  assert.match(notifications[0].message, /wi-ready/);
-  assert.match(notifications[1].message, /wi-ready/);
+  assert.equal(notifications[0].type, 'error');
+  assert.equal(notifications[1].type, 'error');
+  assert.doesNotMatch(notifications[0].message, /wi-closed|wi-ready/);
+  assert.doesNotMatch(notifications[1].message, /wi-closed|wi-ready/);
 
   const noReadyCwd = makeRepo();
   mkdirSync(join(noReadyCwd, 'backlog'));
@@ -84,9 +85,52 @@ Completed work.`);
     ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
   });
 
-  assert.deepEqual(notifications[2], { message: 'Query: (none)', type: 'info' });
+  assert.equal(notifications[2].type, 'error');
+  assert.doesNotMatch(notifications[2].message, /wi-closed-only/);
   assert.equal(notifications[3].type, 'error');
-  assert.match(notifications[3].message, /No currently executable Work Items were selected/);
+  assert.match(notifications[3].message, /No currently executable Work Items were selected|Work Source Registration/);
+});
+
+test('/work:ready fails closed instead of falling back to local Markdown backlog files', async () => {
+  const cwd = makeRepo();
+  mkdirSync(join(cwd, 'backlog'));
+  writeFileSync(join(cwd, 'backlog', '00001-ready.md'), `---
+id: wi-local
+title: Local markdown must be dormant
+status: ready
+---
+
+## Goal
+
+This file must not be used as a fallback Work Source.`);
+  writeFileSync(join(cwd, '.pi/sandcastle/config.yaml'), [
+    'workSource: dormant',
+    'roles:',
+    '  planner:',
+    '    description: Planner',
+    '    kind: planWork',
+    'pipelines:',
+    '  simple-loop:',
+    '    kind: composite',
+    '    nodes:',
+    '      run:',
+    '        kind: agent.pi',
+    '        role: planner',
+    '        prompt: $INPUT',
+  ].join('\n'));
+  writeFileSync(join(cwd, '.pi/sandcastle/run-job.mjs'), 'console.log("runner")');
+  const pi = fakePi();
+  const notifications = [];
+  agentWorkflows(pi, {});
+
+  await pi.commands.get('work:ready').handler('', {
+    cwd,
+    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  });
+
+  assert.equal(notifications.at(-1).type, 'error');
+  assert.match(notifications.at(-1).message, /Selected Work Source Registration 'dormant'/);
+  assert.doesNotMatch(notifications.at(-1).message, /wi-local/);
 });
 
 test('Agent Workflows registers /work planning commands without /backlog aliases', async () => {
@@ -109,6 +153,7 @@ test('/work:plan runs planning phase and caches authoritative plan output', asyn
   agentWorkflows(pi, {
     work: {
       now: () => 123456,
+      ready: async () => 'wi-001 Ready item',
       async runPlanWorkRole({ cwd: repo, args, role, task }) {
         calls.push({ repo, args, role, task });
         return { summary: 'Planner classified implementation first.', iterations: [{ items: [{ id: 'wi-001' }], classifications: { risk: 'low' }, rationale: 'Ready to execute.' }] };
@@ -136,6 +181,7 @@ test('/work:plan runs planning phase and caches authoritative plan output', asyn
   assert.equal(existsSync(recordPath), true);
   const record = JSON.parse(readFileSync(recordPath, 'utf8'));
   assert.equal(record.kind, 'work-plan');
+  assert.deepEqual(record.workSourceRegistration, { name: 'github-issues', kind: 'github-issues' });
   assert.equal(record.plan.summary, 'Planner classified implementation first.');
 });
 
@@ -210,6 +256,7 @@ test('/work:plan fails closed and caches invalid planner output for inspection',
   agentWorkflows(pi, {
     work: {
       now: () => 123456,
+      ready: async () => 'wi-001 Ready item',
       async runPlanWorkRole() {
         return { summary: 'not executable', iterations: [{ items: [{ title: 'Missing id' }] }] };
       },
@@ -240,6 +287,7 @@ test('/work:plan rejects planner-authored pipeline and branch mechanics', async 
   agentWorkflows(pi, {
     work: {
       now: () => 123456,
+      ready: async () => 'wi-001 Ready item',
       async runPlanWorkRole() {
         return {
           summary: 'tries to decide execution mechanics',
@@ -326,6 +374,39 @@ test('/work:process --plan refuses cached invalid planner output', async () => {
   assert.equal(calls.length, 0);
   assert.equal(notifications[0].type, 'error');
   assert.match(notifications[0].message, /not an executable Work Plan/);
+});
+
+test('/work:process --plan rejects cached Work Plan registration drift before execution', async () => {
+  const cwd = makeRepo();
+  const pi = fakePi();
+  const calls = [];
+  const notifications = [];
+  mkdirSync(join(cwd, '.pi', 'sandcastle', 'plans'), { recursive: true });
+  const planId = 'plan-registration-drift';
+  writeFileSync(join(cwd, '.pi', 'sandcastle', 'plans', `${planId}.json`), JSON.stringify({
+    id: planId,
+    kind: 'work-plan',
+    workSourceRegistration: { name: 'tasks', kind: 'beads' },
+    plan: { iterations: [{ items: [{ id: 'wi-001' }] }] },
+  }, null, 2));
+  agentWorkflows(pi, {
+    work: {
+      async execute(repo, input) {
+        calls.push({ repo, input });
+        return { status: 'done' };
+      },
+    },
+  });
+
+  await pi.commands.get('work:process').handler(`--plan ${planId}`, {
+    cwd,
+    ui: { notify: (message, type = 'info') => notifications.push({ message, type }) },
+  });
+
+  assert.equal(calls.length, 0);
+  assert.equal(notifications[0].type, 'error');
+  assert.match(notifications[0].message, /created for Work Source Registration 'tasks:beads'/);
+  assert.match(notifications[0].message, /current registration is 'github-issues:github-issues'/);
 });
 
 test('/work:process --plan fails closed when cached Work Plan payload is missing', async () => {

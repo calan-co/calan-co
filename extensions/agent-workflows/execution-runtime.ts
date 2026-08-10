@@ -11,13 +11,28 @@ export interface ExecutionRuntimePack {
 	metadata?: { id?: string; label?: string; description?: string; inspiredBy?: string[] };
 	defaults?: Record<string, unknown>;
 	providers?: Record<string, unknown>;
-	workSources?: Record<string, unknown>;
+	workSources?: Record<string, WorkSourceRegistration>;
 	issueTrackers?: Record<string, unknown>;
 	roles: Record<string, RuntimeAgent>;
 	prompts: Record<string, RuntimePrompt>;
 	policies?: Record<string, unknown>;
 	adapters?: Record<string, RuntimeAdapter>;
 	pipelines: Record<string, RuntimePipeline>;
+}
+
+export interface WorkSourceCommandSpec {
+	executable: string;
+	args?: string[];
+}
+
+export interface WorkSourceRegistration {
+	kind: string;
+	disabled?: boolean;
+	capabilities?: string[];
+	commands?: Record<string, WorkSourceCommandSpec>;
+	package?: string;
+	export?: string;
+	settings?: Record<string, unknown>;
 }
 
 export interface RuntimeAdapter {

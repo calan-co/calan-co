@@ -84,6 +84,7 @@ export interface WorkProcessRunRecord {
 	logs: string[];
 	workerStatuses?: WorkProcessWorkerStatus[];
 	workSourceMutations?: WorkSourceMutationOutcome[];
+	workSourceRegistration?: WorkSourceRegistrationIdentity;
 	executionContexts: WorkExecutionContext[];
 	executionGroups: WorkExecutionGroup[];
 	startedAt: number;
@@ -91,6 +92,11 @@ export interface WorkProcessRunRecord {
 	endedAt?: number;
 	error?: string;
 	message?: string;
+}
+
+export interface WorkSourceRegistrationIdentity {
+	name: string;
+	kind: string;
 }
 
 export interface WorkProcessExecutionInput {
@@ -122,6 +128,7 @@ export interface RunWorkProcessInput {
 	maxIterations?: number;
 	now?: () => number;
 	createRunId?: (startedAt: number) => string;
+	workSourceRegistration?: WorkSourceRegistrationIdentity;
 }
 
 export interface RunWorkProcessDeps {
@@ -435,6 +442,7 @@ export function createWorkProcessRecord(input: {
 	iteration: WorkPlanIteration;
 	planId?: string;
 	startedAt: number;
+	workSourceRegistration?: WorkSourceRegistrationIdentity;
 }): WorkProcessRunRecord {
 	const items = Array.isArray(input.iteration.items) ? input.iteration.items : [];
 	const executionGroups = buildExecutionGroups({ runId: input.runId, pipeline: input.pipeline, iteration: input.iteration });
@@ -449,6 +457,7 @@ export function createWorkProcessRecord(input: {
 		status: "running",
 		branches: [],
 		logs: [],
+		...(input.workSourceRegistration ? { workSourceRegistration: input.workSourceRegistration } : {}),
 		executionContexts,
 		executionGroups,
 		startedAt: input.startedAt,
@@ -589,6 +598,9 @@ export async function runWorkProcess(input: RunWorkProcessInput, deps: RunWorkPr
 	if (input.planId) {
 		if (!deps.readPlanRecord) throw new Error("Cached Work Plan reading is not configured.");
 		const cachedPlanRecord = deps.readPlanRecord(input.cwd, input.planId);
+		const cachedRegistration = cachedPlanRecord?.workSourceRegistration;
+		const currentRegistration = input.workSourceRegistration;
+		if (cachedRegistration && currentRegistration && (cachedRegistration.name !== currentRegistration.name || cachedRegistration.kind !== currentRegistration.kind)) throw new Error(`Cached Work Plan '${input.planId}' was created for Work Source Registration '${cachedRegistration.name}:${cachedRegistration.kind}' but current registration is '${currentRegistration.name}:${currentRegistration.kind}'. Re-run /work:plan for the selected Work Source Registration.`);
 		const cachedPlan = cachedPlanRecord?.plan;
 		const validationErrors = validateExecutablePlanArtifact(cachedPlan);
 		if (validationErrors.length) throw new Error(`Cached Work Plan '${input.planId}' is not executable:\n- ${validationErrors.join("\n- ")}`);
@@ -640,6 +652,7 @@ export async function runWorkProcess(input: RunWorkProcessInput, deps: RunWorkPr
 			iteration: selection.iteration,
 			planId: input.planId,
 			startedAt,
+			workSourceRegistration: input.workSourceRegistration,
 		});
 		const runningRecord = mergeWorkProcessRecords(aggregateRecord, waveRecord);
 		recordPath = writeRecord(input.cwd, runningRecord);

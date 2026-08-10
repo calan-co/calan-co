@@ -191,7 +191,7 @@ test('backlog config TUI batch save persists doc-vader defaults without expandin
     const saved = readFileSync(join(configDir, 'config.yaml'), 'utf8');
     assert.match(saved, /^workSource: doc-vader/m);
     assert.match(saved, /^workSourceSetupCommand: dv sandcastle init/m);
-    assert.match(saved, /^workSourceCommands:/m);
+    assert.doesNotMatch(saved, /^workSourceCommands:/m);
     assert.doesNotMatch(saved, /^pipelines:/m);
   `);
 });

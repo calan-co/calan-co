@@ -8,6 +8,8 @@ Run `/work:config init` to hydrate local runtime support files. `/work:config in
 
 Durable run records and logs are stored under `.pi/sandcastle/runs` and `.pi/sandcastle/results`. Cached planning artifacts are stored under `.pi/sandcastle/plans`. Durable state begins when `/work:process` or `/work:resume` executes an adapter-backed graph pipeline.
 
+Each repo selects exactly one named Work Source Registration with `workSource`. Runtime-pack registrations and repo-local custom registrations use the same schema. Unselected registrations are dormant: they may be displayed and selected in config UI, but they do not read, validate readiness, mutate, or preserve source material for the current run.
+
 ## Runtime and execution commands
 
 - `/work:config` opens the friendly runtime configuration UI and owns `show|init|edit|editor|get|set|reset|validate` subcommands.
@@ -19,15 +21,15 @@ Durable run records and logs are stored under `.pi/sandcastle/runs` and `.pi/san
 - `/work:status [run-id]` inspects the current, latest, or specified Work Process run.
 - `/work:logs [run-id]` prints or returns the log path for a Work Process run.
 - `/work:cancel [run-id|all]` cancels active Work Process work when supported.
-- `/work:resume [run-id]` resumes a Work Process run when metadata and provider support make that safe.
+- `/work:resume [run-id]` resumes a Work Process run when metadata, Work Source Registration identity, and provider support make that safe.
 
 ## Work commands
 
-- `/work:list [query]` lists matching Work Items without starting work.
-- `/work:ready [query]` lists deterministic ready Work candidates from the configured Work Source.
+- `/work:list [query]` lists matching Work Items from the selected Work Source Registration without starting work.
+- `/work:ready [query]` lists deterministic ready Work candidates from the selected Work Source Registration.
 - `/work:plan [query] --iterations N` runs the configured read-only `planWork` phase and caches a schema-validated Plan Artifact.
 - `/work:next [query]` is a thin alias for `/work:plan --iterations 1`.
-- `/work:inspect <item>` returns Work Item analysis, risks, relevant files, testing notes, and planning context.
+- `/work:inspect <item>` returns selected-source Work Item detail and preserved source material.
 - `/work:process [query] --pipeline <pipeline>` starts durable processing for the resolved Work query through graph lanes and per-lane worktrees.
 - `/work:process --plan <plan-id> [--pipeline <pipeline>]` starts durable processing from a previously cached Plan Artifact, optionally overriding the policy-selected pipeline during this transition slice.
 
@@ -40,3 +42,5 @@ Example: `/work:process auth bugs --pipeline implement` uses `auth bugs` as quer
 ## Boundary
 
 Discovery commands such as `/work:list`, `/work:inspect`, and `/work:ready` do not create durable records. `/work:plan` creates a cached Plan Artifact but does not execute implementation work. Durable state begins when `/work:process` or `/work:resume` executes an adapter-backed graph pipeline. Future PR workflow belongs under a separate `/pr:*` namespace.
+
+Work Source mutations must be explicit graph nodes, for example `work.close`. There is no implicit local Markdown/backlog fallback and no source-specific merge hook that validates or closes work after `git.merge`. Custom command registrations execute an `executable` with argument templates; shell command strings are rejected for registration commands.

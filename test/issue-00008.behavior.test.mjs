@@ -201,6 +201,28 @@ Preserve this exact markdown body.
     }, {
       work: {
         now: () => 1710000000000,
+        plan: async (_cwd, query) => ({
+          query,
+          iterations: [{
+            items: [{
+              id: 'wi-00042',
+              title: 'Preserve Work Source',
+              summary: 'Keep source payloads for role briefs.',
+              tags: ['afk', 'work'],
+              dependencies: ['wi-00041'],
+              dependsOn: ['wi-00041'],
+              sourcePath: 'backlog/00042-preserve-source.md',
+              source: {
+                adapter: 'fixture-registration',
+                kind: 'markdown-fixture',
+                path: 'backlog/00042-preserve-source.md',
+                absolutePath: join(cwd, 'backlog', '00042-preserve-source.md'),
+                body: '## Goal\n\nPreserve this exact markdown body.',
+                payload: { frontmatter: { title: 'Preserve Work Source' } },
+              },
+            }],
+          }],
+        }),
         execute: async (_cwd, input) => {
           capturedItems = input.items;
           return { branches: [], logs: [], status: 'done' };
@@ -276,11 +298,18 @@ test('work:process reports one worker row per graph agent in the completion summ
     const events = new Map();
     const widgets = [];
     const notifications = [];
+    let planCalls = 0;
     agentWorkflows({
       registerCommand(name, spec) { commands.set(name, spec); },
       on(name, handler) { events.set(name, handler); },
       registerTool() {},
     }, {
+      work: {
+        plan: async (_cwd, query) => ({
+          query,
+          iterations: planCalls++ === 0 ? [{ items: [{ id: 'wi-00008', title: 'Worker Status', tags: ['afk'], sourcePath: 'backlog/00008-work.md' }] }] : [],
+        }),
+      },
       pipeline: {
         now: () => 1700000004000,
         createWorktree: async () => ({
@@ -387,6 +416,12 @@ test('work:process does not mark later pipeline workers running before their ste
       on(name, handler) { events.set(name, handler); },
       registerTool() {},
     }, {
+      work: {
+        plan: async (_cwd, query) => ({
+          query,
+          iterations: [{ items: [{ id: 'wi-00008', title: 'Worker Status', tags: ['afk'], sourcePath: 'backlog/00008-work.md' }] }],
+        }),
+      },
       pipeline: {
         now: () => 1700000005000,
         createWorktree: async () => ({

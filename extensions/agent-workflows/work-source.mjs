@@ -504,50 +504,15 @@ export function createWorkSourceCapability({
   sources = DEFAULT_SOURCE_DIRS,
 } = {}) {
   if (!cwd) throw new Error("Work Source capability requires a cwd.");
-
-  function loadItems() {
-    return discoverWorkItems(fs, path, cwd, sources);
-  }
+  const retiredMessage = "Local Markdown Work Source behavior has been retired. Configure and select a named Work Source Registration.";
 
   return {
     async list(query = "") {
-      const items = loadItems().filter((item) => matchesQuery(item, query)).sort(comparePriority);
-      return {
-        query: toText(query),
-        items,
-        text: formatListResult(items),
-      };
+      throw new Error(retiredMessage);
     },
 
     async inspect(target) {
-      const items = loadItems();
-      const resolved = resolveWorkItem(items, path, cwd, target);
-      if (!resolved) {
-        throw new Error(`No Work Item matched '${toText(target)}'.`);
-      }
-
-      const dependencyState = deriveDependencyState(resolved, items, cwd, path);
-      const recommendedPipeline = deriveRecommendedPipeline(resolved);
-      const risks = deriveRisks(resolved);
-      const testingNotes = deriveTestingNotes(resolved);
-      const relevantFiles = deriveRelevantFiles(resolved);
-
-      return {
-        item: resolved,
-        dependencyState,
-        recommendedPipeline,
-        risks,
-        testingNotes,
-        relevantFiles,
-        analysis: `Read-only Work Item with ${resolved.dependsOn.length} dependent link(s).`,
-        text: formatInspectResult(resolved, {
-          dependencyState,
-          recommendedPipeline,
-          risks,
-          testingNotes,
-          relevantFiles,
-        }),
-      };
+      throw new Error(retiredMessage);
     },
   };
 }

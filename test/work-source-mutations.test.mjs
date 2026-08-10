@@ -118,21 +118,15 @@ async function readProcessRecord(repoRoot) {
   throw new Error('missing work process record');
 }
 
-test('/work:process validates then closes each item after successful graph execution', async () => {
+test('/work:process does not mutate Work Source unless the graph has explicit mutation nodes', async () => {
   const fixture = await setup();
   try {
     await fixture.commands.get('work:process').handler('demo', fixture.ctx);
     const record = await readProcessRecord(fixture.repoRoot);
     assert.equal(record.status, 'done');
-    assert.deepEqual(fixture.mutations, [
-      `validate:wi-1:${record.id}:true`,
-      `close:wi-1:${record.id}`,
-    ]);
-    assert.deepEqual(record.workSourceMutations.map((entry) => `${entry.itemId}:${entry.action}:${entry.status}`), [
-      'wi-1:validate:succeeded',
-      'wi-1:close:succeeded',
-    ]);
-    assert.match(fixture.notifications.at(-1).message, /Work Source:\n  ✓ wi-1: validate succeeded\n  ✓ wi-1: close succeeded/);
+    assert.deepEqual(fixture.mutations, []);
+    assert.equal(record.workSourceMutations, undefined);
+    assert.doesNotMatch(fixture.notifications.at(-1).message, /Work Source:/);
   } finally {
     await fs.rm(fixture.repoRoot, { recursive: true, force: true });
   }
@@ -552,15 +546,14 @@ test('custom Work Source commands can provide ready and close actions', async ()
   }
 });
 
-test('/work:process does not close an item when Work Source validation fails', async () => {
+test('/work:process ignores implicit Work Source validation failures when no mutation node exists', async () => {
   const fixture = await setup({ failValidate: true });
   try {
     await fixture.commands.get('work:process').handler('demo', fixture.ctx);
     const record = await readProcessRecord(fixture.repoRoot);
-    assert.equal(record.status, 'error');
-    assert.deepEqual(fixture.mutations, [`validate:wi-1:${record.id}:true`]);
-    assert.deepEqual(record.workSourceMutations.map((entry) => `${entry.itemId}:${entry.action}:${entry.status}`), ['wi-1:validate:failed']);
-    assert.equal(fixture.notifications.at(-1).type, 'error');
+    assert.equal(record.status, 'done');
+    assert.deepEqual(fixture.mutations, []);
+    assert.equal(record.workSourceMutations, undefined);
   } finally {
     await fs.rm(fixture.repoRoot, { recursive: true, force: true });
   }

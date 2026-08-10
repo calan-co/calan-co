@@ -507,7 +507,12 @@ export function writeBacklogRunRecord(cwd, record) {
   return filePath;
 }
 
-export async function resumeBacklogRun(cwd, runId, resumeCapability) {
+function registrationIdentityText(identity) {
+  if (!identity) return "(none)";
+  return `${identity.name || "(unnamed)"}:${identity.kind || "(unknown)"}`;
+}
+
+export async function resumeBacklogRun(cwd, runId, resumeCapability, options = {}) {
   const records = readBacklogRunRecords(cwd);
   const selection = selectBacklogRunForResume(records, runId);
   if (selection.kind !== "record") {
@@ -527,6 +532,17 @@ export async function resumeBacklogRun(cwd, runId, resumeCapability) {
       ok: false,
       message: `Work run '${record.id}' is resumable, but this extension context does not provide a resume capability.`,
     };
+  }
+
+  if (typeof options.currentWorkSourceRegistration === "function") {
+    const current = await options.currentWorkSourceRegistration(record);
+    const stored = record.workSourceRegistration;
+    if (!stored || !current || stored.name !== current.name || stored.kind !== current.kind) {
+      return {
+        ok: false,
+        message: `Work run '${record.id}' cannot resume because its Work Source Registration changed. Stored: ${registrationIdentityText(stored)}. Current: ${registrationIdentityText(current)}.`,
+      };
+    }
   }
 
   const resumedAt = Date.now();

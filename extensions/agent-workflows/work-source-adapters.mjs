@@ -160,46 +160,5 @@ function recordMutation(context, itemId, action, status, message) {
 }
 
 export function createDocVaderWorkSourceHooks(options = {}) {
-  const adapter = options.adapter || createDocVaderWorkSourceAdapter(options);
-  return [
-    {
-      id: 'doc-vader.validate-before-merge',
-      phase: 'beforeNode',
-      order: -10,
-      capabilities: ['node.kind:git.merge', 'work.merge'],
-      async run(context) {
-        if (context.node?.kind !== 'git.merge') return;
-        const items = workItemsByBranch(context, selectedBranchesForMerge(context));
-        for (const item of items) {
-          try {
-            await adapter.validate(mutationContext(context, item));
-            recordMutation(context, item.id, 'validate', 'succeeded');
-          } catch (error) {
-            recordMutation(context, item.id, 'validate', 'failed', error instanceof Error ? error.message : String(error));
-            throw error;
-          }
-        }
-      },
-    },
-    {
-      id: 'doc-vader.close-after-merge',
-      phase: 'afterNode',
-      order: 10,
-      capabilities: ['node.kind:git.merge', 'work.merge'],
-      async run(context) {
-        if (context.node?.kind !== 'git.merge') return;
-        const mergedBranches = new Set(Array.isArray(context.runtime?.result?.mergedBranches) ? context.runtime.result.mergedBranches : []);
-        const items = workItemsByBranch(context, mergedBranches);
-        for (const item of items) {
-          try {
-            await adapter.close(mutationContext(context, item));
-            recordMutation(context, item.id, 'close', 'succeeded');
-          } catch (error) {
-            recordMutation(context, item.id, 'close', 'failed', error instanceof Error ? error.message : String(error));
-            throw error;
-          }
-        }
-      },
-    },
-  ];
+  return [];
 }

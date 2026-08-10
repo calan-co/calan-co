@@ -133,7 +133,7 @@ test("backlog commands register on the extension API", async () => {
   );
 });
 
-test("backlog list and inspect use a fake filesystem without writes", async () => {
+test("backlog list and inspect fail closed because local Markdown sources are retired", async () => {
   const files = new Map([
     [
       "/repo/backlog/00002-sandcastle-config-scaffolding-and-validation.md",
@@ -176,66 +176,12 @@ test("backlog list and inspect use a fake filesystem without writes", async () =
     sources: ["backlog"],
   });
 
-  const listResult = await capability.list("backlog");
-  assert.equal(listResult.items.length, 3);
-  assert.equal(listResult.items[0].id, "wi-00002");
-  assert.deepEqual(listResult.items[0].dependencies, ["[[00002-sandcastle-config-scaffolding-and-validation]]"]);
-  assert.deepEqual(listResult.items[0].dependsOn, listResult.items[0].dependencies);
-  assert.equal(listResult.items[0].estimate, 5);
-  assert.equal(listResult.items[0].estimated, listResult.items[0].estimate);
-  assert.equal(listResult.items[0].source.adapter, "local-markdown");
-  assert.equal(listResult.items[0].source.kind, "markdown-file");
-  assert.equal(listResult.items[0].source.path, "backlog/00002-sandcastle-config-scaffolding-and-validation.md");
-  assert.equal(listResult.items[0].source.absolutePath, "/repo/backlog/00002-sandcastle-config-scaffolding-and-validation.md");
-  assert.match(listResult.items[0].source.body, /## Goal\n\nImplement \/work:config-raw/);
-  assert.equal(listResult.items[0].source.payload.frontmatter.title, "Sandcastle Config Scaffolding and Validation");
-  assert.match(listResult.items[0].source.raw, /^---\nid: wi-00002/);
-  assert.match(listResult.text, /Matching Work Items:/);
+  await assert.rejects(() => capability.list("backlog"), /Local Markdown Work Source behavior has been retired/);
+  await assert.rejects(() => capability.inspect("00006"), /Local Markdown Work Source behavior has been retired/);
   assert.equal(fakeFs.writes.length, 0);
-
-  const inspectResult = await capability.inspect("00006");
-  assert.equal(inspectResult.item.id, "wi-00006");
-  assert.match(inspectResult.text, /recommended pipeline: research-review/);
-  assert.equal(inspectResult.dependencyState.status, "has-dependencies");
-  assert.equal(fakeFs.writes.length, 0);
-  assert.deepEqual(inspectResult.relevantFiles, [
-    "backlog/00006-readonly-backlog-list-and-inspect.md",
-    "backlog/00002-sandcastle-config-scaffolding-and-validation.md",
-    "docs/prd/sandcastle-backlog-processing.md",
-    "backlog/00001-sandcastle-backlog-processing-command-surface-prd.md",
-  ]);
 });
 
-test("backlog capability consistently uses injected path helpers", async () => {
-  const files = new Map([
-    [
-      "/repo/backlog/00006-readonly-backlog-list-and-inspect.md",
-      makeItemMarkdown({
-        id: "wi-00006",
-        title: "Read-only Backlog List and Inspect",
-        summary: "Implement ephemeral /work:list and /work:inspect commands.",
-        priority: "medium",
-        estimated: 4,
-        dependsOn: ["[[00002-sandcastle-config-scaffolding-and-validation]]"],
-      }),
-    ],
-  ]);
-  const trackedPath = createTrackedPath();
-  const capability = createBacklogCapability({
-    cwd: "/repo",
-    fs: createFakeFs(files),
-    path: trackedPath,
-    sources: ["backlog"],
-  });
-
-  await capability.list("backlog");
-  await assert.rejects(() => capability.inspect("missing"), /No Work Item matched/);
-
-  assert.ok(trackedPath.calls.resolve > 0);
-  assert.ok(trackedPath.calls.join > 0);
-});
-
-test("backlog list and inspect report clear missing-source and missing-item errors", async () => {
+test("backlog list and inspect no longer report local missing-source or missing-item errors", async () => {
   const missingSourceCapability = createBacklogCapability({
     cwd: "/repo",
     fs: {
@@ -256,7 +202,7 @@ test("backlog list and inspect report clear missing-source and missing-item erro
 
   await assert.rejects(
     () => missingSourceCapability.list("anything"),
-    /No Work Source configured/,
+    /Local Markdown Work Source behavior has been retired/,
   );
 
   const files = new Map([
@@ -280,5 +226,5 @@ test("backlog list and inspect report clear missing-source and missing-item erro
     sources: ["backlog"],
   });
 
-  await assert.rejects(() => capability.inspect("missing"), /No Work Item matched/);
+  await assert.rejects(() => capability.inspect("missing"), /Local Markdown Work Source behavior has been retired/);
 });

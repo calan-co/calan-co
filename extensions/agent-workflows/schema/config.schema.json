@@ -51,12 +51,8 @@
     },
     "workSource": {
       "type": "string",
-      "enum": [
-        "github-issues",
-        "custom",
-        "beads",
-        "doc-vader"
-      ]
+      "minLength": 1,
+      "description": "Name of the selected Work Source Registration."
     },
     "workSourceSetupCommand": {
       "type": "string",
@@ -87,6 +83,13 @@
           "type": "string",
           "minLength": 1
         }
+      }
+    },
+    "workSources": {
+      "type": "object",
+      "description": "Named Work Source Registrations. The selected registration is named by workSource; unselected registrations are dormant.",
+      "additionalProperties": {
+        "$ref": "#/$defs/workSource"
       }
     },
     "imageNamePattern": {
@@ -163,6 +166,67 @@
       "required": [
         "template"
       ]
+    },
+    "workSourceCommand": {
+      "type": "object",
+      "required": [
+        "executable"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "executable": {
+          "type": "string",
+          "minLength": 1
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "workSource": {
+      "type": "object",
+      "required": [
+        "kind"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "disabled": {
+          "type": "boolean"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "package": {
+          "type": "string",
+          "minLength": 1
+        },
+        "export": {
+          "type": "string",
+          "minLength": 1
+        },
+        "commands": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/workSourceCommand"
+          }
+        },
+        "settings": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
     },
     "role": {
       "type": "object",

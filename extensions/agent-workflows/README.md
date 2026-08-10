@@ -64,11 +64,13 @@ Examples:
 
 ### Work Source and planning
 
-- `/work:list [query]` — list Work Items without mutation.
-- `/work:inspect <item-id>` — inspect one Work Item without mutation.
-- `/work:ready [query]` — list deterministic ready Work candidates from the configured Work Source.
+- `/work:list [query]` — list Work Items from the selected Work Source Registration without mutation.
+- `/work:inspect <item-id>` — inspect one Work Item from the selected Work Source Registration without mutation.
+- `/work:ready [query]` — list deterministic ready Work candidates from the selected Work Source Registration.
 - `/work:plan [query] --iterations N` — run the configured read-only planning phase and cache a Plan Artifact under `.pi/sandcastle/plans/`.
 - `/work:next [query]` — plan the next Work iteration.
+
+Each repository selects exactly one named Work Source Registration with `workSource`. Runtime-pack registrations such as `github-issues`, `beads`, and `doc-vader` use the same schema as repo-local registrations. Unselected registrations are dormant beyond config display and selection. The retired local Markdown/backlog reader is not a fallback for Work discovery or processing.
 
 Examples:
 
@@ -129,6 +131,7 @@ Deeper rationale is documented in:
 - `docs/architecture/pi-sandcastle-execution-runtime.md`
 - `docs/adr/0002-agent-workflows-rename-and-orchestration-seams.md`
 - `docs/adr/0003-graph-native-workflow-runtime.md`
+- `docs/adr/0004-work-source-registrations.md`
 
 ## Runtime packs and graph model
 
@@ -137,7 +140,7 @@ The default runtime pack lives at `extensions/agent-workflows/runtime-packs/sand
 - `runtimeVersion` and metadata
 - defaults for providers, models, Work Sources, policies, worker caps, and iteration caps
 - provider metadata (`agentProviders`, `sandboxProviders`)
-- Work Source definitions
+- Work Source Registrations
 - reusable Roles and Prompts
 - graph-native Pipelines
 - policies and adapter metadata
@@ -212,6 +215,8 @@ The executor normalizes node outputs into typed results:
 
 A `work.close` node may declare an optional `finalize` prompt. For `work.close`, `maxIterations` is the maximum number of close attempts. After each failed provider close attempt before the last, the configured finalizer role/prompt runs in the current worktree with the latest provider error and Work Item detail. This is a narrow close-node compatibility shim, not a general hook or provider capability system.
 
+Work Source mutations run only through explicit mutation graph nodes such as `work.close`. Source-specific merge hooks and silent close-after-success behavior are not part of the runtime contract.
+
 Effect and merge checks fail closed when inputs are empty, log-only, missing a branch, untrusted, unmergeable, or conflicting. Parallel loops wait for all started lanes to settle so cleanup can run before failure is reported.
 
 ## Config and artifacts
@@ -223,6 +228,8 @@ Artifact locations:
 - `.pi/sandcastle/runs/` — Run Records with `kind` values such as `direct-role`, `pipeline`, and `work-process`.
 - `.pi/sandcastle/plans/` — cached Plan Artifacts reusable through `/work:process --plan <plan-id>`.
 - Per-run log paths — surfaced by `/work:logs` and Run Record node/lane metadata.
+
+Plan Artifacts and Work Process Run Records retain the selected Work Source Registration identity. `/work:resume` rechecks that identity against current config and fails closed if the selected registration has drifted.
 
 Config mutation is deterministic. Root-only config edits to graph-node paths merge runtime defaults before mutation so writes preserve complete graph shape.
 

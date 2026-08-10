@@ -96,6 +96,10 @@ _Avoid_: Doc-Vader item, GitHub issue, Beads task
 Repo-specific configuration for the selected Work source, such as labels, queries, project identifiers, or custom provider registration. Built-in Work Source implementation metadata remains in the Provider Catalog.
 _Avoid_: Issue tracker settings, built-in tracker template, issue tracker source
 
+**Work Source Registration**:
+A named repo-local declaration of a Work Source Adapter and its Work Source Settings. One Registration is selected for a repository and identifies its source of normalized Work Item Detail and retained source material for a Work Process; all unselected Registrations are dormant beyond display and selection. Every source is a Registration, with no special built-in category.
+_Avoid_: Work source enum, tracker selection, source alias
+
 **Work Source Adapter**:
 A module that reads Work Items from a source and maps native structured data into Work Item Detail objects for Agent Workflows. Work Source Adapters preserve source fidelity and prefer deterministic field mapping; reasoning-based normalization is exceptional and not the default route. Mutable Work Sources may also expose typed mutation capabilities.
 _Avoid_: Issue tracker adapter, planner, markdown parser, lossy work-item summarizer

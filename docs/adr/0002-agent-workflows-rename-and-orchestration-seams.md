@@ -20,9 +20,11 @@ Rename the product/domain to **Agent Workflows** and use **Work** as the broad u
 - A **Work Source Adapter** reads Work Items and maps native structured data into Agent Workflows' smaller canonical Work Item Detail schema while preserving source material for fidelity.
 - A deterministic **Work Brief** renderer produces role-facing prose from normalized Work Item data and preserved source material.
 
+ADR 0004 refines this Work Source seam: each repository selects exactly one named Work Source Registration, runtime-pack registrations use the same schema as repo-local registrations, and unselected registrations are dormant.
+
 Agent Workflows owns a deterministic **Orchestrator**. The Orchestrator is not a configurable role. It owns workflow control, pipeline policy, branch naming, fan-out/fan-in, durable Run Records, resume/cancel state, and execution-context lifecycle.
 
-Pipelines are composed of simple typed steps such as `planWork`, `fanOut`, `runRole`, optional `review`, `merge`, and Work Source mutation steps. Capability metadata may be added later if it reinforces seams, reduces cognitive load, or improves reuse, but capability programs are not the primary configuration language now.
+Pipelines are composed of simple typed steps such as `planWork`, `fanOut`, `runRole`, optional `review`, `merge`, and explicit Work Source mutation steps. Capability metadata may be added later if it reinforces seams, reduces cognitive load, or improves reuse, but capability programs are not the primary configuration language now.
 
 Planning remains a bounded reasoning step:
 
@@ -50,3 +52,4 @@ Sandcastle templates are a one-time port source, not an ongoing product model or
 - Existing `/backlog:*` tests and command registrations must move to `/work:*`.
 - The first implementation slice is a rename-and-seam pass, not a big-bang orchestrator rewrite.
 - Deeper runtime modules can be introduced incrementally behind the renamed surface.
+- The local Markdown/backlog reader and source-specific mutation hooks are not compatibility fallbacks; ADR 0004 owns their removal.
