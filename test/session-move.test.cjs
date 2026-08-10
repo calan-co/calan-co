@@ -1,25 +1,27 @@
 const assert = require('node:assert/strict');
 const Module = require('node:module');
+const piNodeModules = '/opt/homebrew/opt/pi-coding-agent/libexec/lib/node_modules';
+const piPackageRoot = `${piNodeModules}/@earendil-works/pi-coding-agent`;
 process.env.NODE_PATH = [
-  '/opt/homebrew/Cellar/pi-coding-agent/0.80.3/libexec/lib/node_modules',
-  '/opt/homebrew/Cellar/pi-coding-agent/0.80.3/libexec/lib/node_modules/@earendil-works/pi-coding-agent/node_modules',
+  piNodeModules,
+  `${piPackageRoot}/node_modules`,
   process.env.NODE_PATH ?? '',
 ].filter(Boolean).join(':');
 Module._initPaths();
 const originalResolveFilename = Module._resolveFilename;
 Module._resolveFilename = function(request, parent, isMain, options) {
   if (request === '@earendil-works/pi-coding-agent') {
-    return '/opt/homebrew/Cellar/pi-coding-agent/0.80.3/libexec/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js';
+    return `${piPackageRoot}/dist/index.js`;
   }
   if (request === '@earendil-works/pi-tui') {
-    return '/opt/homebrew/Cellar/pi-coding-agent/0.80.3/libexec/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/dist/index.js';
+    return `${piPackageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`;
   }
   return originalResolveFilename.call(this, request, parent, isMain, options);
 };
 const { mkdtemp, writeFile, readFile } = require('node:fs/promises');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
-const createJiti = require('/opt/homebrew/Cellar/pi-coding-agent/0.80.3/libexec/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti');
+const createJiti = require(`${piPackageRoot}/node_modules/jiti`);
 const jiti = createJiti(__filename, { interopDefault: true });
 
 const mod = jiti(join(__dirname, '..', 'extensions', 'session-move', 'index.ts'));
