@@ -116,6 +116,27 @@ test("fails closed for negated and malformed workspace declarations", async () =
   }
 });
 
+test("fails closed for non-object workspace dependency sections", async () => {
+  for (const [section, value] of [
+    ["dependencies", "@fixture/core"],
+    ["devDependencies", ["@fixture/core"]],
+    ["optionalDependencies", null],
+    ["peerDependencies", 1],
+  ]) {
+    await withFixture({
+      "package.json": { ...rootPackage, workspaces: ["packages/*"] },
+      "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+      "packages/core/package.json": { name: "@fixture/core" },
+      "packages/app/package.json": { name: "@fixture/app", [section]: value },
+    }, async (repositoryRoot) => {
+      await assert.rejects(
+        adapter().plan({ repositoryRoot, candidate: "implementation", changedPaths: ["packages/core/index.js"] }),
+        /unparseable workspace graph/i,
+      );
+    });
+  }
+});
+
 test("returns a structured command plan and execution-result artifact", async () => {
   await withFixture({
     "package.json": rootPackage,

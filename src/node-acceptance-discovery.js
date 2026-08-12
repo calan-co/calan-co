@@ -70,12 +70,16 @@ async function discoverWorkspaces(repositoryRoot, patterns) {
 }
 
 function dependencyNames(manifest) {
-  return Object.keys({
-    ...manifest.dependencies,
-    ...manifest.devDependencies,
-    ...manifest.optionalDependencies,
-    ...manifest.peerDependencies,
-  });
+  const sections = [
+    manifest.dependencies,
+    manifest.devDependencies,
+    manifest.optionalDependencies,
+    manifest.peerDependencies,
+  ];
+  if (sections.some((section) => section !== undefined && (section === null || Array.isArray(section) || typeof section !== "object"))) {
+    throw new Error("Unparseable workspace graph");
+  }
+  return Object.keys(Object.assign({}, ...sections));
 }
 
 function commandsFor(workspaces) {
