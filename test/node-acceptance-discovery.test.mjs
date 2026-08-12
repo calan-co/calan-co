@@ -92,6 +92,38 @@ test("fails closed when nested declared workspaces both own a changed path", asy
   });
 });
 
+test("fails closed when a present root workspaces field is not an array declaration", async () => {
+  for (const workspaces of [null, { packages: ["packages/*"] }, "packages/*", {}]) {
+    await withFixture({
+      "package.json": { ...rootPackage, workspaces },
+      "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+      "packages/a/package.json": { name: "a" },
+    }, async (repositoryRoot) => {
+      for (const [candidate, changedPaths] of [["implementation", ["packages/a/index.js"]], ["integration", []]]) {
+        await assert.rejects(
+          adapter().plan({ repositoryRoot, candidate, changedPaths }),
+          /unparseable declared workspaces/i,
+        );
+      }
+    });
+  }
+});
+
+test("fails closed for malformed present packageManager declarations", async () => {
+  for (const packageManager of [null, "", "pnpm", "pnpm@", "pnpm@^9.0.0", "pnpm@9.0.0@invalid"]) {
+    await withFixture({
+      "package.json": { ...rootPackage, packageManager },
+      "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+      "src/index.js": "export {};\n",
+    }, async (repositoryRoot) => {
+      await assert.rejects(
+        adapter().plan({ repositoryRoot, candidate: "implementation", changedPaths: ["src/index.js"] }),
+        /package-manager configuration/i,
+      );
+    });
+  }
+});
+
 test("plans root scripts for a changed root file in a single-package repository", async () => {
   await withFixture({
     "package.json": rootPackage,

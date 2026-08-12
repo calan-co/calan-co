@@ -22,10 +22,8 @@ async function exists(file) {
 }
 
 function workspacePatterns(rootPackage) {
-  const declared = Array.isArray(rootPackage.workspaces)
-    ? rootPackage.workspaces
-    : rootPackage.workspaces?.packages;
-  if (declared === undefined) return [];
+  if (!Object.hasOwn(rootPackage, "workspaces")) return [];
+  const declared = rootPackage.workspaces;
   if (!Array.isArray(declared) || declared.some((item) => typeof item !== "string" || !item || item.startsWith("!"))) {
     throw new Error("Unparseable declared workspaces");
   }
@@ -97,8 +95,11 @@ async function validatePackageManager(repositoryRoot, rootPackage) {
   const locks = [];
   for (const [file, manager] of LOCKFILES) if (await exists(path.join(repositoryRoot, file))) locks.push(manager);
   if (locks.length !== 1) throw new Error("Ambiguous or missing Node lockfile configuration");
-  const declared = typeof rootPackage.packageManager === "string" ? rootPackage.packageManager.split("@")[0] : undefined;
-  if (declared && declared !== locks[0]) throw new Error("Ambiguous Node package-manager configuration");
+  if (Object.hasOwn(rootPackage, "packageManager")) {
+    const declaration = rootPackage.packageManager;
+    const match = typeof declaration === "string" && /^(pnpm|npm|yarn)@(0|[1-9]\d*)(?:\.(0|[1-9]\d*)){0,2}(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(declaration);
+    if (!match || match[1] !== locks[0]) throw new Error("Ambiguous Node package-manager configuration");
+  }
 }
 
 function ownerFor(changedPath, workspaces) {
@@ -117,6 +118,7 @@ export function createNodeAcceptanceDiscoveryAdapter() {
       if (typeof repositoryRoot !== "string" || !Array.isArray(changedPaths)) throw new Error("Invalid acceptance plan input");
       const rootPackage = await readJson(path.join(repositoryRoot, "package.json"));
       await validatePackageManager(repositoryRoot, rootPackage);
+      const patterns = workspacePatterns(rootPackage);
       if (candidate === "integration") {
         return {
           scope: "repository",
@@ -125,7 +127,6 @@ export function createNodeAcceptanceDiscoveryAdapter() {
         };
       }
       if (candidate !== "implementation") throw new Error("Unknown acceptance candidate");
-      const patterns = workspacePatterns(rootPackage);
       const workspaces = patterns.length === 0
         ? [{ name: rootPackage.name, directory: "", manifest: rootPackage }]
         : await discoverWorkspaces(repositoryRoot, patterns);
