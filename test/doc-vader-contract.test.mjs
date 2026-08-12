@@ -73,3 +73,72 @@ test("never substitutes backlog Markdown when structured dv output is absent", a
     /structured|dv.*output|missing/i,
   );
 });
+
+test("parses only the versioned canonical show, status/validate, and close results", async () => {
+  const {
+    parseCloseResult,
+    parseShowResult,
+    parseStatusValidateResult,
+  } = await loadContract();
+  const show = {
+    schemaVersion: "task-model/v1",
+    id: "wi-002",
+    title: "A work item",
+    filePath: "backlog/002-work.md",
+    status: "ready",
+    lifecycle: "active",
+    tags: ["afk"],
+    dependencies: [],
+    body: { sections: [] },
+    acceptanceCriteria: [],
+    validation: { type: "work-item", subtype: "story", priority: "high", links: { depends_on: [] }, archived: false },
+    runtime: { markdownReady: true, executionReady: true, ready: true, sourceDisagreement: false },
+  };
+  const status = {
+    schemaVersion: "task-status/v1",
+    id: "wi-002",
+    title: "A work item",
+    filePath: "backlog/002-work.md",
+    status: "ready",
+    lifecycle: "active",
+    validation: { isActive: true, isReady: true, isAfk: true, isHitl: false, dependenciesSatisfied: true },
+    runtime: { markdownReady: true, executionReady: true, ready: true, sourceDisagreement: false },
+    recovery: { state: "ready", forceRequired: false, forceReasons: [], blockedReasons: [], warnings: [] },
+    graph: { relationships: [], diagnostics: { projection: [], informationalReferences: [] } },
+  };
+  const close = { schemaVersion: "task-close/v1", id: "wi-002", status: "closed", lifecycle: "closed" };
+
+  assert.equal(parseShowResult(show), show);
+  assert.equal(parseStatusValidateResult(status), status);
+  assert.equal(parseCloseResult(close), close);
+  for (const [parse, malformed] of [
+    [parseShowResult, { ...show, schemaVersion: "task-model/v999" }],
+    [parseStatusValidateResult, { ...status, validation: { ...status.validation, isAfk: "yes" } }],
+    [parseCloseResult, { ...close, status: "ready" }],
+  ]) {
+    assert.throws(() => parse(malformed), /structured|schema|version|invalid|close/i);
+  }
+});
+
+test("exposes versioned JSON Schemas and accepts only compatible override declarations", async () => {
+  const { parseRepositoryOverride, resultSchemas } = await loadContract();
+
+  for (const schema of Object.values(resultSchemas)) {
+    assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
+    assert.match(schema.$id, /\/v1\.schema\.json$/);
+  }
+  const override = {
+    schemaVersion: "doc-vader-override/v1",
+    compatibleWith: ["doc-vader-contract/v1"],
+    commands: { show: ["dv", "work", "show", "{workId}", "--json"] },
+  };
+  assert.equal(parseRepositoryOverride(override), override);
+  assert.throws(
+    () => parseRepositoryOverride({ ...override, compatibleWith: ["doc-vader-contract/v999"] }),
+    /compatible|version/i,
+  );
+  assert.throws(
+    () => parseRepositoryOverride({ ...override, commands: { show: ["dv", "work", "show"] } }),
+    /workId|command|invalid/i,
+  );
+});
