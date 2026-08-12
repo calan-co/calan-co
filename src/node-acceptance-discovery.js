@@ -85,6 +85,12 @@ function dependencyNames(manifest) {
 
 function validateWorkspaceGraph(workspaces) {
   for (const { manifest } of workspaces) dependencyNames(manifest);
+  for (let index = 0; index < workspaces.length; index += 1) {
+    const directory = workspaces[index].directory;
+    if (workspaces.slice(index + 1).some((workspace) => workspace.directory.startsWith(`${directory}/`))) {
+      throw new Error("Ambiguous workspace graph");
+    }
+  }
 }
 
 function commandsFor(workspaces) {
@@ -105,7 +111,7 @@ async function validatePackageManager(repositoryRoot, rootPackage) {
 }
 
 function ownerFor(changedPath, workspaces) {
-  if (typeof changedPath !== "string" || path.isAbsolute(changedPath) || /^[A-Za-z]:[\\/]/.test(changedPath) || /^[\\/]{2}/.test(changedPath)) throw new Error("Changed path is outside declared workspaces");
+  if (typeof changedPath !== "string" || path.isAbsolute(changedPath) || /^[A-Za-z]:[\\/]/.test(changedPath) || changedPath.startsWith("\\")) throw new Error("Changed path is outside declared workspaces");
   const normalized = path.posix.normalize(changedPath.replace(/\\/g, "/"));
   if (normalized === ".." || normalized.startsWith("../")) throw new Error("Changed path is outside declared workspaces");
   const owners = workspaces.filter(({ directory }) => directory === "" || normalized === directory || normalized.startsWith(`${directory}/`));

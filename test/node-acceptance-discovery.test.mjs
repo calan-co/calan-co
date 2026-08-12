@@ -74,7 +74,7 @@ test("discovers a nested workspace declared by packages/** for a changed path", 
   });
 });
 
-test("fails closed when nested declared workspaces both own a changed path", async () => {
+test("fails closed when nested declared workspaces produce ambiguous ownership", async () => {
   await withFixture({
     "package.json": { ...rootPackage, workspaces: ["packages/**"] },
     "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
@@ -87,7 +87,7 @@ test("fails closed when nested declared workspaces both own a changed path", asy
         candidate: "implementation",
         changedPaths: ["packages/tools/formatter/src/index.js"],
       }),
-      /ambiguous workspace ownership/i,
+      /ambiguous workspace graph/i,
     );
   });
 });
@@ -286,6 +286,15 @@ test("integration fails closed after discovering invalid declared workspace grap
       workspaces: ["packages/*", "packages/**"],
       error: /ambiguous workspace graph/i,
     },
+    {
+      name: "nested workspace directories with ambiguous ownership",
+      files: {
+        "packages/tools/package.json": { name: "@fixture/tools" },
+        "packages/tools/formatter/package.json": { name: "@fixture/formatter" },
+      },
+      workspaces: ["packages/**"],
+      error: /ambiguous workspace graph/i,
+    },
   ];
   for (const { name, files, workspaces = ["packages/*"], error } of cases) {
     await withFixture({
@@ -307,7 +316,7 @@ test("rejects Windows-drive and UNC changed paths in a single-package repository
     "package.json": rootPackage,
     "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
   }, async (repositoryRoot) => {
-    for (const changedPath of ["C:\\repository\\src\\index.js", "C:/repository/src/index.js", "\\\\server\\share\\index.js", "//server/share/index.js"]) {
+    for (const changedPath of ["C:\\repository\\src\\index.js", "C:/repository/src/index.js", "\\repository\\src\\index.js", "\\\\server\\share\\index.js", "//server/share/index.js"]) {
       await assert.rejects(
         adapter().plan({ repositoryRoot, candidate: "implementation", changedPaths: [changedPath] }),
         /outside declared workspaces/i,
