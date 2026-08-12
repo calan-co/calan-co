@@ -46,8 +46,19 @@ export const resultSchemas = Object.freeze({
     schemaVersion: { const: "task-status/v1" }, id: { type: "string", minLength: 1 },
     title: { type: "string" }, filePath: { type: "string", minLength: 1 },
     status: { type: "string" }, lifecycle: { type: "string" },
-    validation: { type: "object" }, runtime: { type: "object" },
-    recovery: { type: "object" }, graph: { type: "object" },
+    validation: {
+      type: "object",
+      additionalProperties: true,
+      required: ["isActive", "isReady", "isAfk", "isHitl", "dependenciesSatisfied"],
+      properties: {
+        isActive: { type: "boolean" },
+        isReady: { type: "boolean" },
+        isAfk: { type: "boolean" },
+        isHitl: { type: "boolean" },
+        dependenciesSatisfied: { type: "boolean" },
+      },
+    },
+    runtime: { type: "object" }, recovery: { type: "object" }, graph: { type: "object" },
   }, ["schemaVersion", "id", "title", "filePath", "status", "lifecycle", "validation", "runtime", "recovery", "graph"]),
   close: schema("work-close", {
     schemaVersion: { const: "task-close/v1" }, id: { type: "string", minLength: 1 },
@@ -55,8 +66,38 @@ export const resultSchemas = Object.freeze({
   }, ["schemaVersion", "id", "status", "lifecycle"]),
   repositoryOverride: schema("repository-override", {
     schemaVersion: { const: "doc-vader-override/v1" },
-    compatibleWith: { type: "array", minItems: 1, items: { type: "string" } },
-    commands: { type: "object" },
+    compatibleWith: {
+      type: "array",
+      minItems: 1,
+      items: { type: "string" },
+      contains: { const: CONTRACT_VERSION },
+    },
+    commands: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        ready: {
+          type: "array", minItems: 1,
+          items: { type: "string", minLength: 1 },
+          contains: { const: "--json" },
+        },
+        show: {
+          type: "array", minItems: 1,
+          items: { type: "string", minLength: 1 },
+          allOf: [{ contains: { const: "--json" } }, { contains: { const: "{workId}" } }],
+        },
+        validate: {
+          type: "array", minItems: 1,
+          items: { type: "string", minLength: 1 },
+          allOf: [{ contains: { const: "--json" } }, { contains: { const: "{workId}" } }],
+        },
+        close: {
+          type: "array", minItems: 1,
+          items: { type: "string", minLength: 1 },
+          allOf: [{ contains: { const: "--json" } }, { contains: { const: "{workId}" } }],
+        },
+      },
+    },
   }, ["schemaVersion", "compatibleWith", "commands"]),
 });
 

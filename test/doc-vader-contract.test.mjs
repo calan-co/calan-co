@@ -181,6 +181,39 @@ test("exposes a versioned JSON Schema for ready results and accepts only compati
 });
 
 
+test("keeps published status/validate and repository override schemas in parity with their parsers", async () => {
+  const { resultSchemas } = await loadContract();
+
+  assert.deepEqual(resultSchemas.statusValidate.properties.validation, {
+    type: "object",
+    additionalProperties: true,
+    required: ["isActive", "isReady", "isAfk", "isHitl", "dependenciesSatisfied"],
+    properties: {
+      isActive: { type: "boolean" },
+      isReady: { type: "boolean" },
+      isAfk: { type: "boolean" },
+      isHitl: { type: "boolean" },
+      dependenciesSatisfied: { type: "boolean" },
+    },
+  });
+  assert.deepEqual(resultSchemas.repositoryOverride.properties.compatibleWith, {
+    type: "array",
+    minItems: 1,
+    items: { type: "string" },
+    contains: { const: "doc-vader-contract/v1" },
+  });
+  assert.deepEqual(resultSchemas.repositoryOverride.properties.commands, {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      ready: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, contains: { const: "--json" } },
+      show: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, allOf: [{ contains: { const: "--json" } }, { contains: { const: "{workId}" } }] },
+      validate: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, allOf: [{ contains: { const: "--json" } }, { contains: { const: "{workId}" } }] },
+      close: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, allOf: [{ contains: { const: "--json" } }, { contains: { const: "{workId}" } }] },
+    },
+  });
+});
+
 test("README documents the compatible optional repository override seam", async () => {
   const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
 
