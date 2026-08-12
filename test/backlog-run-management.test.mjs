@@ -4,22 +4,23 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import * as workRuns from '../extensions/agent-workflows/work-runs.mjs';
 import {
-  formatBacklogRunList,
   formatResumeSelection,
   formatStatusSelection,
-  isBacklogRunResumable,
-  listBacklogRuns,
-  readBacklogRunRecords,
-  resumeBacklogRun,
-  selectBacklogRunForResume,
-  selectBacklogRunForStatus,
-  backlogRunRecordPath,
-  writeBacklogRunRecord,
+  formatWorkRunList,
+  isWorkRunResumable,
+  listWorkRuns,
+  readWorkRunRecords,
+  resumeWorkRun,
+  selectWorkRunForResume,
+  selectWorkRunForStatus,
+  workRunRecordPath,
+  writeWorkRunRecord,
 } from '../extensions/agent-workflows/work-runs.mjs';
 
 async function withTempDir(fn) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-backlog-'));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-workflows-work-'));
   try {
     await fn(root);
   } finally {
@@ -32,7 +33,7 @@ async function writeJson(filePath, value) {
   await fs.writeFile(filePath, JSON.stringify(value, null, 2));
 }
 
-function backlogRun(overrides = {}) {
+function workRun(overrides = {}) {
   return {
     id: 'run-1',
     query: 'auth bugs',
@@ -50,13 +51,14 @@ function backlogRun(overrides = {}) {
   };
 }
 
-test('reads and filters backlog runs deterministically', async () => {
+test('reads and filters unified work runs deterministically', async () => {
   await withTempDir(async (cwd) => {
-    await writeJson(path.join(cwd, '.pi/sandcastle/backlog-runs/run-1.json'), backlogRun());
+    await writeJson(path.join(cwd, '.pi/sandcastle/runs/run-1.json'), workRun({ kind: 'work-process' }));
     await writeJson(
-      path.join(cwd, '.pi/sandcastle/results/run-2.json'),
-      backlogRun({
+      path.join(cwd, '.pi/sandcastle/runs/run-2.json'),
+      workRun({
         id: 'run-2',
+        kind: 'work-process',
         query: 'docs cleanup',
         pipeline: 'review',
         status: 'done',
@@ -69,25 +71,26 @@ test('reads and filters backlog runs deterministically', async () => {
       }),
     );
     await writeJson(
-      path.join(cwd, '.pi/sandcastle/results/delegation-run.json'),
+      path.join(cwd, '.pi/sandcastle/runs/delegation-run.json'),
       {
         id: 'delegate-1',
+        kind: 'direct-role',
         agent: 'researcher',
         task: 'look around',
         status: 'done',
       },
     );
 
-    assert.equal(readBacklogRunRecords(cwd).length, 2);
-    assert.equal(listBacklogRuns(cwd, 'auth').length, 1);
-    assert.equal(listBacklogRuns(cwd, 'wi-999').length, 1);
-    assert.match(formatBacklogRunList(listBacklogRuns(cwd, 'auth')), /run-1/);
+    assert.equal(readWorkRunRecords(cwd).length, 2);
+    assert.equal(listWorkRuns(cwd, 'auth').length, 1);
+    assert.equal(listWorkRuns(cwd, 'wi-999').length, 1);
+    assert.match(formatWorkRunList(listWorkRuns(cwd, 'auth')), /run-1/);
   });
 });
 
-test('reads backlog process records from unified run records and ignores other run kinds', async () => {
+test('reads work process records from unified run records and ignores other run kinds', async () => {
   await withTempDir(async (cwd) => {
-    await writeJson(path.join(cwd, '.pi/sandcastle/runs/work-1.json'), backlogRun({ id: 'work-1', kind: 'work-process' }));
+    await writeJson(path.join(cwd, '.pi/sandcastle/runs/work-1.json'), workRun({ id: 'work-1', kind: 'work-process' }));
     await writeJson(path.join(cwd, '.pi/sandcastle/runs/direct-1.json'), {
       id: 'direct-1',
       kind: 'direct-role',
@@ -108,10 +111,48 @@ test('reads backlog process records from unified run records and ignores other r
       steps: [],
     });
 
-    const records = readBacklogRunRecords(cwd);
+    const records = readWorkRunRecords(cwd);
     assert.deepEqual(records.map((record) => record.id), ['work-1']);
     assert.equal(records[0].kind, 'work-process');
   });
+});
+
+test('ignores obsolete legacy work run directories', async () => {
+  await withTempDir(async (cwd) => {
+    await writeJson(path.join(cwd, '.pi/sandcastle/backlog-runs/legacy-only.json'), workRun({
+      id: 'legacy-only',
+      status: 'failed',
+      updatedAt: 300,
+      resolvedItems: [{ id: 'wi-legacy', title: 'Legacy record' }],
+    }));
+    await writeJson(path.join(cwd, '.pi/sandcastle/results/conflict.json'), workRun({
+      id: 'conflict',
+      status: 'failed',
+      updatedAt: 400,
+      itemIds: ['wi-old'],
+      resolvedItems: [{ id: 'wi-old', title: 'Legacy conflict' }],
+    }));
+    await writeJson(path.join(cwd, '.pi/sandcastle/runs/conflict.json'), workRun({
+      id: 'conflict',
+      kind: 'work-process',
+      status: 'done',
+      updatedAt: 400,
+      itemIds: ['wi-new'],
+      resolvedItems: [{ id: 'wi-new', title: 'Unified conflict winner' }],
+    }));
+
+    const records = readWorkRunRecords(cwd);
+    assert.deepEqual(records.map((record) => record.id), ['conflict']);
+    assert.deepEqual(records[0].itemIds, ['wi-new']);
+    assert.equal(records[0].sourcePath.endsWith('.pi/sandcastle/runs/conflict.json'), true);
+  });
+});
+
+test('work run module no longer exports obsolete backlog compatibility aliases', () => {
+  assert.equal('readBacklogRunRecords' in workRuns, false);
+  assert.equal('listBacklogRuns' in workRuns, false);
+  assert.equal('BACKLOG_RUNS_DIR' in workRuns, false);
+  assert.equal('WORK_RESULTS_DIR' in workRuns, false);
 });
 
 test('flattens orchestrator execution context branches for work run listing', async () => {
@@ -132,17 +173,17 @@ test('flattens orchestrator execution context branches for work run listing', as
       logs: ['runtime.log'],
     });
 
-    const [record] = readBacklogRunRecords(cwd);
+    const [record] = readWorkRunRecords(cwd);
     assert.deepEqual(record.branches, ['agent-workflows/simple-loop/run/wi-1', 'agent-workflows/simple-loop/run/wi-2']);
-    assert.equal(listBacklogRuns(cwd, 'wi-2').length, 1);
-    assert.match(formatBacklogRunList([record]), /agent-workflows\/simple-loop\/run\/wi-1/);
+    assert.equal(listWorkRuns(cwd, 'wi-2').length, 1);
+    assert.match(formatWorkRunList([record]), /agent-workflows\/simple-loop\/run\/wi-1/);
   });
 });
 
-test('infers backlog status safely and reports ambiguity', async () => {
-  const running = backlogRun({ id: 'run-a', updatedAt: 10 });
-  const queued = backlogRun({ id: 'run-b', status: 'queued', updatedAt: 20 });
-  const finished = backlogRun({
+test('infers work status safely and reports ambiguity', async () => {
+  const running = workRun({ id: 'run-a', updatedAt: 10 });
+  const queued = workRun({ id: 'run-b', status: 'queued', updatedAt: 20 });
+  const finished = workRun({
     id: 'run-c',
     status: 'done',
     updatedAt: 30,
@@ -150,12 +191,12 @@ test('infers backlog status safely and reports ambiguity', async () => {
     providerSession: { id: 'ses-c', supportsResume: true },
   });
 
-  const activeSelection = selectBacklogRunForStatus([running, queued, finished]);
+  const activeSelection = selectWorkRunForStatus([running, queued, finished]);
   assert.equal(activeSelection.kind, 'ambiguous');
   assert.match(formatStatusSelection(activeSelection), /run-a/);
   assert.match(formatStatusSelection(activeSelection), /run-b/);
 
-  const latestSelection = selectBacklogRunForStatus([finished], '');
+  const latestSelection = selectWorkRunForStatus([finished], '');
   assert.equal(latestSelection.kind, 'record');
   const latestStatus = formatStatusSelection(latestSelection);
   assert.match(latestStatus, /Latest work run/);
@@ -163,7 +204,7 @@ test('infers backlog status safely and reports ambiguity', async () => {
   assert.match(latestStatus, /Status: ✓ done/);
   assert.match(latestStatus, /Pipeline: implement/);
 
-  const missingSelection = selectBacklogRunForStatus([finished], 'missing');
+  const missingSelection = selectWorkRunForStatus([finished], 'missing');
   assert.equal(missingSelection.kind, 'missing');
   assert.match(formatStatusSelection(missingSelection), /No work run found/);
 });
@@ -173,7 +214,7 @@ test('status shows lane-captured commits and rejected review reason', async () =
     const reviewLog = path.join(cwd, '.pi/sandcastle/runs/run-1/logs/reviewer.log');
     await fs.mkdir(path.dirname(reviewLog), { recursive: true });
     await fs.writeFile(reviewLog, 'Recommendation: Reject\n\nFindings:\n1. `sample-tests/fixture.test.mjs:1` — The branch adds a new fixture instead of renaming the existing fixture.\n\nMerge blocker: The implementation does not satisfy the rename-based acceptance criteria.');
-    const record = backlogRun({
+    const record = workRun({
       status: 'done',
       workerStatuses: [
         { index: 0, role: 'git.worktree', kind: 'git.worktree', status: 'completed', itemId: 'wi-002', laneId: 'run/wi-002/0-1', branch: 'agent-workflows/run/wi-002', commits: ['abc123'] },
@@ -188,7 +229,7 @@ test('status shows lane-captured commits and rejected review reason', async () =
 });
 
 test('status indents nested parallel lanes beneath parent lanes without overwriting parent', async () => {
-  const record = backlogRun({
+  const record = workRun({
     status: 'running',
     workerStatuses: [
       { index: 0, role: 'planner', kind: 'agent.pi', status: 'completed', itemId: 'wi-parent', laneId: 'run/wi-parent/0-0', nodePath: 'root.nodes.plan.iterations.0.nodes.plan', commits: [] },
@@ -208,15 +249,15 @@ test('status indents nested parallel lanes beneath parent lanes without overwrit
   assert.match(lines[mergerIndex], /^running\s+merger/);
 });
 
-test('selects resumable backlog runs and rejects non-resumable ones', async () => {
-  const resumable = backlogRun({
+test('selects resumable work runs and rejects non-resumable ones', async () => {
+  const resumable = workRun({
     id: 'run-resume',
     status: 'failed',
     updatedAt: 100,
     sessionId: 'ses-resume',
     providerSession: { id: 'ses-resume', supportsResume: true },
   });
-  const notResumable = backlogRun({
+  const notResumable = workRun({
     id: 'run-nope',
     status: 'failed',
     updatedAt: 200,
@@ -224,26 +265,26 @@ test('selects resumable backlog runs and rejects non-resumable ones', async () =
     providerSession: { id: 'ses-nope', supportsResume: false },
   });
 
-  const resumableSelection = selectBacklogRunForResume([resumable, notResumable]);
+  const resumableSelection = selectWorkRunForResume([resumable, notResumable]);
   assert.equal(resumableSelection.kind, 'record');
-  assert.equal(isBacklogRunResumable(resumableSelection.record), true);
-  assert.equal(isBacklogRunResumable(notResumable), false);
+  assert.equal(isWorkRunResumable(resumableSelection.record), true);
+  assert.equal(isWorkRunResumable(notResumable), false);
   assert.match(formatResumeSelection(resumableSelection), /run-resume/);
 });
 
-test('resumes backlog runs through an injected capability and writes the durable record', async () => {
+test('resumes work runs through an injected capability and writes the durable record', async () => {
   await withTempDir(async (cwd) => {
-    const original = backlogRun({
+    const original = workRun({
       id: 'run-resume',
       status: 'failed',
       updatedAt: 100,
       sessionId: 'ses-resume',
       providerSession: { id: 'ses-resume', supportsResume: true },
     });
-    await writeBacklogRunRecord(cwd, original);
+    await writeWorkRunRecord(cwd, original);
 
     const calls = [];
-    const result = await resumeBacklogRun(cwd, 'run-resume', async (record) => {
+    const result = await resumeWorkRun(cwd, 'run-resume', async (record) => {
       calls.push(record);
       return { ok: true };
     });
@@ -254,7 +295,7 @@ test('resumes backlog runs through an injected capability and writes the durable
     assert.equal(calls[0].status, 'running');
 
     const saved = JSON.parse(
-      await fs.readFile(backlogRunRecordPath(cwd, 'run-resume'), 'utf8'),
+      await fs.readFile(workRunRecordPath(cwd, 'run-resume'), 'utf8'),
     );
     assert.equal(saved.status, 'running');
     assert.ok(saved.resumedAt);
@@ -264,7 +305,7 @@ test('resumes backlog runs through an injected capability and writes the durable
 
 test('resume rejects Work Source Registration drift before invoking provider resume', async () => {
   await withTempDir(async (cwd) => {
-    await writeBacklogRunRecord(cwd, backlogRun({
+    await writeWorkRunRecord(cwd, workRun({
       id: 'run-drift',
       status: 'failed',
       updatedAt: 100,
@@ -274,7 +315,7 @@ test('resume rejects Work Source Registration drift before invoking provider res
     }));
 
     let resumeCalls = 0;
-    const result = await resumeBacklogRun(
+    const result = await resumeWorkRun(
       cwd,
       'run-drift',
       async () => {
@@ -292,11 +333,11 @@ test('resume rejects Work Source Registration drift before invoking provider res
   });
 });
 
-test('returns clear errors for missing and non-resumable backlog runs without mutation', async () => {
+test('returns clear errors for missing and non-resumable work runs without mutation', async () => {
   await withTempDir(async (cwd) => {
-    await writeBacklogRunRecord(
+    await writeWorkRunRecord(
       cwd,
-      backlogRun({
+      workRun({
         id: 'run-nope',
         status: 'failed',
         updatedAt: 100,
@@ -305,30 +346,30 @@ test('returns clear errors for missing and non-resumable backlog runs without mu
       }),
     );
 
-    const missing = await resumeBacklogRun(cwd, 'missing', async () => {
+    const missing = await resumeWorkRun(cwd, 'missing', async () => {
       throw new Error('should not be called');
     });
     assert.equal(missing.ok, false);
     assert.match(missing.message, /No work run found/);
 
     const before = await fs.readFile(
-      backlogRunRecordPath(cwd, 'run-nope'),
+      workRunRecordPath(cwd, 'run-nope'),
       'utf8',
     );
-    const nonResumable = await resumeBacklogRun(cwd, 'run-nope', async () => {
+    const nonResumable = await resumeWorkRun(cwd, 'run-nope', async () => {
       throw new Error('should not be called');
     });
     assert.equal(nonResumable.ok, false);
     assert.match(nonResumable.message, /not resumable/);
     const after = await fs.readFile(
-      backlogRunRecordPath(cwd, 'run-nope'),
+      workRunRecordPath(cwd, 'run-nope'),
       'utf8',
     );
     assert.equal(after, before);
   });
 });
 
-test('registers the backlog run-management commands in the extension source', async () => {
+test('registers the work run-management commands in the extension source', async () => {
   const extensionText = await fs.readFile(new URL('../extensions/agent-workflows/index.ts', import.meta.url), 'utf8');
 
   assert.match(extensionText, /registerCommand\("work:runs"/);

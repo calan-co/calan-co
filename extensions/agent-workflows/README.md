@@ -87,7 +87,7 @@ Examples:
 - `/work:runs [query]` — list Work Process runs.
 - `/work:status [run-id]` — inspect a Work Process run.
 - `/work:logs [run-id]` — show recorded log paths for a Work Process run.
-- `/work:cancel [run-id]` — reserved cancellation utility.
+- `/work:cancel [run-id|all]` — cancels active Work Process work when supported.
 - `/work:resume [run-id]` — resume a resumable Work Process run.
 
 Examples:

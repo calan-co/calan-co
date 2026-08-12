@@ -34,6 +34,8 @@ All durable execution state is a unified Run Record under `.pi/sandcastle/runs/`
 
 Command-specific views filter these Run Records instead of maintaining separate lifecycle stores.
 
+Run Record lifecycle is unified behind `run-management.mjs`. Only `.pi/sandcastle/runs/` is supported for durable direct-role, pipeline, and Work Process records; obsolete `.pi/sandcastle/backlog-runs/` and `.pi/sandcastle/results/` Work Process record directories are ignored during active Agent Workflows development. `work-runs.mjs` provides Work Process-specific projection, status formatting, and Work Source Registration drift checks on top of unified Run Records rather than owning a separate compatibility store. The Orchestrator remains the writer for durable Work Process Run Records; adapters, graph nodes, and role runners return normalized events/results instead of owning lifecycle persistence.
+
 ## Runtime objects
 
 The stable, reusable, overrideable objects are:

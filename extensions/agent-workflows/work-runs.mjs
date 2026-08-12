@@ -1,10 +1,8 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { RUNS_DIR, WORK_PROCESS_RUN_KIND, readRunRecords } from "./run-management.mjs";
 
-export const RUNS_DIR = ".pi/sandcastle/runs";
-export const BACKLOG_RUNS_DIR = ".pi/sandcastle/backlog-runs";
-export const BACKLOG_RESULTS_DIR = ".pi/sandcastle/results";
-export const BACKLOG_PROCESS_RUN_KIND = "work-process";
+export { RUNS_DIR, WORK_PROCESS_RUN_KIND };
 
 const ACTIVE_STATUSES = new Set([
   "active",
@@ -35,14 +33,6 @@ function toNumber(value, fallback = 0) {
 
 function lower(value) {
   return String(value ?? "").toLowerCase();
-}
-
-function safeJsonParse(raw, filePath) {
-  try {
-    return JSON.parse(raw);
-  } catch (error) {
-    throw new Error(`Failed to parse work run record ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
-  }
 }
 
 function normalizeItems(record) {
@@ -86,25 +76,6 @@ function normalizeContextBranches(raw) {
     .map((branch) => String(branch));
 }
 
-function isBacklogLikeRecord(raw) {
-  return Boolean(
-    raw &&
-      typeof raw === "object" &&
-      (raw.kind === BACKLOG_PROCESS_RUN_KIND ||
-        raw.runKind === BACKLOG_PROCESS_RUN_KIND ||
-        raw.pipeline ||
-        raw.query ||
-        raw.resolvedItems ||
-        raw.items ||
-        raw.itemIds ||
-        raw.itemId ||
-        raw.resumable ||
-        raw.providerSession ||
-        raw.session ||
-        raw.backlogSession),
-  );
-}
-
 function getRecordTime(record) {
   return Math.max(record.updatedAt || 0, record.createdAt || 0);
 }
@@ -115,11 +86,7 @@ function compareRecordsByRecency(a, b) {
   return a.id.localeCompare(b.id);
 }
 
-function isUnifiedRunsSource(record) {
-  return String(record.sourcePath || "").includes(`/${RUNS_DIR}/`);
-}
-
-function normalizeBacklogRunRecord(raw, filePath) {
+function normalizeWorkRunRecord(raw) {
   const createdAt = toNumber(raw.createdAt ?? raw.startedAt ?? raw.timestamp);
   const updatedAt = toNumber(raw.updatedAt ?? raw.finishedAt ?? raw.createdAt ?? raw.startedAt ?? raw.timestamp);
   const pipeline = String(raw.pipeline ?? raw.name ?? "");
@@ -127,8 +94,8 @@ function normalizeBacklogRunRecord(raw, filePath) {
   const status = String(raw.status ?? raw.state ?? "unknown");
   const record = {
     ...raw,
-    kind: BACKLOG_PROCESS_RUN_KIND,
-    id: String(raw.id ?? raw.runId ?? raw.name ?? filePath),
+    kind: WORK_PROCESS_RUN_KIND,
+    id: String(raw.id ?? raw.runId ?? raw.name ?? raw.sourcePath),
     query,
     pipeline,
     status,
@@ -140,7 +107,6 @@ function normalizeBacklogRunRecord(raw, filePath) {
     logs: normalizeArray(raw.logs ?? raw.logPath),
     resolvedItems: normalizeItems(raw),
     itemIds: normalizeArray(raw.itemIds ?? raw.itemId),
-    sourcePath: filePath,
   };
 
   if (!record.itemIds.length && record.resolvedItems.length) {
@@ -160,78 +126,14 @@ function normalizeBacklogRunRecord(raw, filePath) {
   return record;
 }
 
-function readJsonRecordFile(filePath) {
-  const raw = readFileSync(filePath, "utf8");
-  const parsed = safeJsonParse(raw, filePath);
-  if (!isBacklogLikeRecord(parsed)) return null;
-  return normalizeBacklogRunRecord(parsed, filePath);
+export function readWorkRunRecords(cwd) {
+  return readRunRecords(cwd)
+    .filter((record) => record.kind === WORK_PROCESS_RUN_KIND || record.runKind === WORK_PROCESS_RUN_KIND)
+    .map(normalizeWorkRunRecord)
+    .sort(compareRecordsByRecency);
 }
 
-function readJsonRecordsFromDir(dirPath) {
-  if (!existsSync(dirPath)) return [];
-  const entries = readdirSync(dirPath, { withFileTypes: true });
-  const records = [];
-  for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-    const filePath = join(dirPath, entry.name);
-    const record = readJsonRecordFile(filePath);
-    if (record) records.push(record);
-  }
-  return records;
-}
-
-function readUnifiedRunRecords(cwd) {
-  const dirPath = join(cwd, RUNS_DIR);
-  if (!existsSync(dirPath)) return [];
-  const entries = readdirSync(dirPath, { withFileTypes: true });
-  const records = [];
-  for (const entry of entries) {
-    let filePath;
-    if (entry.isFile() && entry.name.endsWith(".json")) filePath = join(dirPath, entry.name);
-    else if (entry.isDirectory()) filePath = join(dirPath, entry.name, "record.json");
-    if (!filePath || !existsSync(filePath)) continue;
-    const parsed = safeJsonParse(readFileSync(filePath, "utf8"), filePath);
-    if (parsed.kind !== BACKLOG_PROCESS_RUN_KIND && parsed.runKind !== BACKLOG_PROCESS_RUN_KIND) continue;
-    records.push(normalizeBacklogRunRecord(parsed, filePath));
-  }
-  return records;
-}
-
-function dedupeRecords(records) {
-  const byId = new Map();
-  for (const record of records) {
-    const existing = byId.get(record.id);
-    if (!existing) {
-      byId.set(record.id, record);
-      continue;
-    }
-
-    const existingScore = getRecordTime(existing);
-    const nextScore = getRecordTime(record);
-    if (nextScore > existingScore) {
-      byId.set(record.id, record);
-      continue;
-    }
-
-    if (nextScore === existingScore) {
-      const existingPreferred = isUnifiedRunsSource(existing);
-      const nextPreferred = isUnifiedRunsSource(record);
-      if (nextPreferred && !existingPreferred) byId.set(record.id, record);
-    }
-  }
-
-  return [...byId.values()].sort(compareRecordsByRecency);
-}
-
-export function readBacklogRunRecords(cwd) {
-  return dedupeRecords([
-    ...readUnifiedRunRecords(cwd),
-    ...readJsonRecordsFromDir(join(cwd, BACKLOG_RUNS_DIR)),
-    ...readJsonRecordsFromDir(join(cwd, BACKLOG_RESULTS_DIR)),
-  ]);
-}
-
-export function matchesBacklogRunQuery(record, query) {
+export function matchesWorkRunQuery(record, query) {
   const normalizedQuery = lower(query).trim();
   if (!normalizedQuery) return true;
   const haystacks = [
@@ -253,8 +155,8 @@ export function matchesBacklogRunQuery(record, query) {
   return tokens.every((token) => haystacks.some((value) => value.includes(token)));
 }
 
-export function listBacklogRuns(cwd, query = "") {
-  return readBacklogRunRecords(cwd).filter((record) => matchesBacklogRunQuery(record, query));
+export function listWorkRuns(cwd, query = "") {
+  return readWorkRunRecords(cwd).filter((record) => matchesWorkRunQuery(record, query));
 }
 
 function isActiveRun(record) {
@@ -263,7 +165,7 @@ function isActiveRun(record) {
 
 function isResumableRun(record) {
   if (!RESUME_STATUSES.has(lower(record.status))) return false;
-  const session = record.providerSession || record.session || record.backlogSession || {};
+  const session = record.providerSession || record.session || {};
   const sessionId =
     record.sessionId ||
     record.providerSessionId ||
@@ -297,7 +199,7 @@ function selectLatest(records) {
   return { kind: "record", record: sorted[0] };
 }
 
-export function selectBacklogRunForStatus(records, runId = "") {
+export function selectWorkRunForStatus(records, runId = "") {
   const explicitSelection = findRecordById(records, runId);
   if (explicitSelection) return explicitSelection;
 
@@ -310,7 +212,7 @@ export function selectBacklogRunForStatus(records, runId = "") {
   return withInference(latest, "latest");
 }
 
-export function selectBacklogRunForResume(records, runId = "") {
+export function selectWorkRunForResume(records, runId = "") {
   const explicitSelection = findRecordById(records, runId);
   if (explicitSelection) return explicitSelection;
 
@@ -326,7 +228,7 @@ export function selectBacklogRunForResume(records, runId = "") {
   return { kind: "missing", runId: undefined, inference: "latest-resumable" };
 }
 
-export function isBacklogRunResumable(record) {
+export function isWorkRunResumable(record) {
   return isResumableRun(record);
 }
 
@@ -337,7 +239,7 @@ function statusGlyph(status) {
   return "•";
 }
 
-export function summarizeBacklogRun(record) {
+export function summarizeWorkRun(record) {
   const itemText = record.itemIds?.length ? ` items=${record.itemIds.join(",")}` : "";
   const branchText = record.branches?.length ? ` branches=${record.branches.join(",")}` : "";
   const statusText = `status=${record.status}`;
@@ -450,9 +352,9 @@ function formatWorkRunDetail(record) {
   return lines.join("\n");
 }
 
-export function formatBacklogRunList(runs) {
+export function formatWorkRunList(runs) {
   if (runs.length === 0) return "No work runs found.";
-  return ["Work runs:", ...runs.map((run) => `- ${summarizeBacklogRun(run)}`)].join("\n");
+  return ["Work runs:", ...runs.map((run) => `- ${summarizeWorkRun(run)}`)].join("\n");
 }
 
 function formatMissingSelection(runId, fallbackMessage) {
@@ -489,19 +391,19 @@ export function formatResumeSelection(selection) {
   if (selection.kind === "ambiguous") {
     return formatAmbiguousSelection("resumable work run", selection.candidates);
   }
-  return `Selected work run for resume: ${summarizeBacklogRun(selection.record)}`;
+  return `Selected work run for resume: ${summarizeWorkRun(selection.record)}`;
 }
 
-export function backlogRunRecordPath(cwd, runId) {
+export function workRunRecordPath(cwd, runId) {
   return join(cwd, RUNS_DIR, `${runId}.json`);
 }
 
-export function writeBacklogRunRecord(cwd, record) {
+export function writeWorkRunRecord(cwd, record) {
   const normalized = {
     ...record,
-    kind: BACKLOG_PROCESS_RUN_KIND,
+    kind: WORK_PROCESS_RUN_KIND,
   };
-  const filePath = backlogRunRecordPath(cwd, normalized.id);
+  const filePath = workRunRecordPath(cwd, normalized.id);
   mkdirSync(join(cwd, RUNS_DIR), { recursive: true });
   writeFileSync(filePath, JSON.stringify(normalized, null, 2));
   return filePath;
@@ -512,15 +414,15 @@ function registrationIdentityText(identity) {
   return `${identity.name || "(unnamed)"}:${identity.kind || "(unknown)"}`;
 }
 
-export async function resumeBacklogRun(cwd, runId, resumeCapability, options = {}) {
-  const records = readBacklogRunRecords(cwd);
-  const selection = selectBacklogRunForResume(records, runId);
+export async function resumeWorkRun(cwd, runId, resumeCapability, options = {}) {
+  const records = readWorkRunRecords(cwd);
+  const selection = selectWorkRunForResume(records, runId);
   if (selection.kind !== "record") {
     return { ok: false, message: formatResumeSelection(selection) };
   }
 
   const record = selection.record;
-  if (!isBacklogRunResumable(record)) {
+  if (!isWorkRunResumable(record)) {
     return {
       ok: false,
       message: `Work run '${record.id}' is not resumable. It needs failed/interrupted status plus provider/session metadata.`,
@@ -554,7 +456,7 @@ export async function resumeBacklogRun(cwd, runId, resumeCapability, options = {
   };
 
   const result = await resumeCapability(resumedRecord);
-  writeBacklogRunRecord(cwd, resumedRecord);
+  writeWorkRunRecord(cwd, resumedRecord);
 
   return {
     ok: true,
@@ -563,18 +465,3 @@ export async function resumeBacklogRun(cwd, runId, resumeCapability, options = {
     message: `Resumed work run '${record.id}'.`,
   };
 }
-
-export const WORK_RUNS_DIR = BACKLOG_RUNS_DIR;
-export const WORK_RESULTS_DIR = BACKLOG_RESULTS_DIR;
-export const WORK_PROCESS_RUN_KIND = BACKLOG_PROCESS_RUN_KIND;
-export const readWorkRunRecords = readBacklogRunRecords;
-export const matchesWorkRunQuery = matchesBacklogRunQuery;
-export const listWorkRuns = listBacklogRuns;
-export const selectWorkRunForStatus = selectBacklogRunForStatus;
-export const selectWorkRunForResume = selectBacklogRunForResume;
-export const isWorkRunResumable = isBacklogRunResumable;
-export const summarizeWorkRun = summarizeBacklogRun;
-export const formatWorkRunList = formatBacklogRunList;
-export const workRunRecordPath = backlogRunRecordPath;
-export const writeWorkRunRecord = writeBacklogRunRecord;
-export const resumeWorkRun = resumeBacklogRun;

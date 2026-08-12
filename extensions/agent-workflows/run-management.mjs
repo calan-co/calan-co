@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync
 import { join, resolve } from "node:path";
 
 export const RUNS_DIR = ".pi/sandcastle/runs";
+export const WORK_PROCESS_RUN_KIND = "work-process";
 const NO_RUNS_MESSAGE = "No Sandcastle runs are recorded for this repo.";
 
 function compareRunsByNewest(a, b) {
@@ -42,11 +43,11 @@ function toTime(value, fallback = Date.now()) {
 function inferRunKind(run) {
 	if (run.kind) return run.kind;
 	if (Array.isArray(run.steps)) return "pipeline";
-	if (run.resolvedItems || run.itemIds || run.query) return "work-process";
+	if (run.resolvedItems || run.itemIds || run.query) return WORK_PROCESS_RUN_KIND;
 	return "direct-role";
 }
 
-function normalizeRunRecord(cwd, run) {
+export function normalizeRunRecord(cwd, run) {
 	const root = resolve(cwd);
 	const startedAt = toTime(run.startedAt ?? run.createdAt, Date.now());
 	return {
@@ -59,6 +60,33 @@ function normalizeRunRecord(cwd, run) {
 		agent: run.agent || run.role,
 		commits: Array.isArray(run.commits) ? run.commits : [],
 	};
+}
+
+function runRecordFilePaths(cwd) {
+	const dir = runsDirPath(cwd);
+	if (!existsSync(dir)) return [];
+	const paths = [];
+	for (const entry of readdirSync(dir, { withFileTypes: true })) {
+		let path;
+		if (entry.isFile() && entry.name.endsWith(".json")) path = join(dir, entry.name);
+		else if (entry.isDirectory()) path = join(dir, entry.name, "record.json");
+		if (path && existsSync(path)) paths.push(path);
+	}
+	return paths;
+}
+
+export function readRunRecords(cwd) {
+	const repoRoot = resolve(cwd);
+	const runs = [];
+	for (const path of runRecordFilePaths(cwd)) {
+		try {
+			const run = normalizeRunRecord(cwd, { ...readJson(path), sourcePath: path });
+			if (isRunInRepo(repoRoot, run)) runs.push(run);
+		} catch {
+			continue;
+		}
+	}
+	return runs.sort(compareRunsByNewest);
 }
 
 function isRunInRepo(repoRoot, run) {
@@ -83,26 +111,7 @@ function findRunById(runs, id) {
 
 export function createFileRunStore() {
 	async function listRuns(cwd) {
-		const dir = runsDirPath(cwd);
-		if (!existsSync(dir)) return [];
-		const repoRoot = resolve(cwd);
-		const runs = [];
-
-		for (const entry of readdirSync(dir, { withFileTypes: true })) {
-			let path;
-			if (entry.isFile() && entry.name.endsWith(".json")) path = join(dir, entry.name);
-			else if (entry.isDirectory()) path = join(dir, entry.name, "record.json");
-			if (!path || !existsSync(path)) continue;
-
-			try {
-				const run = normalizeRunRecord(cwd, readJson(path));
-				if (isRunInRepo(repoRoot, run)) runs.push(run);
-			} catch {
-				continue;
-			}
-		}
-
-		return runs.sort(compareRunsByNewest);
+		return readRunRecords(cwd);
 	}
 
 	async function readRun(cwd, id) {

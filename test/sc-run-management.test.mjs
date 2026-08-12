@@ -135,6 +135,40 @@ test('sc run management lists recent runs and infers active status safely', asyn
   assert.match(ambiguous.error, /Ambiguous Sandcastle run selection/);
 });
 
+test('file run store ignores obsolete legacy Work Process record directories', async () => {
+  const cwd = makeTempRepo();
+  const store = createFileRunStore();
+  mkdirSync(join(cwd, '.pi/sandcastle/backlog-runs'), { recursive: true });
+  writeFileSync(join(cwd, '.pi/sandcastle/backlog-runs/legacy.json'), JSON.stringify({
+    id: 'legacy',
+    kind: 'work-process',
+    repoRoot: cwd,
+    status: 'running',
+    query: 'legacy',
+  }, null, 2), { flag: 'w' });
+  mkdirSync(join(cwd, '.pi/sandcastle/results'), { recursive: true });
+  writeFileSync(join(cwd, '.pi/sandcastle/results/result.json'), JSON.stringify({
+    id: 'legacy-result',
+    kind: 'work-process',
+    repoRoot: cwd,
+    status: 'failed',
+    query: 'legacy result',
+  }, null, 2));
+  await store.writeRun(cwd, {
+    id: 'unified',
+    repoRoot: cwd,
+    kind: 'work-process',
+    pipeline: 'simple-loop',
+    status: 'completed',
+    startedAt: 10,
+    updatedAt: 20,
+  });
+
+  const runs = await store.listRuns(cwd);
+  assert.deepEqual(runs.map((run) => run.id), ['unified']);
+  assert.equal(await store.readRun(cwd, 'legacy'), null);
+});
+
 test('sc logs returns the stored path and reports missing logs clearly', async () => {
   const cwd = makeTempRepo();
   const store = createMemoryRunStore([
@@ -264,4 +298,50 @@ test('sc resume requires resumable metadata and injected resume support', async 
   assert.equal(supportedRun.status, 'running');
   assert.equal(supportedRun.updatedAt, 5678);
   assert.equal(supportedRun.resumedAt, 5678);
+});
+
+test('generic direct and pipeline resume/cancel remain separate from Work Source Registration drift policy', async () => {
+  const cwd = makeTempRepo();
+  const store = createMemoryRunStore([
+    {
+      id: 'direct-active',
+      repoRoot: cwd,
+      kind: 'direct-role',
+      agent: 'implementer',
+      status: 'running',
+      startedAt: 10,
+      updatedAt: 10,
+      workSourceRegistration: { name: 'stored', kind: 'github-issues' },
+    },
+    {
+      id: 'pipeline-failed',
+      repoRoot: cwd,
+      kind: 'pipeline',
+      pipeline: 'release',
+      status: 'failed',
+      startedAt: 20,
+      updatedAt: 20,
+      resumable: true,
+      providerSessionId: 'pipeline-session',
+      workSourceRegistration: { name: 'stored', kind: 'github-issues' },
+    },
+  ]);
+  const calls = [];
+  const service = createRunManagementService({
+    store,
+    controllers: new Map([
+      ['direct-active', { cancel: async () => calls.push('cancel-direct-active') }],
+      ['pipeline-failed', { resume: async () => calls.push('resume-pipeline-failed') }],
+    ]),
+    now: () => 9012,
+  });
+
+  const cancelled = await service.cancel(cwd, 'direct-active');
+  const resumed = await service.resume(cwd, 'pipeline-failed');
+
+  assert.deepEqual(calls, ['cancel-direct-active', 'resume-pipeline-failed']);
+  assert.equal(cancelled.runs[0].kind, 'direct-role');
+  assert.equal(resumed.run.kind, 'pipeline');
+  assert.equal((await store.readRun(cwd, 'direct-active')).status, 'cancelled');
+  assert.equal((await store.readRun(cwd, 'pipeline-failed')).status, 'running');
 });

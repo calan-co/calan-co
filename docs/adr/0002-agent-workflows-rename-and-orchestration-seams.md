@@ -24,7 +24,7 @@ ADR 0004 refines this Work Source seam: each repository selects exactly one name
 
 Agent Workflows owns a deterministic **Orchestrator**. The Orchestrator is not a configurable role. It owns workflow control, pipeline policy, branch naming, fan-out/fan-in, durable Run Records, resume/cancel state, and execution-context lifecycle.
 
-Pipelines are composed of simple typed steps such as `planWork`, `fanOut`, `runRole`, optional `review`, `merge`, and explicit Work Source mutation steps. Capability metadata may be added later if it reinforces seams, reduces cognitive load, or improves reuse, but capability programs are not the primary configuration language now.
+ADR 0003 amends this pipeline model: graph-native workflow config is the authoritative pipeline representation. Pipelines are concrete graph node maps with typed results rather than typed Pipeline Steps as the current Runtime Config surface. Historical step terms in this ADR remain useful for orchestration ownership, but ADR 0003 is normative for the executable pipeline shape.
 
 Planning remains a bounded reasoning step:
 
@@ -42,7 +42,7 @@ Execution contexts are owned by the Orchestrator:
 - Context metadata is persisted in Run Records, while git/worktree remains the source of code durability.
 - Missing/stale context recovery is deterministic and fail-closed.
 
-Run Records are written only by the Orchestrator. Steps, adapters, and role runners return normalized results/events for the Orchestrator to validate and persist.
+Run Records are written only by the Orchestrator. Steps, adapters, and role runners return normalized results/events for the Orchestrator to validate and persist. Run Record lifecycle is unified behind the generic run-management module and only `.pi/sandcastle/runs/` is supported during active Agent Workflows development. Obsolete Work Process record directories and backlog compatibility aliases are not compatibility surfaces; Work Process views add only projection, formatting, and Work Source Registration drift checks on top of unified Run Records.
 
 Sandcastle templates are a one-time port source, not an ongoing product model or library to mirror. Sandcastle remains an execution adapter behind Agent Workflows seams.
 
