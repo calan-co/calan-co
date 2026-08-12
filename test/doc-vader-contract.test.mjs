@@ -54,14 +54,19 @@ test("filters before deterministically sorting automatic AFK-ready candidates", 
   assert.equal(selectReadyWork(result).id, "wi-002");
 });
 
-test("rejects duplicate eligible IDs during automatic selection", async () => {
+test("rejects duplicate IDs before automatic selection, including mixed eligibility", async () => {
   const { selectReadyWork } = await loadContract();
   const item = ready().workItems[0];
 
-  assert.throws(
-    () => selectReadyWork(ready({ workItems: [item, { ...item }] })),
-    /duplicate.*wi-002|wi-002.*duplicate/i,
-  );
+  for (const workItems of [
+    [item, { ...item }],
+    [item, { ...item, hitl: true }],
+  ]) {
+    assert.throws(
+      () => selectReadyWork(ready({ workItems })),
+      /duplicate.*wi-002|wi-002.*duplicate/i,
+    );
+  }
 });
 
 test("fails closed with actionable diagnostics for malformed, incompatible, and ambiguous readiness", async () => {
@@ -173,6 +178,10 @@ test("exposes a versioned JSON Schema for ready results and accepts only compati
   assert.throws(
     () => parseRepositoryOverride({ ...override, compatibleWith: ["doc-vader-contract/v999"] }),
     /compatible|version/i,
+  );
+  assert.throws(
+    () => parseRepositoryOverride({ ...override, compatibleWith: ["doc-vader-contract/v1", 1] }),
+    /compatibleWith.*string|string.*compatibleWith/i,
   );
   assert.throws(
     () => parseRepositoryOverride({ ...override, commands: { show: ["dv", "work", "show"] } }),

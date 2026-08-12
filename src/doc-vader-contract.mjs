@@ -213,6 +213,7 @@ export function parseCloseResult(result) {
 export function parseRepositoryOverride(override) {
   requireVersion(override, "doc-vader-override/v1");
   requireArray(override.compatibleWith, "compatibleWith");
+  if (!override.compatibleWith.every((version) => typeof version === "string")) invalid("compatibleWith must contain only strings");
   if (!override.compatibleWith.includes(CONTRACT_VERSION)) invalid(`override is not compatible with ${CONTRACT_VERSION}`);
   requireObject(override.commands, "commands");
   const commandNames = new Set(["ready", "show", "validate", "close"]);
@@ -253,12 +254,12 @@ export function selectReadyWork(result, { workId } = {}) {
     return candidates[0];
   }
 
-  const eligible = candidates.filter((item) => ineligibility(item) === null);
-  const eligibleIds = new Set();
-  for (const item of eligible) {
-    if (eligibleIds.has(item.id)) invalid(`duplicate eligible work item ID ${item.id}`);
-    eligibleIds.add(item.id);
+  const itemIds = new Set();
+  for (const item of candidates) {
+    if (itemIds.has(item.id)) invalid(`duplicate work item ID ${item.id}`);
+    itemIds.add(item.id);
   }
+  const eligible = candidates.filter((item) => ineligibility(item) === null);
   if (eligible.length === 0) invalid("no AFK-ready work items are available");
   return eligible.sort((left, right) =>
     priorityRank[left.priority] - priorityRank[right.priority] || left.id.localeCompare(right.id),
