@@ -1,0 +1,54 @@
+---
+id: wi-003
+title: Implement isolated worktree lifecycle and CAS-protected integration
+type: work-item
+subtype: story
+lifecycle: active
+status: ready
+priority: high
+links:
+  depends_on:
+    - '[[001-dv-contract-and-ready-selection]]'
+    - '[[002-node-acceptance-discovery-and-affected-workspaces]]'
+tags:
+  - afk
+  - babysitter
+  - git
+  - worktree
+  - concurrency
+---
+
+## Goal
+
+Implement isolated item worktrees and temporary integration worktrees that publish only validated candidates through compare-and-swap branch updates.
+
+## Background
+
+Concurrent item work must never overwrite target-branch progress. Workspace commits have blanket authorization because they remain isolated. Failed or paused item worktrees must be retained; successful item worktrees are cleaned up only after delivery. Integration candidates must leave the real target unchanged until root checks pass.
+
+## Tasks
+
+- [ ] Default target branch from invocation PWD; permit explicit override.
+- [ ] Create and journal isolated item worktrees with target base SHA, branch, and paths.
+- [ ] Support configurable `merge-commit`, `squash`, and `rebase` integration; default to merge commit.
+- [ ] Create temporary integration worktrees, integrate candidates, and run root checks there.
+- [ ] Atomically publish only when target still equals the expected base SHA.
+- [ ] Handle stale candidates by refreshing, rechecking, and re-reviewing; preserve conflicts and failed candidates.
+
+## Deliverables
+
+- [ ] Git/worktree transaction module.
+- [ ] CAS publication evidence and recovery state.
+- [ ] Concurrency and merge-strategy tests.
+
+## Acceptance Criteria
+
+- [ ] A failed merge or root check leaves the target branch unchanged.
+- [ ] A failed CAS update does not lose item work and produces a stale-candidate recovery state.
+- [ ] Merge conflicts are never auto-resolved and preserve the item workspace/evidence.
+- [ ] Successful delivery cleans item and temporary integration worktrees; failed or paused items remain inspectable.
+
+## Dependencies
+
+[[001-dv-contract-and-ready-selection]]
+[[002-node-acceptance-discovery-and-affected-workspaces]]
