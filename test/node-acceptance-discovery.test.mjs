@@ -116,6 +116,41 @@ test("fails closed for negated and malformed workspace declarations", async () =
   }
 });
 
+test("fails closed for malformed dependency data in an unselected workspace", async () => {
+  await withFixture({
+    "package.json": { ...rootPackage, workspaces: ["packages/*"] },
+    "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+    "packages/selected/package.json": { name: "@fixture/selected" },
+    "packages/unselected/package.json": { name: "@fixture/unselected", dependencies: "invalid" },
+  }, async (repositoryRoot) => {
+    await assert.rejects(
+      adapter().plan({ repositoryRoot, candidate: "implementation", changedPaths: ["packages/selected/index.js"] }),
+      /unparseable workspace graph/i,
+    );
+  });
+});
+
+test("fails closed for non-string workspace dependency entries", async () => {
+  for (const [section, value] of [
+    ["dependencies", { "@fixture/core": 1 }],
+    ["devDependencies", { "@fixture/core": null }],
+    ["optionalDependencies", { "@fixture/core": {} }],
+    ["peerDependencies", { "@fixture/core": ["workspace:*"] }],
+  ]) {
+    await withFixture({
+      "package.json": { ...rootPackage, workspaces: ["packages/*"] },
+      "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+      "packages/core/package.json": { name: "@fixture/core" },
+      "packages/app/package.json": { name: "@fixture/app", [section]: value },
+    }, async (repositoryRoot) => {
+      await assert.rejects(
+        adapter().plan({ repositoryRoot, candidate: "implementation", changedPaths: ["packages/core/index.js"] }),
+        /unparseable workspace graph/i,
+      );
+    });
+  }
+});
+
 test("fails closed for non-object workspace dependency sections", async () => {
   for (const [section, value] of [
     ["dependencies", "@fixture/core"],

@@ -76,10 +76,14 @@ function dependencyNames(manifest) {
     manifest.optionalDependencies,
     manifest.peerDependencies,
   ];
-  if (sections.some((section) => section !== undefined && (section === null || Array.isArray(section) || typeof section !== "object"))) {
+  if (sections.some((section) => section !== undefined && (section === null || Array.isArray(section) || typeof section !== "object" || Object.values(section).some((value) => typeof value !== "string")))) {
     throw new Error("Unparseable workspace graph");
   }
   return Object.keys(Object.assign({}, ...sections));
+}
+
+function validateWorkspaceGraph(workspaces) {
+  for (const { manifest } of workspaces) dependencyNames(manifest);
 }
 
 function commandsFor(workspaces) {
@@ -120,6 +124,7 @@ export function createNodeAcceptanceDiscoveryAdapter() {
       }
       if (candidate !== "implementation") throw new Error("Unknown acceptance candidate");
       const workspaces = await discoverWorkspaces(repositoryRoot, workspacePatterns(rootPackage));
+      validateWorkspaceGraph(workspaces);
       const affected = new Set();
       const selected = [];
       const add = (workspace) => {
