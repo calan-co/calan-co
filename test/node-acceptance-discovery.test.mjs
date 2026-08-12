@@ -55,7 +55,7 @@ test("plans only a changed workspace and its reverse dependents in fixed script 
   });
 });
 
-test("fails closed for changed paths outside declared workspaces and ambiguous lockfiles", async () => {
+test("fails closed for an ambiguous lockfile configuration", async () => {
   await withFixture({
     "package.json": { ...rootPackage, workspaces: ["packages/*"] },
     "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
@@ -63,9 +63,56 @@ test("fails closed for changed paths outside declared workspaces and ambiguous l
     "packages/a/package.json": { name: "a" },
   }, async (repositoryRoot) => {
     await assert.rejects(
-      adapter().plan({ repositoryRoot, candidate: "implementation", changedPaths: ["README.md"] }),
-      /outside declared workspaces|ambiguous/i,
+      adapter().plan({ repositoryRoot, candidate: "implementation", changedPaths: ["packages/a/index.js"] }),
+      /ambiguous/i,
     );
+  });
+});
+
+test("fails closed for a changed path outside declared workspaces", async () => {
+  await withFixture({
+    "package.json": { ...rootPackage, workspaces: ["packages/*"] },
+    "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+    "packages/a/package.json": { name: "a" },
+  }, async (repositoryRoot) => {
+    await assert.rejects(
+      adapter().plan({ repositoryRoot, candidate: "implementation", changedPaths: ["README.md"] }),
+      /outside declared workspaces/i,
+    );
+  });
+});
+
+test("fails closed for negated and malformed workspace declarations", async () => {
+  for (const workspaces of [["packages/*", "!packages/ignored"], { packages: "packages/*" }]) {
+    await withFixture({
+      "package.json": { ...rootPackage, workspaces },
+      "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+      "packages/a/package.json": { name: "a" },
+    }, async (repositoryRoot) => {
+      await assert.rejects(
+        adapter().plan({ repositoryRoot, candidate: "implementation", changedPaths: ["packages/a/index.js"] }),
+        /unparseable declared workspaces/i,
+      );
+    });
+  }
+});
+
+test("returns a structured command plan and execution-result artifact", async () => {
+  await withFixture({
+    "package.json": rootPackage,
+    "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+  }, async (repositoryRoot) => {
+    const plan = await adapter().plan({ repositoryRoot, candidate: "integration", changedPaths: [] });
+    const artifact = await adapter().execute(plan, async ({ workspace, script }) => ({ workspace, script, exitCode: 0 }));
+    assert.deepEqual(artifact, {
+      plan,
+      results: [
+        { workspace: "root", script: "check", exitCode: 0 },
+        { workspace: "root", script: "build", exitCode: 0 },
+        { workspace: "root", script: "test", exitCode: 0 },
+        { workspace: "root", script: "lint", exitCode: 0 },
+      ],
+    });
   });
 });
 

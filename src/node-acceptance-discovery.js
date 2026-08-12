@@ -25,7 +25,7 @@ function workspacePatterns(rootPackage) {
     ? rootPackage.workspaces
     : rootPackage.workspaces?.packages;
   if (declared === undefined) return [];
-  if (!Array.isArray(declared) || declared.some((item) => typeof item !== "string" || !item)) {
+  if (!Array.isArray(declared) || declared.some((item) => typeof item !== "string" || !item || item.startsWith("!"))) {
     throw new Error("Unparseable declared workspaces");
   }
   return declared;
@@ -131,6 +131,15 @@ export function createNodeAcceptanceDiscoveryAdapter() {
         }
       }
       return { scope: "affected-workspaces", workspaces: selected.map(({ name }) => name), commands: commandsFor(selected) };
+    },
+
+    async execute(plan, runCommand) {
+      if (!plan || !Array.isArray(plan.commands) || typeof runCommand !== "function") {
+        throw new Error("Invalid acceptance execution input");
+      }
+      const results = [];
+      for (const command of plan.commands) results.push(await runCommand(command));
+      return { plan, results };
     },
   };
 }
