@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 // This is deliberately the public, built-in contract surface.  It must not
@@ -51,6 +52,16 @@ test("filters before deterministically sorting automatic AFK-ready candidates", 
   ] });
 
   assert.equal(selectReadyWork(result).id, "wi-002");
+});
+
+test("rejects duplicate eligible IDs during automatic selection", async () => {
+  const { selectReadyWork } = await loadContract();
+  const item = ready().workItems[0];
+
+  assert.throws(
+    () => selectReadyWork(ready({ workItems: [item, { ...item }] })),
+    /duplicate.*wi-002|wi-002.*duplicate/i,
+  );
 });
 
 test("fails closed with actionable diagnostics for malformed, incompatible, and ambiguous readiness", async () => {
@@ -120,9 +131,35 @@ test("parses only the versioned canonical show, status/validate, and close resul
   }
 });
 
-test("exposes versioned JSON Schemas and accepts only compatible override declarations", async () => {
+test("exposes a versioned JSON Schema for ready results and accepts only compatible override declarations", async () => {
   const { parseRepositoryOverride, resultSchemas } = await loadContract();
 
+  assert.deepEqual(resultSchemas.ready, {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://babysitter.dev/schemas/doc-vader/work-ready/v1.schema.json",
+    type: "object",
+    additionalProperties: true,
+    required: ["schemaVersion", "workItems"],
+    properties: {
+      schemaVersion: { const: "v1" },
+      workItems: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: true,
+          required: ["id", "priority", "status", "afk", "hitl", "dependencies"],
+          properties: {
+            id: { type: "string", minLength: 1 },
+            priority: { enum: ["critical", "high", "medium", "low"] },
+            status: { type: "string" },
+            afk: { type: "boolean" },
+            hitl: { type: "boolean" },
+            dependencies: { type: "array", items: { type: "string" } },
+          },
+        },
+      },
+    },
+  });
   for (const schema of Object.values(resultSchemas)) {
     assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
     assert.match(schema.$id, /\/v1\.schema\.json$/);
@@ -141,4 +178,13 @@ test("exposes versioned JSON Schemas and accepts only compatible override declar
     () => parseRepositoryOverride({ ...override, commands: { show: ["dv", "work", "show"] } }),
     /workId|command|invalid/i,
   );
+});
+
+
+test("README documents the compatible optional repository override seam", async () => {
+  const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
+
+  assert.match(readme, /optional repository override/i);
+  assert.match(readme, /doc-vader-contract\/v1/);
+  assert.match(readme, /compatibleWith/);
 });

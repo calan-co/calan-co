@@ -12,6 +12,25 @@ const schema = (name, properties, required) => Object.freeze({
 
 /** Versioned JSON Schema documents for accepted structured Doc-Vader results. */
 export const resultSchemas = Object.freeze({
+  ready: schema("work-ready", {
+    schemaVersion: { const: "v1" },
+    workItems: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: true,
+        required: ["id", "priority", "status", "afk", "hitl", "dependencies"],
+        properties: {
+          id: { type: "string", minLength: 1 },
+          priority: { enum: ["critical", "high", "medium", "low"] },
+          status: { type: "string" },
+          afk: { type: "boolean" },
+          hitl: { type: "boolean" },
+          dependencies: { type: "array", items: { type: "string" } },
+        },
+      },
+    },
+  }, ["schemaVersion", "workItems"]),
   show: schema("work-show", {
     schemaVersion: { const: "task-model/v1" },
     id: { type: "string", minLength: 1 },
@@ -194,6 +213,11 @@ export function selectReadyWork(result, { workId } = {}) {
   }
 
   const eligible = candidates.filter((item) => ineligibility(item) === null);
+  const eligibleIds = new Set();
+  for (const item of eligible) {
+    if (eligibleIds.has(item.id)) invalid(`duplicate eligible work item ID ${item.id}`);
+    eligibleIds.add(item.id);
+  }
   if (eligible.length === 0) invalid("no AFK-ready work items are available");
   return eligible.sort((left, right) =>
     priorityRank[left.priority] - priorityRank[right.priority] || left.id.localeCompare(right.id),
