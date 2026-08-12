@@ -86,6 +86,51 @@ function fakeSuccessfulGit() {
   };
 }
 
+test('executePipeline runs command graph work through an explicit host execution adapter', async () => {
+  const repoRoot = await createGraphRepo(baseGraphConfig([
+    '  adapterGraph:',
+    '    kind: composite',
+    '    nodes:',
+    '      workspace:',
+    '        kind: git.worktree',
+    '        nodes:',
+    '          implement:',
+    '            kind: agent.pi',
+    '            role: implementer',
+    '            prompt: Implement $INPUT',
+  ]));
+  const calls = [];
+  const adapter = {
+    createWorktree: async (options) => fakeWorktree(repoRoot, async (runOptions) => {
+      calls.push({ options, runOptions });
+      return {
+        iterations: [],
+        commits: [{ sha: 'adapter-commit' }],
+        branch: options.branchStrategy.branch,
+        stdout: '',
+        logFilePath: runOptions.logging.path,
+      };
+    }),
+    loadSandboxProvider: async (kind) => ({ kind, adapter: 'fake-host' }),
+    makeAgent: (model, provider) => ({ model, provider, adapter: 'fake-host' }),
+  };
+
+  const record = await executePipeline(repoRoot, 'adapterGraph', 'via host adapter', {
+    now: () => 1700000002500,
+    hostExecutionAdapter: adapter,
+  });
+
+  assert.equal(record.status, 'completed');
+  assert.equal(record.executor, 'graph');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.branchStrategy.branch, 'sandcastle/adapterGraph');
+  assert.deepEqual(calls[0].runOptions.agent, { model: 'claude-opus-4-8', provider: 'claude-code', adapter: 'fake-host' });
+  assert.deepEqual(calls[0].runOptions.sandbox, { kind: 'no-sandbox', adapter: 'fake-host' });
+  assert.match(calls[0].runOptions.env.GIT_CONFIG_GLOBAL, /agent-workflows-git-config/);
+  assert.match(calls[0].runOptions.env.GIT_CONFIG_NOSYSTEM, /^1$/);
+  assert.doesNotMatch(calls[0].runOptions.env.GIT_CONFIG_GLOBAL, new RegExp(process.env.HOME || '/Users/macos'));
+});
+
 test('executePipeline uses graph executor for generated default runtime config', async () => {
   const repoRoot = await createGraphRepo(configToYaml(packsToConfig()).split('\n'));
   const calls = [];
@@ -234,9 +279,22 @@ test('executePipeline creates one graph worktree per process lane and runs agent
     { contextId: 'run/item-b/0-1', branch: 'agent-workflows/lane-graph/run/item-b', groupIndex: 0, itemIndex: 1, itemId: 'item-b' },
   ];
 
-  const record = await executePipeline(repoRoot, 'laneGraph', 'process lanes', {
+  const globalProcessPrompt = [
+    'Work process run-123',
+    'Items:',
+    '- item-a First lane item',
+    '- item-b Sibling lane item',
+  ].join('\n');
+  const record = await executePipeline(repoRoot, 'laneGraph', globalProcessPrompt, {
     now: () => 1700000007000,
-    graphInput: { prompt: 'process lanes', executionContexts: contexts },
+    graphInput: {
+      prompt: globalProcessPrompt,
+      executionContexts: contexts,
+      items: [
+        { id: 'item-a', title: 'First lane item', summary: 'Only item-a should be in item-a prompt.' },
+        { id: 'item-b', title: 'Sibling lane item', summary: 'This sibling must not leak into item-a prompt.' },
+      ],
+    },
     createWorktree: async (options) => {
       const branch = options.branchStrategy.branch;
       const worktreePath = path.join(repoRoot, '.pi/sandcastle/worktrees', branch.replaceAll('/', '-'));
@@ -270,6 +328,10 @@ test('executePipeline creates one graph worktree per process lane and runs agent
     const run = runCalls.find((call) => call.branch === context.branch);
     assert.ok(run, `missing run for ${context.branch}`);
     assert.match(run.prompt, new RegExp(`Branch: ${context.branch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+    assert.match(run.prompt, /Lane scope: evaluate only this Work Item and branch/);
+    assert.match(run.prompt, /parallel siblings/);
+    assert.match(run.prompt, new RegExp(`${context.itemId === 'item-a' ? 'First lane item' : 'Sibling lane item'}`));
+    assert.doesNotMatch(run.prompt, new RegExp(`${context.itemId === 'item-a' ? 'Sibling lane item' : 'First lane item'}`));
   }
   const workspaceRecords = record.nodes.filter((node) => node.resultType === 'WorkspaceResult');
   assert.deepEqual(workspaceRecords.map((node) => node.branch).sort(), contexts.map((context) => context.branch).sort());
@@ -375,7 +437,7 @@ test('executePipeline graph git.merge accepted-only merges only review-approved 
         iterations: [],
         commits: isReview ? [] : [{ sha: `commit-${branch.split('/').at(-1)}` }],
         branch,
-        stdout: isReview ? (branch.endsWith('item-a') ? 'Prompt: Return an accept/reject recommendation.\nRecommendation: ACCEPT\nFindings: None.\nResult: Passed.' : 'Prompt: Return an accept/reject recommendation.\nRecommendation: REJECT\nFindings: blocker found, do not merge.') : '',
+        stdout: isReview ? (branch.endsWith('item-a') ? 'Prompt: Start with one of these lines:\n- Review result: **Accept**\n- Review result: **Reject**\n\n## Review\n- Correct: **Accept.** No actionable correctness, regression, or test findings.' : 'Prompt: Start with one of these lines:\n- Review result: **Accept**\n- Review result: **Reject**\n\n## Review\n- Correct: **Reject.** Blocker found; do not merge.') : '',
         logFilePath: runOptions.logging.path,
       };
     }, { branch: options.branchStrategy.branch, worktreePath: path.join(repoRoot, '.pi/sandcastle/worktrees', options.branchStrategy.branch.replaceAll('/', '-')) }),

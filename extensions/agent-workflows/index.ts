@@ -29,10 +29,6 @@ import {
 	type RunResult,
 	type SandboxProvider,
 } from "@ai-hero/sandcastle";
-import {
-	createWorktree,
-	type WorktreeBranchStrategy,
-} from "../../node_modules/@ai-hero/sandcastle/dist/index.js";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { noSandbox } from "@ai-hero/sandcastle/sandboxes/no-sandbox";
 import { podman } from "@ai-hero/sandcastle/sandboxes/podman";
@@ -50,6 +46,7 @@ import { buildDefaultConfigText, configToYaml, packsToConfig } from "./pipeline-
 import { renderWorkBrief } from "./work-brief.mjs";
 import { collectRuntimeAdapterCapabilities, loadExecutionRuntimePack, listRuntimeAgents, listRuntimePipelines } from "./execution-runtime.ts";
 import { executeGraphWorkflow, type CompositeResult, type GitMergeResult, type GraphNodeExecutionContext, type GraphWorkflowNode, type NodeResult } from "./graph-executor.ts";
+import { createSandcastleHostExecutionAdapter, type PipelineBranchStrategy, type PipelineHostExecutionAdapter } from "./host-execution-adapter.ts";
 import { discoverHooksByCapability, type GraphNodeHook, type HookContext } from "./hooks.ts";
 export {
 	HOOK_PHASES,
@@ -152,8 +149,6 @@ interface PipelineDef {
 	steps?: PipelineStep[];
 	[key: string]: unknown;
 }
-
-type PipelineBranchStrategy = WorktreeBranchStrategy;
 
 interface PromptDef {
 	format?: string;
@@ -3076,7 +3071,8 @@ function runShellCommand(command: string, options: { cwd: string; env?: Record<s
 }
 
 interface PipelineExecutionDeps {
-	createWorktree?: typeof createWorktree;
+	hostExecutionAdapter?: PipelineHostExecutionAdapter;
+	createWorktree?: PipelineHostExecutionAdapter["createWorktree"];
 	claudeCode?: typeof claudeCode;
 	makeAgent?: (model: string, provider?: AgentDef["provider"]) => any;
 	loadSandboxProvider?: (kind: AgentDef["sandbox"] | undefined, options?: Record<string, unknown>) => Promise<any>;
@@ -3249,6 +3245,23 @@ function graphWorkspaceString(context: GraphNodeExecutionContext, key: string): 
 	return typeof value === "string" && value.length ? value : undefined;
 }
 
+function laneScopedPromptInput(context: GraphNodeExecutionContext, fallbackInput: string): string {
+	if (!context.loop) return fallbackInput;
+	const loopItem = graphLoopItem(context);
+	const itemId = graphContextString(context, "itemId") || (typeof loopItem?.id === "string" ? loopItem.id : undefined);
+	const selectedItem = workGraphInputItem(context.input, itemId) || (isRecord(loopItem) ? loopItem as WorkItem : undefined);
+	const lines = ["Lane-local Work context", ""];
+	if (graphContextString(context, "contextId")) lines.push(`Execution context: ${graphContextString(context, "contextId")}`);
+	if (itemId) lines.push(`Work Item: ${itemId}`);
+	if (graphContextString(context, "branch") || graphWorkspaceString(context, "branch")) lines.push(`Branch: ${graphContextString(context, "branch") || graphWorkspaceString(context, "branch")}`);
+	if (selectedItem) {
+		lines.push("", "Selected Work Item:", JSON.stringify(selectedItem, null, 2));
+	} else if (loopItem) {
+		lines.push("", "Loop item:", JSON.stringify(loopItem, null, 2));
+	}
+	return lines.join("\n");
+}
+
 function collectGraphResultStringArray(result: NodeResult, key: "commits" | "effects"): string[] {
 	const own = nodeResultStringArray(result, key);
 	if (result.type === "CompositeResult" || result.type === "WorkspaceResult") return [...own, ...Object.values((result as any).children || {}).flatMap((child) => collectGraphResultStringArray(child as NodeResult, key))];
@@ -3259,6 +3272,15 @@ function collectGraphResultStringArray(result: NodeResult, key: "commits" | "eff
 function graphStatusNodePath(context: GraphNodeExecutionContext): string {
 	if (context.loop) return context.path.replace(/\.node(?=\.|$)/, `.iterations.${context.loop.index}`);
 	return context.path;
+}
+
+function createAgentRunScopedGitConfigEnv(runDir: string, stepIndex: number): Record<string, string> {
+	const gitConfigDir = mkdtempSync(join(tmpdir(), "agent-workflows-git-config-"));
+	const gitConfigPath = join(gitConfigDir, "config");
+	writeFileSync(gitConfigPath, "", { flag: "a" });
+	mkdirSync(runDir, { recursive: true });
+	writeFileSync(join(runDir, `git-config-env-${stepIndex}.json`), JSON.stringify({ GIT_CONFIG_GLOBAL: gitConfigPath, GIT_CONFIG_NOSYSTEM: "1" }, null, 2));
+	return { GIT_CONFIG_GLOBAL: gitConfigPath, GIT_CONFIG_NOSYSTEM: "1" };
 }
 
 function graphResultSummary(result: NodeResult): Record<string, unknown> {
@@ -3392,15 +3414,20 @@ function collectWorkspaceMergeCandidatesFromResult(need: string, result: NodeRes
 
 function isAcceptedReviewText(value: unknown): boolean | undefined {
 	const raw = typeof value === "string" ? value : "";
-	const text = raw.toLowerCase();
-	if (!text.trim()) return undefined;
-	const explicitReject = raw.match(/\b(?:Recommendation:\s*|Review result:\s*\*\*)Reject(?:ed)?\b/i);
-	const explicitAccept = raw.match(/\b(?:Recommendation:\s*|Review result:\s*\*\*)Accept(?:ed)?\b/i);
-	if (explicitReject && (!explicitAccept || explicitReject.index! < explicitAccept.index!)) return false;
-	if (explicitAccept) return true;
-	if (/\b(reject(?:ed)?|request changes|changes requested|blocker|blocked|do not merge|not accepted|fail(?:ed)?)\b/.test(text)) return false;
-	if (/\b(accept(?:ed)?|approved?|approve|no blockers?|safe to merge|looks good|pass(?:ed)?)\b/.test(text)) return true;
-	return undefined;
+	if (!raw.trim()) return undefined;
+	const verdicts: Array<{ index: number; accepted: boolean }> = [];
+	const collect = (pattern: RegExp, accepted: boolean) => {
+		for (const match of raw.matchAll(pattern)) verdicts.push({ index: match.index ?? 0, accepted });
+	};
+	collect(/\b(?:Recommendation:\s*|Review result:\s*\*{0,2}|Correct:\s*\*{0,2})Accept(?:ed)?\b/gi, true);
+	collect(/\b(?:Recommendation:\s*|Review result:\s*\*{0,2}|Correct:\s*\*{0,2})Reject(?:ed)?\b/gi, false);
+	collect(/\b(?:no actionable findings|no actionable correctness|no correctness, regression, or test findings)[^.\n]*\.\s*accept\.?/gi, true);
+	collect(/\b(?:request changes|changes requested|do not merge|not accepted)\b/gi, false);
+	collect(/\b(?:blocker|blocked|fail(?:ed)?)\b/gi, false);
+	collect(/\b(?:no blockers?|safe to merge|looks good|pass(?:ed)?|approved?|approve|accept(?:ed)?)\b/gi, true);
+	if (!verdicts.length) return undefined;
+	verdicts.sort((a, b) => a.index - b.index);
+	return verdicts.at(-1)?.accepted;
 }
 
 function reviewSummaryText(value: unknown): string | undefined {
@@ -3852,9 +3879,13 @@ export async function executePipeline(
 	const branchStrategy = resolvePipelineBranchStrategy(pipelineName, pipeline);
 	const useGraphExecutor = pipelineHasGraphNodes(pipeline);
 	if (!useGraphExecutor) throw new Error(`Pipeline '${pipelineName}' is not graph-native. Fix ${CONFIG_PATH} to use kind: composite with nodes.`);
-	const createWorktreeImpl = deps.createWorktree || createWorktree;
-	const makePipelineAgent = deps.makeAgent;
-	const loadSandboxProvider = deps.loadSandboxProvider || loadPipelineSandboxProvider;
+	const hostExecutionAdapter = deps.hostExecutionAdapter || createSandcastleHostExecutionAdapter({
+		createWorktree: deps.createWorktree,
+		loadSandboxProvider: deps.loadSandboxProvider,
+	});
+	const createWorktreeImpl = hostExecutionAdapter.createWorktree;
+	const makePipelineAgent = deps.hostExecutionAdapter ? hostExecutionAdapter.makeAgent : deps.makeAgent;
+	const loadSandboxProvider = hostExecutionAdapter.loadSandboxProvider;
 	const graphHookCapabilities = buildGraphHookCapabilities(pipeline, deps);
 	const configuredGraphHooks = [
 		...(deps.graphHooks || []),
@@ -3903,7 +3934,7 @@ export async function executePipeline(
 				const itemId = graphContextString(context, "itemId");
 				const nodePath = graphStatusNodePath(context);
 				const laneId = graphContextString(context, "contextId") || (context.loop ? `${nodePath}:${context.loop.index}` : undefined);
-				const contextPromptPrefix = graphLoopItem(context) ? `Execution context: ${laneId || "unknown"}${itemId ? `\nWork Item: ${itemId}` : ""}${contextBranch ? `\nBranch: ${contextBranch}` : ""}\n\n` : "";
+				const contextPromptPrefix = graphLoopItem(context) ? `Execution context: ${laneId || "unknown"}${itemId ? `\nWork Item: ${itemId}` : ""}${contextBranch ? `\nBranch: ${contextBranch}` : ""}\nLane scope: evaluate only this Work Item and branch. Other execution contexts in the prompt are parallel siblings; do not require their changes in this lane, and do not reject this lane for integration conflicts that must be handled by git.merge.\n\n` : "";
 				if (!roleName) throw new Error(`${context.path} agent node must reference a role`);
 				const role = cfg.agents[roleName];
 				if (!role) throw new Error(`${context.path} references unknown role '${roleName}'`);
@@ -3932,11 +3963,13 @@ export async function executePipeline(
 				try {
 					const sandbox = await loadSandboxProvider(sandboxKind, hostPiRuntime ? hostPiSandboxOptions(cwd, cfg, hostPiRuntime, sandboxKind) : withSandboxRuntimeOptions(sandboxKind, { imageName: defaultSandcastleImageName(cwd, cfg.imageNamePattern) }));
 					const template = node.promptOverride || resolvePromptText(cfg, node.prompt || "$INPUT");
-					const stepPromptBody = `${contextPromptPrefix}${resolvePipelineStepPrompt(template, prompt, prompt)}`;
+					const stepInput = laneScopedPromptInput(context, prompt);
+					const stepPromptBody = `${contextPromptPrefix}${resolvePipelineStepPrompt(template, stepInput, prompt)}`;
 					const stepPrompt = role.systemPrompt ? `${role.systemPrompt}\n\n## Delegated task\n\n${stepPromptBody}` : stepPromptBody;
 					const result = await workspaceWorktree.run({
 						agent: makePipelineAgent ? makePipelineAgent(model, provider) : createAgentProviderForRuntime(model, provider, { hostPiRuntime, sandbox: sandboxKind, claudeCodeFactory: deps.claudeCode }),
 						sandbox,
+						env: createAgentRunScopedGitConfigEnv(runDir, stepRecord.index),
 						prompt: stepPrompt,
 						maxIterations: stepRecord.maxIterations,
 						logging: {
