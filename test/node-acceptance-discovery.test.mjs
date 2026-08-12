@@ -260,6 +260,63 @@ test("fails closed for non-object workspace dependency sections", async () => {
   }
 });
 
+test("integration fails closed after discovering invalid declared workspace graphs", async () => {
+  const cases = [
+    {
+      name: "an invalid workspace manifest",
+      files: { "packages/a/package.json": { scripts: { test: "test-a" } } },
+      error: /unparseable workspace graph/i,
+    },
+    {
+      name: "duplicate workspace names",
+      files: {
+        "packages/a/package.json": { name: "@fixture/duplicate" },
+        "packages/b/package.json": { name: "@fixture/duplicate" },
+      },
+      error: /ambiguous workspace graph/i,
+    },
+    {
+      name: "a malformed dependency section",
+      files: { "packages/a/package.json": { name: "@fixture/a", dependencies: "invalid" } },
+      error: /unparseable workspace graph/i,
+    },
+    {
+      name: "overlapping workspace declarations",
+      files: { "packages/a/package.json": { name: "@fixture/a" } },
+      workspaces: ["packages/*", "packages/**"],
+      error: /ambiguous workspace graph/i,
+    },
+  ];
+  for (const { name, files, workspaces = ["packages/*"], error } of cases) {
+    await withFixture({
+      "package.json": { ...rootPackage, workspaces },
+      "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+      ...files,
+    }, async (repositoryRoot) => {
+      await assert.rejects(
+        adapter().plan({ repositoryRoot, candidate: "integration", changedPaths: [] }),
+        error,
+        name,
+      );
+    });
+  }
+});
+
+test("rejects Windows-drive and UNC changed paths in a single-package repository", async () => {
+  await withFixture({
+    "package.json": rootPackage,
+    "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+  }, async (repositoryRoot) => {
+    for (const changedPath of ["C:\\repository\\src\\index.js", "C:/repository/src/index.js", "\\\\server\\share\\index.js", "//server/share/index.js"]) {
+      await assert.rejects(
+        adapter().plan({ repositoryRoot, candidate: "implementation", changedPaths: [changedPath] }),
+        /outside declared workspaces/i,
+        changedPath,
+      );
+    }
+  });
+});
+
 test("returns a structured command plan and execution-result artifact", async () => {
   await withFixture({
     "package.json": rootPackage,

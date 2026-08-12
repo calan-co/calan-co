@@ -58,7 +58,9 @@ async function discoverWorkspaces(repositoryRoot, patterns) {
   for (const packageFile of files) {
     if (packageFile === "package.json") continue;
     const directory = path.dirname(packageFile);
-    if (!patterns.some((pattern) => matchesPattern(directory, pattern))) continue;
+    const matchingPatterns = patterns.filter((pattern) => matchesPattern(directory, pattern));
+    if (matchingPatterns.length === 0) continue;
+    if (matchingPatterns.length > 1) throw new Error("Ambiguous workspace graph");
     const manifest = await readJson(path.join(repositoryRoot, packageFile));
     if (typeof manifest.name !== "string" || !manifest.name) throw new Error("Unparseable workspace graph");
     workspaces.push({ name: manifest.name, directory, manifest });
@@ -103,7 +105,7 @@ async function validatePackageManager(repositoryRoot, rootPackage) {
 }
 
 function ownerFor(changedPath, workspaces) {
-  if (typeof changedPath !== "string" || path.isAbsolute(changedPath)) throw new Error("Changed path is outside declared workspaces");
+  if (typeof changedPath !== "string" || path.isAbsolute(changedPath) || /^[A-Za-z]:[\\/]/.test(changedPath) || /^[\\/]{2}/.test(changedPath)) throw new Error("Changed path is outside declared workspaces");
   const normalized = path.posix.normalize(changedPath.replace(/\\/g, "/"));
   if (normalized === ".." || normalized.startsWith("../")) throw new Error("Changed path is outside declared workspaces");
   const owners = workspaces.filter(({ directory }) => directory === "" || normalized === directory || normalized.startsWith(`${directory}/`));
@@ -119,6 +121,11 @@ export function createNodeAcceptanceDiscoveryAdapter() {
       const rootPackage = await readJson(path.join(repositoryRoot, "package.json"));
       await validatePackageManager(repositoryRoot, rootPackage);
       const patterns = workspacePatterns(rootPackage);
+      if (candidate !== "implementation" && candidate !== "integration") throw new Error("Unknown acceptance candidate");
+      const workspaces = patterns.length === 0
+        ? [{ name: rootPackage.name, directory: "", manifest: rootPackage }]
+        : await discoverWorkspaces(repositoryRoot, patterns);
+      validateWorkspaceGraph(workspaces);
       if (candidate === "integration") {
         return {
           scope: "repository",
@@ -126,11 +133,6 @@ export function createNodeAcceptanceDiscoveryAdapter() {
           commands: commandsFor([{ name: "root", manifest: rootPackage }]),
         };
       }
-      if (candidate !== "implementation") throw new Error("Unknown acceptance candidate");
-      const workspaces = patterns.length === 0
-        ? [{ name: rootPackage.name, directory: "", manifest: rootPackage }]
-        : await discoverWorkspaces(repositoryRoot, patterns);
-      validateWorkspaceGraph(workspaces);
       const affected = new Set();
       const selected = [];
       const add = (workspace) => {
