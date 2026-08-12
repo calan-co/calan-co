@@ -130,6 +130,20 @@ test("fails closed for an ambiguous lockfile configuration", async () => {
   });
 });
 
+test("fails closed when pnpm and npm shrinkwrap lockfiles coexist", async () => {
+  await withFixture({
+    "package.json": { ...rootPackage, workspaces: ["packages/*"] },
+    "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+    "npm-shrinkwrap.json": "{}",
+    "packages/a/package.json": { name: "a" },
+  }, async (repositoryRoot) => {
+    await assert.rejects(
+      adapter().plan({ repositoryRoot, candidate: "implementation", changedPaths: ["packages/a/index.js"] }),
+      /ambiguous/i,
+    );
+  });
+});
+
 test("fails closed for a changed path outside declared workspaces", async () => {
   await withFixture({
     "package.json": { ...rootPackage, workspaces: ["packages/*"] },

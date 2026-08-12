@@ -5,6 +5,7 @@ const SCRIPT_ORDER = ["check", "build", "test", "lint"];
 const LOCKFILES = new Map([
   ["pnpm-lock.yaml", "pnpm"],
   ["package-lock.json", "npm"],
+  ["npm-shrinkwrap.json", "npm"],
   ["yarn.lock", "yarn"],
 ]);
 
