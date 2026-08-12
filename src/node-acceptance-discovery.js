@@ -33,10 +33,11 @@ function workspacePatterns(rootPackage) {
 
 function matchesPattern(directory, pattern) {
   const normalized = directory.split(path.sep).join("/");
-  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*\*/g, ".*")
-    .replace(/\*/g, "[^/]*");
-  return new RegExp(`^${escaped}$`).test(normalized);
+  const expression = pattern.split("/").map((segment) => segment === "**"
+    ? ".*"
+    : segment.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*"),
+  ).join("/");
+  return new RegExp(`^${expression}$`).test(normalized);
 }
 
 async function packageFiles(directory, relative = "") {

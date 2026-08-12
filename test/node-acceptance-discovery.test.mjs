@@ -55,6 +55,25 @@ test("plans only a changed workspace and its reverse dependents in fixed script 
   });
 });
 
+test("discovers a nested workspace declared by packages/** for a changed path", async () => {
+  await withFixture({
+    "package.json": { ...rootPackage, workspaces: ["packages/**"] },
+    "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+    "packages/tools/formatter/package.json": { name: "@fixture/formatter", scripts: { test: "test-formatter" } },
+  }, async (repositoryRoot) => {
+    const plan = await adapter().plan({
+      repositoryRoot,
+      candidate: "implementation",
+      changedPaths: ["packages/tools/formatter/src/index.js"],
+    });
+    assert.deepEqual(plan, {
+      scope: "affected-workspaces",
+      workspaces: ["@fixture/formatter"],
+      commands: [{ workspace: "@fixture/formatter", script: "test" }],
+    });
+  });
+});
+
 test("fails closed for an ambiguous lockfile configuration", async () => {
   await withFixture({
     "package.json": { ...rootPackage, workspaces: ["packages/*"] },
