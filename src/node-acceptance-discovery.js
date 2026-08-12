@@ -104,9 +104,10 @@ function ownerFor(changedPath, workspaces) {
   if (typeof changedPath !== "string" || path.isAbsolute(changedPath)) throw new Error("Changed path is outside declared workspaces");
   const normalized = path.posix.normalize(changedPath.replace(/\\/g, "/"));
   if (normalized === ".." || normalized.startsWith("../")) throw new Error("Changed path is outside declared workspaces");
-  const owner = workspaces.find(({ directory }) => directory === "" || normalized === directory || normalized.startsWith(`${directory}/`));
-  if (!owner) throw new Error("Changed path is outside declared workspaces");
-  return owner;
+  const owners = workspaces.filter(({ directory }) => directory === "" || normalized === directory || normalized.startsWith(`${directory}/`));
+  if (owners.length === 0) throw new Error("Changed path is outside declared workspaces");
+  if (owners.length > 1) throw new Error("Ambiguous workspace ownership");
+  return owners[0];
 }
 
 export function createNodeAcceptanceDiscoveryAdapter() {

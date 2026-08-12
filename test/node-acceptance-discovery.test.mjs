@@ -74,6 +74,24 @@ test("discovers a nested workspace declared by packages/** for a changed path", 
   });
 });
 
+test("fails closed when nested declared workspaces both own a changed path", async () => {
+  await withFixture({
+    "package.json": { ...rootPackage, workspaces: ["packages/**"] },
+    "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+    "packages/tools/package.json": { name: "@fixture/tools" },
+    "packages/tools/formatter/package.json": { name: "@fixture/formatter" },
+  }, async (repositoryRoot) => {
+    await assert.rejects(
+      adapter().plan({
+        repositoryRoot,
+        candidate: "implementation",
+        changedPaths: ["packages/tools/formatter/src/index.js"],
+      }),
+      /ambiguous workspace ownership/i,
+    );
+  });
+});
+
 test("plans root scripts for a changed root file in a single-package repository", async () => {
   await withFixture({
     "package.json": rootPackage,
