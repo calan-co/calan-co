@@ -104,7 +104,7 @@ function ownerFor(changedPath, workspaces) {
   if (typeof changedPath !== "string" || path.isAbsolute(changedPath)) throw new Error("Changed path is outside declared workspaces");
   const normalized = path.posix.normalize(changedPath.replace(/\\/g, "/"));
   if (normalized === ".." || normalized.startsWith("../")) throw new Error("Changed path is outside declared workspaces");
-  const owner = workspaces.find(({ directory }) => normalized === directory || normalized.startsWith(`${directory}/`));
+  const owner = workspaces.find(({ directory }) => directory === "" || normalized === directory || normalized.startsWith(`${directory}/`));
   if (!owner) throw new Error("Changed path is outside declared workspaces");
   return owner;
 }
@@ -123,7 +123,10 @@ export function createNodeAcceptanceDiscoveryAdapter() {
         };
       }
       if (candidate !== "implementation") throw new Error("Unknown acceptance candidate");
-      const workspaces = await discoverWorkspaces(repositoryRoot, workspacePatterns(rootPackage));
+      const patterns = workspacePatterns(rootPackage);
+      const workspaces = patterns.length === 0
+        ? [{ name: rootPackage.name, directory: "", manifest: rootPackage }]
+        : await discoverWorkspaces(repositoryRoot, patterns);
       validateWorkspaceGraph(workspaces);
       const affected = new Set();
       const selected = [];

@@ -74,6 +74,30 @@ test("discovers a nested workspace declared by packages/** for a changed path", 
   });
 });
 
+test("plans root scripts for a changed root file in a single-package repository", async () => {
+  await withFixture({
+    "package.json": rootPackage,
+    "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+    "src/index.js": "export {};\n",
+  }, async (repositoryRoot) => {
+    const plan = await adapter().plan({
+      repositoryRoot,
+      candidate: "implementation",
+      changedPaths: ["src/index.js"],
+    });
+    assert.deepEqual(plan, {
+      scope: "affected-workspaces",
+      workspaces: ["fixture-root"],
+      commands: [
+        { workspace: "fixture-root", script: "check" },
+        { workspace: "fixture-root", script: "build" },
+        { workspace: "fixture-root", script: "test" },
+        { workspace: "fixture-root", script: "lint" },
+      ],
+    });
+  });
+});
+
 test("fails closed for an ambiguous lockfile configuration", async () => {
   await withFixture({
     "package.json": { ...rootPackage, workspaces: ["packages/*"] },
