@@ -1,0 +1,9 @@
+{
+  "name": "babysitter-dv",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Stack-neutral Babysitter delivery blueprint backed by Doc-Vader work items.",
+  "scripts": {
+    "backlog:validate": "dv backlog validate --dir backlog --fail-on error"
+  }
+}
