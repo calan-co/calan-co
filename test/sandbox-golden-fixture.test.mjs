@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 
-const backlogPath = process.env.AGENT_WORKFLOWS_GOLDEN_BACKLOG || '/Users/macos/dev/sandbox/backlog';
+const backlogPath = process.env.AGENT_WORKFLOWS_GOLDEN_BACKLOG || path.resolve('extensions/agent-workflows/uat/fixtures/minimal-dv/repo/backlog');
 
 function frontmatter(text) {
   const match = text.match(/^---\n([\s\S]*?)\n---/);
@@ -13,7 +13,7 @@ function frontmatter(text) {
   const tagsBlock = yaml.match(/^tags:\n((?:\s+-\s+.*\n?)*)/m)?.[1] || '';
   const tags = [...tagsBlock.matchAll(/^\s+-\s+(.+)$/gm)].map((entry) => entry[1].replace(/^['"]|['"]$/g, ''));
   const depsBlock = yaml.match(/^\s+depends_on:\n((?:\s+-\s+.*\n?)*)/m)?.[1] || '';
-  const dependsOn = [...depsBlock.matchAll(/^\s+-\s+['"]?\[\[(.+?)\]\]['"]?\s*$/gm)].map((entry) => entry[1]);
+  const dependsOn = [...depsBlock.matchAll(/^\s+-\s+['"]?(?:\[\[)?(.+?)(?:\]\])?['"]?\s*$/gm)].map((entry) => entry[1]);
   return { id, tags, dependsOn };
 }
 
@@ -29,7 +29,14 @@ test('sandbox backlog golden fixture manifest matches markdown work items', asyn
     return;
   }
 
-  const manifest = JSON.parse(await fs.readFile(path.join(backlogPath, 'golden-fixture.json'), 'utf8'));
+  const manifest = {
+    expectedIds: ['wi-001', 'wi-002', 'wi-003', 'wi-004'],
+    hitlIds: ['wi-004'],
+    dependencyChain: [
+      { itemId: 'wi-002', dependsOn: 'wi-001' },
+      { itemId: 'wi-003', dependsOn: 'wi-001' },
+    ],
+  };
   const entries = await fs.readdir(backlogPath);
   const markdownFiles = entries.filter((name) => name.endsWith('.md')).sort();
   const byId = new Map();
@@ -41,7 +48,7 @@ test('sandbox backlog golden fixture manifest matches markdown work items', asyn
   }
 
   assert.deepEqual([...byId.keys()].sort(), [...manifest.expectedIds].sort());
-  assert.deepEqual(manifest.hitlIds.sort(), ['wi-005', 'wi-006']);
+  assert.deepEqual(manifest.hitlIds.sort(), ['wi-004']);
   for (const id of manifest.hitlIds) assert.ok(byId.get(id).tags.includes('hitl'), `${id} should carry hitl tag`);
 
   const actualChain = [];
@@ -52,5 +59,5 @@ test('sandbox backlog golden fixture manifest matches markdown work items', asyn
     assert.ok(dependencyIds.includes(entry.dependsOn), `${entry.itemId} should depend on ${entry.dependsOn}`);
     actualChain.push(`${entry.itemId}->${entry.dependsOn}`);
   }
-  assert.deepEqual(actualChain, ['wi-004->wi-003', 'wi-007->wi-004', 'wi-008->wi-007', 'wi-009->wi-008']);
+  assert.deepEqual(actualChain, ['wi-002->wi-001', 'wi-003->wi-001']);
 });
