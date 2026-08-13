@@ -20,16 +20,21 @@ export function createReviewRemediationCoordinator({ review }) {
 }
 
 function isIndependentReviewer(reviewer, implementer) {
+  const reviewerIdentity = normalizeString(reviewer?.identity);
+  const reviewerContext = normalizeString(reviewer?.context);
+  const implementerIdentity = normalizeString(implementer?.identity);
+  const implementerContext = normalizeString(implementer?.context);
+
   return (
-    isNonEmptyString(reviewer?.identity) &&
-    isNonEmptyString(reviewer?.context) &&
-    isNonEmptyString(implementer?.identity) &&
-    isNonEmptyString(implementer?.context) &&
-    reviewer.identity !== implementer.identity &&
-    reviewer.context !== implementer.context
+    reviewerIdentity !== "" &&
+    reviewerContext !== "" &&
+    implementerIdentity !== "" &&
+    implementerContext !== "" &&
+    reviewerIdentity !== implementerIdentity &&
+    reviewerContext !== implementerContext
   );
 }
 
-function isNonEmptyString(value) {
-  return typeof value === "string" && value.trim() !== "";
+function normalizeString(value) {
+  return typeof value === "string" ? value.trim() : "";
 }
