@@ -375,13 +375,33 @@ test("remediates changes-requested findings before each fresh review, uses two d
   const finding = { path: "src/widget.js", line: 17, message: "Handle the missing widget ID." };
   const resultsByItem = new Map([
     ["wi-004", [
-      { verdict: "changes-requested", findings: [finding] },
-      { verdict: "changes-requested", findings: [{ ...finding }] },
+      {
+        verdict: "changes-requested",
+        findings: [finding],
+        reviewer: { identity: "reviewer", context: "wi-004-review-context-1" },
+      },
+      {
+        verdict: "changes-requested",
+        findings: [{ ...finding }],
+        reviewer: { identity: "reviewer", context: "wi-004-review-context-2" },
+      },
     ]],
     ["wi-005", [
-      { verdict: "changes-requested", findings: [finding] },
-      { verdict: "changes-requested", findings: [{ path: "src/widget.js", line: 18, message: "Handle the missing widget ID." }] },
-      { verdict: "changes-requested", findings: [{ path: "src/widget.js", line: 19, message: "Handle the missing widget ID." }] },
+      {
+        verdict: "changes-requested",
+        findings: [finding],
+        reviewer: { identity: "reviewer", context: "wi-005-review-context-1" },
+      },
+      {
+        verdict: "changes-requested",
+        findings: [{ path: "src/widget.js", line: 18, message: "Handle the missing widget ID." }],
+        reviewer: { identity: "reviewer", context: "wi-005-review-context-2" },
+      },
+      {
+        verdict: "changes-requested",
+        findings: [{ path: "src/widget.js", line: 19, message: "Handle the missing widget ID." }],
+        reviewer: { identity: "reviewer", context: "wi-005-review-context-3" },
+      },
     ]],
   ]);
   const coordinator = createReviewRemediationCoordinator({
@@ -389,10 +409,7 @@ test("remediates changes-requested findings before each fresh review, uses two d
     review: {
       request: async ({ item }) => {
         calls.push(`review:${item.itemId}`);
-        return {
-          ...resultsByItem.get(item.itemId).shift(),
-          reviewer: { identity: "reviewer", context: "review-context" },
-        };
+        return resultsByItem.get(item.itemId).shift();
       },
     },
     acceptance: {
@@ -599,11 +616,12 @@ test("authorizes configured global paths and journals canonical review evidence 
     context: "implementation-context",
     remediate: async () => calls.push({ operation: "remediate" }),
   };
-  const reviewer = { identity: "reviewer", context: "review-context" };
+  const initialReviewer = { identity: "reviewer", context: "initial-review-context" };
+  const remediatedReviewer = { identity: "reviewer", context: "remediated-review-context" };
   const finding = { path: "src/widget.js", line: 17, message: "Handle the missing widget ID." };
   const reviewResults = [
-    { verdict: "changes-requested", findings: [finding], reviewer },
-    { verdict: "approved", findings: [], reviewer },
+    { verdict: "changes-requested", findings: [finding], reviewer: initialReviewer },
+    { verdict: "approved", findings: [], reviewer: remediatedReviewer },
   ];
   const coordinator = createReviewRemediationCoordinator({
     policy: {
@@ -657,7 +675,7 @@ test("authorizes configured global paths and journals canonical review evidence 
         type: "review-evidence",
         itemId: "wi-004",
         verdict: "changes-requested",
-        reviewer,
+        reviewer: initialReviewer,
         findings: [finding],
         findingFingerprints: ["src/widget.js:17:Handle the missing widget ID."],
         cycle: 0,
@@ -678,7 +696,7 @@ test("authorizes configured global paths and journals canonical review evidence 
         type: "review-evidence",
         itemId: "wi-004",
         verdict: "approved",
-        reviewer,
+        reviewer: remediatedReviewer,
         findings: [],
         findingFingerprints: [],
         cycle: 1,
@@ -709,7 +727,7 @@ test("uses validated repository review configuration for ten remediation cycles,
             return {
               verdict: "changes-requested",
               findings: [{ path: "src/widget.js", line: requests, message: `Finding ${requests}` }],
-              reviewer: { identity: "reviewer", context: "review-context" },
+              reviewer: { identity: "reviewer", context: `review-context-${requests}` },
             };
           },
         },
