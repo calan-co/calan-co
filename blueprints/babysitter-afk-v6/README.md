@@ -1,6 +1,14 @@
 # Babysitter AFK Doc-Vader blueprint (v6)
 
-Install this directory through the Babysitter **blueprints:** installation command supported by your installed v6 runtime, then invoke its exported `process(inputs, ctx)` entry point. The package intentionally declares only standard package metadata; it does not invent undocumented `blueprint.json` fields.
+This package targets the installed Babysitter v6 CLI (`babysitter --version` reports 6.0.3 in the validated environment). Install its declared SDK dependency and run it with the concrete v6 commands:
+
+```sh
+cd blueprints/babysitter-afk-v6
+npm install
+babysitter run:create --process-id babysitter-afk-doc-vader --entry "$PWD/process.mjs#process" --inputs ./inputs.json --non-interactive --json
+```
+
+Then advance the durable run using `babysitter run:iterate <run-directory> --json`; inspect append-only effects with `babysitter run:events <run-directory> --json`. The package intentionally declares only standard package metadata; it does not invent undocumented `blueprint.json` fields.
 
 ## Run contract
 

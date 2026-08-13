@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -8,6 +8,7 @@ import test from "node:test";
 const loadBlueprint = () => import("../src/afk-delivery-blueprint.js");
 const loadEvidence = () => import("../src/evidence-manifest.js");
 const loadOverride = () => import("../src/repository-override-loader.js");
+const loadCoordinator = () => import("../src/review-remediation-coordinator.js");
 
 const sha256 = (contents) => createHash("sha256").update(contents).digest("hex");
 const categories = ["input", "command", "dv", "review", "diff", "commit", "integration", "hash"];
@@ -34,7 +35,7 @@ async function validEvidenceFiles(directory = "evidence") {
     const relative = `${category}.json`;
     const contents = `${category} evidence\n`;
     files[`${directory}/${relative}`] = contents;
-    artifacts.push({ path: relative, category, sha256: sha256(contents), transition: "delivery" });
+    artifacts.push({ path: relative, category, sha256: sha256(contents), transition: "prepare-item" });
   }
   files[`${directory}/manifest.json`] = { schemaVersion: "babysitter-evidence/v1", artifacts };
   return files;
@@ -127,6 +128,26 @@ test("evidence manifest is strict and hash verified", async (t) => {
   }
 });
 
+test("evidence rejects external manifests, symlink artifacts, and missing action linkage", async (t) => {
+  const { verifyEvidenceManifest } = await loadEvidence();
+  await t.test("rejects external manifest and symlink artifact", async () => {
+    const files = await validEvidenceFiles();
+    await withFixture(files, async (root) => {
+      const evidence = path.join(root, "evidence");
+      await writeFile(path.join(root, "outside.json"), "outside\n");
+      await rm(path.join(evidence, "input.json"));
+      await symlink(path.join(root, "outside.json"), path.join(evidence, "input.json"));
+      await assert.rejects(verifyEvidenceManifest({ runDirectory: evidence }), /symlink|escape|regular/i);
+      await assert.rejects(verifyEvidenceManifest({ runDirectory: evidence, manifestPath: path.join(root, "outside.json") }), /manifest.*run-directory/i);
+    });
+  });
+  await t.test("requires evidence linked to the guarded action", async () => {
+    await withFixture(await validEvidenceFiles(), async (root) => {
+      await assert.rejects(verifyEvidenceManifest({ runDirectory: path.join(root, "evidence"), expectedTransition: "dv-close" }), /linked.*dv-close/i);
+    });
+  });
+});
+
 test("optional override loader uses the Doc-Vader parser and built-ins by default", async () => {
   const { loadRepositoryOverride } = await loadOverride();
   await withFixture({}, async (root) => {
@@ -163,11 +184,41 @@ test("fixture-driven blueprint outcomes preserve delivery policy seams", async (
   }
 });
 
+test("composed coordinator guards every side effect and leaves reconstructable typed evidence", async () => {
+  const { createAfkDeliveryBlueprint } = await loadBlueprint();
+  const { createReviewRemediationCoordinator } = await loadCoordinator();
+  await withFixture({}, async (root) => {
+    const calls = [];
+    const coordinator = createReviewRemediationCoordinator({
+      policy: { changedPaths: async () => ["src/a.js"], authorize: async () => true },
+      journal: { append: async (event) => calls.push(`journal:${event.type}`) },
+      review: { request: async () => ({ verdict: "approved", reviewer: { identity: "reviewer", context: "review-1" } }) },
+      acceptance: { execute: async () => ({ passed: true }) },
+      dv: { close: async () => { calls.push("close"); return { schemaVersion: "task-close/v1", id: "wi-005", status: "closed", lifecycle: "closed" }; } },
+      workspace: { commitTracked: async () => { calls.push("commit"); return { committed: true }; } },
+      integration: { deliver: async () => { calls.push("deliver"); return { status: "delivered" }; } },
+    });
+    const blueprint = createAfkDeliveryBlueprint({
+      worktreeTransaction: { prepareItem: async () => ({ itemId: "wi-005", worktree: root, changedPaths: ["src/a.js"] }) },
+      delivery: coordinator,
+      state: { transition: async () => {} },
+    });
+    const result = await blueprint.run({ itemId: "wi-005", cwd: root, runDirectory: path.join(root, "run"), implementer: { identity: "implementer", context: "implementation-1" } });
+    assert.equal(result.status, "delivered");
+    assert.deepEqual(calls.filter((call) => !call.startsWith("journal:")), ["close", "commit", "deliver"]);
+    const manifest = JSON.parse(await readFile(path.join(root, "run", "manifest.json"), "utf8"));
+    for (const transition of ["prepare-item", "review-request", "dv-close", "closure-commit", "integration-deliver", "state-transition"]) assert.ok(manifest.artifacts.some((artifact) => artifact.transition === transition), transition);
+    const journal = (await readFile(path.join(root, "run", "journal.ndjson"), "utf8")).trim().split("\n").map(JSON.parse);
+    assert.ok(journal.every((event, index) => event.sequence === index + 1));
+    assert.ok(journal.some((event) => event.category === "dv" && event.transition === "dv-close"));
+  });
+});
+
 test("v6 package and operator documentation expose portable process contracts", async () => {
   const process = await import("../blueprints/babysitter-afk-v6/process.mjs");
   const packageMetadata = JSON.parse(await readFile(new URL("../blueprints/babysitter-afk-v6/package.json", import.meta.url), "utf8"));
   const docs = await readFile(new URL("../blueprints/babysitter-afk-v6/README.md", import.meta.url), "utf8");
   assert.equal(packageMetadata.version, "6.0.0");
   assert.equal(typeof process.process, "function");
-  for (const phrase of ["blueprints:", "repository override", "run directory", "adapter", "Node-first", "lockfile"]) assert.match(docs, new RegExp(phrase, "i"));
+  for (const phrase of ["babysitter run:create", "babysitter run:iterate", "repository override", "run directory", "adapter", "Node-first", "lockfile"]) assert.match(docs, new RegExp(phrase, "i"));
 });
