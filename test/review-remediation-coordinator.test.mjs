@@ -360,6 +360,112 @@ test("remediates changes-requested findings before each fresh review, uses two d
   ]);
 });
 
+test("delivers exact changes-requested findings to implementer remediation before affected acceptance and a fresh reviewer context", async () => {
+  const calls = [];
+  const item = { itemId: "wi-004" };
+  const findings = [
+    { path: "src/widget.js", line: 17, message: "Handle the missing widget ID." },
+    { path: "test/widget.test.mjs", line: 42, message: "Cover the missing-ID case." },
+  ];
+  const reviewResults = [
+    {
+      verdict: "changes-requested",
+      findings,
+      reviewer: { identity: "reviewer", context: "initial-review-context" },
+    },
+    {
+      verdict: "blocked",
+      reviewer: { identity: "reviewer", context: "fresh-review-context" },
+    },
+  ];
+  const remediationCalls = [];
+  const coordinator = createReviewRemediationCoordinator({
+    ...successfulReviewPorts(),
+    review: {
+      request: async () => {
+        const result = reviewResults.shift();
+        calls.push(`review:${result.reviewer.context}`);
+        return result;
+      },
+    },
+    acceptance: {
+      execute: async () => {
+        calls.push("acceptance");
+        return { passed: true };
+      },
+    },
+  });
+  const implementer = {
+    identity: "implementer",
+    context: "implementation-context",
+    remediate: async (request) => {
+      remediationCalls.push(request);
+      calls.push("remediate");
+    },
+  };
+
+  assert.deepEqual(await coordinator.review({ item, implementer }), { status: "paused" });
+  assert.deepEqual(remediationCalls, [{ item, findings }]);
+  assert.strictEqual(remediationCalls[0].findings, findings);
+  assert.deepEqual(calls, [
+    "review:initial-review-context",
+    "remediate",
+    "acceptance",
+    "review:fresh-review-context",
+  ]);
+});
+
+test("pauses before fresh review, closure, or integration unless acceptance returns exactly passed true", async () => {
+  const item = { itemId: "wi-004", worktree: "/items/wi-004" };
+  const findings = [{ path: "src/widget.js", line: 17, message: "Handle the missing widget ID." }];
+  const implementer = {
+    identity: "implementer",
+    context: "implementation-context",
+    remediate: async () => {},
+  };
+
+  for (const acceptanceResult of [
+    undefined,
+    null,
+    false,
+    true,
+    {},
+    { passed: false },
+    { passed: true, unexpected: true },
+  ]) {
+    const calls = [];
+    const coordinator = createReviewRemediationCoordinator({
+      ...successfulReviewPorts(),
+      review: {
+        request: async () => {
+          calls.push("review");
+          return {
+            verdict: "changes-requested",
+            findings,
+            reviewer: { identity: "reviewer", context: "review-context" },
+          };
+        },
+      },
+      acceptance: {
+        execute: async () => {
+          calls.push("acceptance");
+          return acceptanceResult;
+        },
+      },
+      dv: { close: async () => calls.push("close") },
+      workspace: { commitTracked: async () => calls.push("commit") },
+      integration: { deliver: async () => calls.push("integration") },
+    });
+
+    assert.deepEqual(
+      await coordinator.review({ item, implementer }),
+      { status: "paused" },
+      JSON.stringify(acceptanceResult),
+    );
+    assert.deepEqual(calls, ["review", "acceptance"], JSON.stringify(acceptanceResult));
+  }
+});
+
 test("uses injected policy authorization to deny protected and non-global changed paths before review, close, or integration", async () => {
   const protectedPaths = [
     "backlog/004-review-remediation-and-closure-transaction.md",
