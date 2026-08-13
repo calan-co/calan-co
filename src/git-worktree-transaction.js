@@ -26,11 +26,19 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
   if (!review || typeof review.verify !== "function") throw new TypeError("review verifier must validate evidence");
   if (guard !== undefined && typeof guard?.before !== "function") throw new TypeError("transaction guard must verify actions");
 
+  let activeJournal = journal;
+  let activeGuard = guard;
   const run = async (args, cwd) => text(await git({ args, cwd }));
-  const record = async (event) => journal.append(event);
+  const record = async (event) => activeJournal.append(event);
   const guardBefore = async (event) => {
     await record({ type: "delivery-action-intent", ...event });
-    if (guard) await guard.before(event);
+    if (activeGuard) await activeGuard.before(event);
+  };
+  function withEvidenceGuard({ before, journal: evidenceJournal } = {}) {
+    if (typeof before !== "function" || !evidenceJournal || typeof evidenceJournal.append !== "function") throw new TypeError("evidence guard and journal are required");
+    activeGuard = { before };
+    activeJournal = evidenceJournal;
+    return api;
   };
 
   async function resolveTarget({ cwd, targetBranch }) {
@@ -306,5 +314,6 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
     return publish(refreshed.item, refreshed.integrationWorktree, refreshed.recovery.strategy, refreshed.candidateSha);
   }
 
-  return Object.freeze({ prepareItem, deliver, refreshStale, retryStale });
+  const api = Object.freeze({ prepareItem, deliver, refreshStale, retryStale, withEvidenceGuard });
+  return api;
 }

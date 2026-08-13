@@ -1,3 +1,4 @@
+import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { createAfkDeliveryBlueprint } from "../../src/afk-delivery-blueprint.js";
 
@@ -10,7 +11,10 @@ export async function process(inputs, ctx) {
     throw new TypeError("JSON inputs require configModule and runInput objects");
   }
   if (!ctx?.task || typeof ctx.task !== "function") throw new TypeError("Babysitter v6 ctx.task is required");
-  const configUrl = inputs.configModule.startsWith("file:") ? inputs.configModule : pathToFileURL(inputs.configModule).href;
+  if (!path.isAbsolute(inputs.configModule) || inputs.configModule.includes("\0") || !inputs.configModule.endsWith(".mjs")) {
+    throw new TypeError("configModule must be an absolute local .mjs module");
+  }
+  const configUrl = pathToFileURL(inputs.configModule).href;
   const config = await import(configUrl);
   const resolvePorts = config.createPorts ?? config.default;
   if (typeof resolvePorts !== "function") throw new TypeError("config module must export createPorts(inputs) or default(inputs)");

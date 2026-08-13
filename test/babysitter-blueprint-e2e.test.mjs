@@ -52,6 +52,7 @@ function createHarness({ outcome = { status: "delivered" } } = {}) {
     prepareCalls, transitionCalls, deliveryCalls,
     blueprintOptions: {
       worktreeTransaction: {
+        withEvidenceGuard: () => {},
         prepareItem: async (input) => {
           prepareCalls.push(input);
           return { itemId: input.itemId, worktree: "/items/wi-005" };
@@ -190,6 +191,8 @@ test("blueprint composed real Git fixtures preserve delivery policy", async (t) 
           git, journal: { append: async (event) => events.push(event) },
           paths: { item: ({ itemId }) => ({ branch: `items/${itemId}`, worktree: path.join(root, `.item-${itemId}`) }), integration: ({ itemId, attempt = 0 }) => ({ worktree: path.join(root, `.integration-${itemId}-${attempt}`) }) },
           acceptance: { run: async () => setup.rootChecks ?? true }, review: { verify: async () => true },
+          // Blueprint overwrites this guard with its durable manifest verifier.
+          guard: { before: async () => { throw new Error("blueprint failed to inject guard"); } },
         });
         const coordinator = createReviewRemediationCoordinator({
           policy: { changedPaths: async () => ["README.md"], authorize: async () => true }, journal: { append: async () => {} },
@@ -204,7 +207,12 @@ test("blueprint composed real Git fixtures preserve delivery policy", async (t) 
       } finally { rmSync(root, { recursive: true, force: true }); }
     });
   }
-  await runScenario("reviewed closure commit and CAS success", { assert: ({ root, result, closes }) => { assert.equal(result.status, "delivered"); assert.equal(closes, 1); assert.match(gitIn(root, ["log", "-1", "--format=%s", "main"]), /Merge branch/); } });
+  await runScenario("reviewed closure commit and CAS success", { assert: async ({ root, result, closes }) => {
+    assert.equal(result.status, "delivered"); assert.equal(closes, 1); assert.match(gitIn(root, ["log", "-1", "--format=%s", "main"]), /Merge branch/);
+    const runEvents = (await readFile(path.join(root, "run", "journal.ndjson"), "utf8")).trim().split("\n").map(JSON.parse);
+    for (const action of ["cas-publication", "cleanup"]) assert.ok(runEvents.some((event) => event.event?.action === action), action);
+    assert.ok(runEvents.every((event, index) => event.sequence === index + 1));
+  } });
   await runScenario("changes-requested remediates, accepts, and receives fresh review", { review: (n) => n === 1 ? { verdict: "changes-requested", findings: [{ path: "README.md", line: 1, message: "fix" }], reviewer: { identity: "reviewer-1", context: "review-1" } } : { verdict: "approved", reviewer: { identity: "reviewer-2", context: "review-2" } }, assert: ({ result, reviews }) => { assert.equal(result.status, "delivered"); assert.equal(reviews, 2); } });
   await runScenario("close failure never integrates", { closeFails: true, assert: ({ root, result, closes }) => { assert.equal(result.status, "paused"); assert.equal(closes, 1); assert.equal(gitIn(root, ["log", "-1", "--format=%s", "main"]), "base"); } });
   await runScenario("root failure leaves target unchanged and worktree retained", { rootChecks: false, assert: ({ root, result }) => { assert.equal(result.status, "failed"); assert.equal(gitIn(root, ["log", "-1", "--format=%s", "main"]), "base"); assert.equal(existsSync(path.join(root, ".item-wi-005")), true); } });
@@ -252,7 +260,7 @@ test("composed coordinator guards every side effect and leaves reconstructable t
       integration: { deliver: async () => { calls.push("deliver"); return { status: "delivered" }; } },
     });
     const blueprint = createAfkDeliveryBlueprint({
-      worktreeTransaction: { prepareItem: async () => ({ itemId: "wi-005", worktree: root, changedPaths: ["src/a.js"] }) },
+      worktreeTransaction: { withEvidenceGuard: () => {}, prepareItem: async () => ({ itemId: "wi-005", worktree: root, changedPaths: ["src/a.js"] }) },
       delivery: coordinator,
       state: { transition: async () => {} },
     });
@@ -271,10 +279,11 @@ test("v6 process resolves ports from JSON-selected importable configuration", as
   const { process } = await import("../blueprints/babysitter-afk-v6/process.mjs");
   await withFixture({}, async (root) => {
     const config = path.join(root, "ports.mjs");
-    await writeFile(config, `export function createPorts() { return { maxReviewCycles: 10, worktreeTransaction: { prepareItem: async () => ({ itemId: "wi-005", worktree: "/item" }) }, delivery: { review: async () => ({ status: "delivered" }) }, state: { transition: async () => {} } }; }`);
+    await writeFile(config, `export function createPorts() { return { maxReviewCycles: 10, worktreeTransaction: { withEvidenceGuard: () => {}, prepareItem: async () => ({ itemId: "wi-005", worktree: "/item" }) }, delivery: { review: async () => ({ status: "delivered" }) }, state: { transition: async () => {} } }; }`);
     const result = await process({ configModule: config, runInput: { itemId: "wi-005", cwd: root, runDirectory: path.join(root, "run") } }, { task: async () => ({}) });
     assert.equal(result.status, "delivered");
     await assert.rejects(process({ runInput: {} }, { task: async () => ({}) }), /configModule/i);
+    await assert.rejects(process({ configModule: "../ports.mjs", runInput: {} }, { task: async () => ({}) }), /absolute.*mjs/i);
   });
 });
 
