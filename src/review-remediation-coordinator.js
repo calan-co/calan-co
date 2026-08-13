@@ -2,6 +2,8 @@
  * Coordinates independent review outcomes for an implementation work item.
  */
 export function createReviewRemediationCoordinator({ review }) {
+  const findingFingerprints = new Set();
+
   return {
     async review({ item, implementer }) {
       const result = await review.request({ item, implementer });
@@ -12,7 +14,18 @@ export function createReviewRemediationCoordinator({ review }) {
         throw new Error("Invalid verdict or non-independent reviewer");
       }
 
+      if (result.verdict === "blocked") {
+        return { status: "paused" };
+      }
+
       if (result.verdict === "changes-requested") {
+        const fingerprints = result.findings
+          .map((finding) => normalizeString(finding?.fingerprint))
+          .filter(Boolean);
+        if (fingerprints.some((fingerprint) => findingFingerprints.has(fingerprint))) {
+          return { status: "paused" };
+        }
+        fingerprints.forEach((fingerprint) => findingFingerprints.add(fingerprint));
         return { status: "changes-requested", findings: result.findings };
       }
     },
