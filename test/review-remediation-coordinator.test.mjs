@@ -127,12 +127,12 @@ test("rejects whitespace-equivalent reviewer identity or context before prohibit
   assert.deepEqual(calls, []);
 });
 
-test("closes a valid independently approved item in its worktree, commits tracked closure changes, then integrates", async () => {
+test("closes a valid independently approved git-worktree transaction item by itemId, commits tracked closure changes, then integrates", async () => {
   const calls = [];
-  const item = { id: "wi-004", worktree: "/items/wi-004" };
+  const item = { itemId: "wi-004", worktree: "/items/wi-004" };
   const acknowledgement = {
     schemaVersion: "task-close/v1",
-    id: item.id,
+    id: item.itemId,
     status: "closed",
     lifecycle: "closed",
   };
@@ -150,7 +150,10 @@ test("closes a valid independently approved item in its worktree, commits tracke
       },
     },
     workspace: {
-      commitTracked: async ({ cwd }) => calls.push({ operation: "commit", cwd }),
+      commitTracked: async ({ cwd }) => {
+        calls.push({ operation: "commit", cwd });
+        return { committed: true };
+      },
     },
     integration: {
       deliver: async ({ item: deliveredItem }) => calls.push({ operation: "integration", item: deliveredItem }),
@@ -167,6 +170,89 @@ test("closes a valid independently approved item in its worktree, commits tracke
     { operation: "commit", cwd: "/items/wi-004" },
     { operation: "integration", item },
   ]);
+});
+
+test("pauses without committing or integrating when a close acknowledgement names a different itemId", async () => {
+  const calls = [];
+  const item = { itemId: "wi-004", worktree: "/items/wi-004" };
+  const coordinator = createReviewRemediationCoordinator({
+    review: {
+      request: async () => ({
+        verdict: "approved",
+        reviewer: { identity: "reviewer", context: "review-context" },
+      }),
+    },
+    dv: {
+      close: async ({ workId, cwd }) => {
+        calls.push({ operation: "close", workId, cwd });
+        return {
+          schemaVersion: "task-close/v1",
+          id: "wi-005",
+          status: "closed",
+          lifecycle: "closed",
+        };
+      },
+    },
+    workspace: {
+      commitTracked: async () => calls.push({ operation: "commit" }),
+    },
+    integration: {
+      deliver: async () => calls.push({ operation: "integration" }),
+    },
+  });
+
+  const result = await coordinator.review({
+    item,
+    implementer: { identity: "implementer", context: "implementation-context" },
+  });
+
+  assert.deepEqual(result, { status: "paused" });
+  assert.deepEqual(calls, [{ operation: "close", workId: "wi-004", cwd: "/items/wi-004" }]);
+});
+
+test("requires an explicit committed true result before integrating an approved closure", async () => {
+  const item = { itemId: "wi-004", worktree: "/items/wi-004" };
+  const implementer = { identity: "implementer", context: "implementation-context" };
+
+  for (const commitResult of [undefined, false, {}, { committed: false }, { committed: "true" }]) {
+    const calls = [];
+    const coordinator = createReviewRemediationCoordinator({
+      review: {
+        request: async () => ({
+          verdict: "approved",
+          reviewer: { identity: "reviewer", context: "review-context" },
+        }),
+      },
+      dv: {
+        close: async ({ workId, cwd }) => {
+          calls.push({ operation: "close", workId, cwd });
+          return {
+            schemaVersion: "task-close/v1",
+            id: item.itemId,
+            status: "closed",
+            lifecycle: "closed",
+          };
+        },
+      },
+      workspace: {
+        commitTracked: async ({ cwd }) => {
+          calls.push({ operation: "commit", cwd });
+          return commitResult;
+        },
+      },
+      integration: {
+        deliver: async () => calls.push({ operation: "integration" }),
+      },
+    });
+
+    const result = await coordinator.review({ item, implementer });
+
+    assert.deepEqual(result, { status: "paused" }, JSON.stringify(commitResult));
+    assert.deepEqual(calls, [
+      { operation: "close", workId: "wi-004", cwd: "/items/wi-004" },
+      { operation: "commit", cwd: "/items/wi-004" },
+    ], JSON.stringify(commitResult));
+  }
 });
 
 test("fails closed without committing or integrating when close throws or returns an invalid acknowledgement", async () => {
