@@ -5,7 +5,10 @@ import { createReviewRemediationCoordinator } from "../src/review-remediation-co
 
 function successfulReviewPorts() {
   return {
-    policy: { authorize: async () => true },
+    policy: {
+      changedPaths: async ({ item }) => item?.changedPaths ?? ["src/widget.js"],
+      authorize: async () => true,
+    },
     journal: { append: async () => {} },
   };
 }
@@ -493,6 +496,7 @@ test("uses injected policy authorization to deny protected and non-global change
     const item = { itemId: "wi-004", changedPaths: [changedPath] };
     const coordinator = createReviewRemediationCoordinator({
       policy: {
+        changedPaths: async ({ item: changedItem }) => changedItem.changedPaths,
         authorize: async (authorization) => {
           calls.push({ operation: "authorize", authorization });
           return authorization.changedPaths.every((path) =>
@@ -517,7 +521,7 @@ test("uses injected policy authorization to deny protected and non-global change
     assert.deepEqual(await coordinator.review({ item, implementer }), { status: "paused" }, changedPath);
     assert.deepEqual(calls, [{
       operation: "authorize",
-      authorization: { item, changedPaths: [changedPath], globalAllowedPaths },
+      authorization: { item, changedPaths: [changedPath], globalAllowedPaths, phase: "initial" },
     }], changedPath);
   }
 });
@@ -542,6 +546,7 @@ test("authorizes configured global paths and journals canonical review evidence 
   ];
   const coordinator = createReviewRemediationCoordinator({
     policy: {
+      changedPaths: async ({ item: changedItem }) => changedItem.changedPaths,
       authorize: async (authorization) => {
         calls.push({ operation: "authorize", authorization });
         return authorization.changedPaths.every((path) =>
@@ -578,14 +583,12 @@ test("authorizes configured global paths and journals canonical review evidence 
   await coordinator.review({ item, implementer });
 
   assert.deepEqual(calls, [
-    {
-      operation: "authorize",
-      authorization: {
-        item,
-        changedPaths: item.changedPaths,
-        globalAllowedPaths: ["src/**", "test/**"],
-      },
-    },
+    { operation: "authorize", authorization: {
+      item,
+      changedPaths: item.changedPaths,
+      globalAllowedPaths: ["src/**", "test/**"],
+      phase: "initial",
+    } },
     { operation: "review" },
     {
       operation: "journal",
@@ -600,6 +603,12 @@ test("authorizes configured global paths and journals canonical review evidence 
       },
     },
     { operation: "remediate" },
+    { operation: "authorize", authorization: {
+      item,
+      changedPaths: item.changedPaths,
+      globalAllowedPaths: ["src/**", "test/**"],
+      phase: "post-remediation",
+    } },
     { operation: "acceptance" },
     { operation: "review" },
     {
@@ -768,6 +777,224 @@ test("refreshes a stale integration only through root acceptance and a fresh ind
     },
   }]);
   assert.equal(calls.includes("resolve-conflict"), false);
+});
+
+test("recomputes and reauthorizes remediation paths before acceptance, pausing prohibited changes", async () => {
+  const calls = [];
+  const item = { itemId: "wi-004" };
+  const coordinator = createReviewRemediationCoordinator({
+    policy: {
+      changedPaths: async () => {
+        const changedPaths = calls.includes("remediate")
+          ? ["policy/unattended-authorization.json"]
+          : ["src/widget.js"];
+        calls.push({ operation: "changed-paths", changedPaths });
+        return changedPaths;
+      },
+      authorize: async (authorization) => {
+        calls.push({ operation: "authorize", authorization });
+        return authorization.changedPaths.every((path) => path.startsWith("src/"));
+      },
+    },
+    globalAllowedPaths: ["src/**"],
+    journal: { append: async () => calls.push("journal") },
+    review: {
+      request: async () => {
+        calls.push("review");
+        return {
+          verdict: "changes-requested",
+          findings: [{ path: "src/widget.js", line: 17, message: "Handle the missing widget ID." }],
+          reviewer: { identity: "reviewer", context: "initial-review-context" },
+        };
+      },
+    },
+    acceptance: { execute: async () => calls.push("acceptance") },
+    dv: { close: async () => calls.push("close") },
+    integration: { deliver: async () => calls.push("integration") },
+  });
+  const implementer = {
+    identity: "implementer",
+    context: "implementation-context",
+    remediate: async () => calls.push("remediate"),
+  };
+
+  assert.deepEqual(await coordinator.review({ item, implementer }), { status: "paused" });
+  assert.deepEqual(calls, [
+    { operation: "changed-paths", changedPaths: ["src/widget.js"] },
+    { operation: "authorize", authorization: {
+      item, changedPaths: ["src/widget.js"], globalAllowedPaths: ["src/**"], phase: "initial",
+    } },
+    "review",
+    "journal",
+    "remediate",
+    { operation: "changed-paths", changedPaths: ["policy/unattended-authorization.json"] },
+    { operation: "authorize", authorization: {
+      item,
+      changedPaths: ["policy/unattended-authorization.json"],
+      globalAllowedPaths: ["src/**"],
+      phase: "post-remediation",
+    } },
+  ]);
+});
+
+test("requires policy.changedPaths to return repository-relative non-empty paths before review", async () => {
+  for (const changedPaths of [undefined, [], [""], ["/outside-repository.js"], ["src/../policy.json"], [42]]) {
+    const calls = [];
+    const coordinator = createReviewRemediationCoordinator({
+      policy: {
+        changedPaths: async () => changedPaths,
+        authorize: async () => { calls.push("authorize"); return true; },
+      },
+      journal: { append: async () => calls.push("journal") },
+      review: {
+        request: async () => {
+          calls.push("review");
+          return { verdict: "blocked", reviewer: { identity: "reviewer", context: "review-context" } };
+        },
+      },
+    });
+
+    assert.deepEqual(
+      await coordinator.review({
+        item: { itemId: "wi-004" },
+        implementer: { identity: "implementer", context: "implementation-context" },
+      }),
+      { status: "paused" },
+      JSON.stringify(changedPaths),
+    );
+    assert.deepEqual(calls, [], JSON.stringify(changedPaths));
+  }
+});
+
+test("requires policy.changedPaths to exist and fail closed on port errors", async () => {
+  for (const changedPaths of [undefined, async () => { throw new Error("cannot inspect workspace"); }]) {
+    const calls = [];
+    const policy = typeof changedPaths === "function"
+      ? { changedPaths, authorize: async () => calls.push("authorize") }
+      : { authorize: async () => calls.push("authorize") };
+    const coordinator = createReviewRemediationCoordinator({
+      policy,
+      journal: { append: async () => calls.push("journal") },
+      review: { request: async () => calls.push("review") },
+    });
+
+    assert.deepEqual(await coordinator.review({
+      item: { itemId: "wi-004" },
+      implementer: { identity: "implementer", context: "implementation-context" },
+    }), { status: "paused" });
+    assert.deepEqual(calls, []);
+  }
+});
+
+test("pauses malformed changes-requested findings without journaling them as review evidence", async () => {
+  const malformedFindings = [
+    undefined,
+    null,
+    [],
+    [{}],
+    [{ path: "", line: 17, message: "Handle the missing widget ID." }],
+    [{ path: "src/widget.js", line: 17, message: "" }],
+    [{ path: 42, line: 17, message: "Handle the missing widget ID." }],
+    [{ path: "src/widget.js", line: 17, message: false }],
+  ];
+
+  for (const findings of malformedFindings) {
+    const calls = [];
+    const coordinator = createReviewRemediationCoordinator({
+      ...successfulReviewPorts(),
+      journal: { append: async () => calls.push("journal") },
+      review: {
+        request: async () => {
+          calls.push("review");
+          return {
+            verdict: "changes-requested",
+            findings,
+            reviewer: { identity: "reviewer", context: "review-context" },
+          };
+        },
+      },
+      acceptance: { execute: async () => calls.push("acceptance") },
+      dv: { close: async () => calls.push("close") },
+      integration: { deliver: async () => calls.push("integration") },
+    });
+
+    assert.deepEqual(
+      await coordinator.review({
+        item: { itemId: "wi-004" },
+        implementer: { identity: "implementer", context: "implementation-context", remediate: async () => calls.push("remediate") },
+      }),
+      { status: "paused" },
+      JSON.stringify(findings),
+    );
+    assert.deepEqual(calls, ["review"], JSON.stringify(findings));
+  }
+});
+
+test("requires a remediation review context to be fresh relative to every earlier review before closure", async () => {
+  const calls = [];
+  const item = { itemId: "wi-004", worktree: "/items/wi-004" };
+  const reviewResults = [
+    { verdict: "changes-requested", findings: [{ path: "src/widget.js", line: 17, message: "First finding." }], context: "context-a" },
+    { verdict: "changes-requested", findings: [{ path: "src/widget.js", line: 18, message: "Second finding." }], context: "context-b" },
+    { verdict: "approved", context: "context-a" },
+  ];
+  const coordinator = createReviewRemediationCoordinator({
+    ...successfulReviewPorts(),
+    review: {
+      request: async () => {
+        const result = reviewResults.shift();
+        calls.push(`review:${result.context}`);
+        return { ...result, reviewer: { identity: "reviewer", context: result.context } };
+      },
+    },
+    acceptance: { execute: async () => { calls.push("acceptance"); return { passed: true }; } },
+    dv: { close: async () => calls.push("close") },
+    workspace: { commitTracked: async () => calls.push("commit") },
+    integration: { deliver: async () => calls.push("integration") },
+  });
+
+  assert.deepEqual(await coordinator.review({
+    item,
+    implementer: { identity: "implementer", context: "implementation-context", remediate: async () => calls.push("remediate") },
+  }), { status: "paused" });
+  assert.deepEqual(calls, [
+    "review:context-a", "remediate", "acceptance",
+    "review:context-b", "remediate", "acceptance", "review:context-a",
+  ]);
+});
+
+test("requires a stale-refresh review context to be fresh before retrying delivery", async () => {
+  const calls = [];
+  const item = { itemId: "wi-004", worktree: "/items/wi-004" };
+  const refreshed = { status: "refreshed", candidateSha: "bbbbbbbb" };
+  const coordinator = createReviewRemediationCoordinator({
+    ...successfulReviewPorts(),
+    review: {
+      request: async ({ candidate }) => {
+        calls.push(candidate ? "refresh-review" : "initial-review");
+        return {
+          verdict: "approved",
+          reviewer: { identity: "reviewer", context: "reused-review-context" },
+        };
+      },
+    },
+    acceptance: { execute: async () => { calls.push("acceptance"); return { passed: true }; } },
+    dv: { close: async () => { calls.push("close"); return { schemaVersion: "task-close/v1", id: item.itemId, status: "closed", lifecycle: "closed" }; } },
+    workspace: { commitTracked: async () => { calls.push("commit"); return { committed: true }; } },
+    integration: {
+      deliver: async () => { calls.push("deliver"); return { status: "stale" }; },
+      refreshStale: async () => { calls.push("refresh-stale"); return refreshed; },
+      retryStale: async () => calls.push("retry-stale"),
+    },
+  });
+
+  assert.deepEqual(await coordinator.review({
+    item,
+    implementer: { identity: "implementer", context: "implementation-context" },
+  }), { status: "paused" });
+  assert.deepEqual(calls, [
+    "initial-review", "close", "commit", "deliver", "refresh-stale", "acceptance", "refresh-review",
+  ]);
 });
 
 test("fails closed without closing or integrating for non-independent or malformed reviewer verdicts", async () => {
