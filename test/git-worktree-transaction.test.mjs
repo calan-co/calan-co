@@ -21,6 +21,7 @@ function createHarness({
   publicationIntentJournalFails = false,
   casFailureTargetSha = casFailures > 0 ? "cccccccc" : undefined,
   reviewApproves = true,
+  guardFailsAt,
 } = {}) {
   const calls = [];
   const events = [];
@@ -57,8 +58,13 @@ function createHarness({
     if (command.startsWith("update-ref ")) targetSha = args[2];
     return "";
   };
+  const guardCalls = [];
   const transaction = createGitWorktreeTransaction({
     git,
+    guard: { before: async (event) => {
+      guardCalls.push(event);
+      if (event.action === guardFailsAt) throw new Error(`evidence unavailable before ${event.action}`);
+    } },
     journal: { append: async (event) => {
       if (publicationIntentJournalFails && event.type === "delivery-publication-intent") throw new Error("intent journal unavailable");
       if (journalFails && event.type === "delivery-published") throw new Error("journal unavailable");
@@ -72,7 +78,7 @@ function createHarness({
     acceptance: { run: async (input) => { acceptanceCalls.push(input); if (checksThrow) throw new Error("root check failed"); return checksPass; } },
     review: { verify: async (input) => { reviewCalls.push(input); return reviewApproves; } },
   });
-  return { calls, events, timeline, acceptanceCalls, reviewCalls, transaction };
+  return { calls, events, timeline, acceptanceCalls, reviewCalls, guardCalls, transaction };
 }
 
 test("creates an isolated item worktree from the invocation PWD branch and journals its base", async () => {
@@ -134,7 +140,8 @@ test("runs merge-commit integration checks in a temporary worktree and only then
     ["worktree", "remove", "--force", "/items/003"],
     ["branch", "-D", "items/003"],
   ]);
-  assert.equal(events.at(-1).type, "delivery-published");
+  assert.ok(events.some((event) => event.type === "delivery-published"));
+  assert.equal(events.at(-1).type, "delivery-action-intent");
 });
 
 test("preserves item and integration worktrees with recovery evidence after conflict, failed checks, or stale CAS", async () => {
@@ -271,6 +278,27 @@ test("writes durable publication intent before CAS and aborts before CAS when in
   assert.ok(successfulIntent.timeline.findIndex(({ operation, event }) => operation === "journal" && event === intent) < successfulIntent.timeline.findIndex(({ operation, command }) => operation === "git" && command.startsWith("update-ref ")));
 });
 
+test("fails closed before CAS publication or cleanup when action evidence guard fails", async (t) => {
+  await t.test("CAS guard leaves target and worktrees untouched", async () => {
+    const { calls, guardCalls, transaction } = createHarness({ guardFailsAt: "cas-publication" });
+    const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+    const result = await transaction.deliver({ item });
+    assert.equal(result.status, "publication-failed");
+    assert.equal(calls.some(({ args }) => args[0] === "update-ref"), false);
+    assert.equal(calls.some(({ args }) => args[0] === "worktree" && args[1] === "remove"), false);
+    assert.ok(guardCalls.some((event) => event.action === "cas-publication" && event.category === "integration"));
+  });
+  await t.test("cleanup guard leaves published target and both worktrees for recovery", async () => {
+    const { calls, guardCalls, transaction } = createHarness({ guardFailsAt: "cleanup" });
+    const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+    const result = await transaction.deliver({ item });
+    assert.equal(result.status, "published-but-cleanup-failed");
+    assert.equal(calls.some(({ args }) => args[0] === "update-ref"), true);
+    assert.equal(calls.some(({ args }) => args[0] === "worktree" && args[1] === "remove"), false);
+    assert.ok(guardCalls.some((event) => event.action === "cleanup" && event.category === "integration"));
+  });
+});
+
 test("uses durable publication intent and preserves worktrees when post-CAS publication journaling fails", async () => {
   const { calls, events, transaction } = createHarness({ journalFails: true });
   const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
@@ -340,7 +368,7 @@ function temporaryRepository() {
   return root;
 }
 
-function realTransaction(root, { acceptance = async () => true, beforeUpdateRef, review = { verify: async () => true } } = {}) {
+function realTransaction(root, { acceptance = async () => true, beforeUpdateRef, review = { verify: async () => true }, guard } = {}) {
   const events = [];
   const git = async ({ args, cwd }) => {
     if (args[0] === "update-ref" && beforeUpdateRef) await beforeUpdateRef();
@@ -354,6 +382,7 @@ function realTransaction(root, { acceptance = async () => true, beforeUpdateRef,
   };
   const transaction = createGitWorktreeTransaction({
     git,
+    guard,
     journal: { append: async (event) => events.push(event) },
     paths: {
       item: ({ itemId }) => ({ branch: `items/${itemId}`, worktree: join(root, `.item-${itemId}`) }),
@@ -388,6 +417,35 @@ test("real Git root-check failure leaves target unchanged and retains both workt
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("real Git evidence guard fails closed before CAS and cleanup", async (t) => {
+  await t.test("CAS verification failure retains unchanged target and worktrees", async () => {
+    const root = temporaryRepository();
+    try {
+      const { transaction } = realTransaction(root, { guard: { before: async ({ action }) => { if (action === "cas-publication") throw new Error("evidence unavailable"); } } });
+      const item = await transaction.prepareItem({ itemId: "003", cwd: root });
+      commitItemChange(item);
+      const before = gitIn(root, ["rev-parse", "main"]);
+      const result = await transaction.deliver({ item });
+      assert.equal(result.status, "publication-failed");
+      assert.equal(gitIn(root, ["rev-parse", "main"]), before);
+      assert.equal(existsSync(item.worktree), true);
+      assert.equal(existsSync(join(root, ".integration-003-0")), true);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+  await t.test("cleanup verification failure retains both worktrees after publication", async () => {
+    const root = temporaryRepository();
+    try {
+      const { transaction } = realTransaction(root, { guard: { before: async ({ action }) => { if (action === "cleanup") throw new Error("evidence unavailable"); } } });
+      const item = await transaction.prepareItem({ itemId: "003", cwd: root });
+      commitItemChange(item);
+      const result = await transaction.deliver({ item });
+      assert.equal(result.status, "published-but-cleanup-failed");
+      assert.equal(existsSync(item.worktree), true);
+      assert.equal(existsSync(join(root, ".integration-003-0")), true);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
 });
 
 test("real Git CAS race retains competing target and both recovery worktrees", async () => {

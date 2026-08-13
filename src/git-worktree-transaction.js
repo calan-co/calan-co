@@ -18,15 +18,20 @@ function validSha(value) {
  * `journal`, `paths`, and `acceptance` are injected so this module has no Node
  * process, filesystem, or acceptance-stack dependency.
  */
-export function createGitWorktreeTransaction({ git, journal, paths, acceptance, review }) {
+export function createGitWorktreeTransaction({ git, journal, paths, acceptance, review, guard }) {
   if (typeof git !== "function") throw new TypeError("git runner must be a function");
   if (!journal || typeof journal.append !== "function") throw new TypeError("journal sink must append evidence");
   if (!paths || typeof paths.item !== "function" || typeof paths.integration !== "function") throw new TypeError("worktree paths must be provided");
   if (!acceptance || typeof acceptance.run !== "function") throw new TypeError("acceptance adapter must run checks");
   if (!review || typeof review.verify !== "function") throw new TypeError("review verifier must validate evidence");
+  if (guard !== undefined && typeof guard?.before !== "function") throw new TypeError("transaction guard must verify actions");
 
   const run = async (args, cwd) => text(await git({ args, cwd }));
   const record = async (event) => journal.append(event);
+  const guardBefore = async (event) => {
+    await record({ type: "delivery-action-intent", ...event });
+    if (guard) await guard.before(event);
+  };
 
   async function resolveTarget({ cwd, targetBranch }) {
     requireString(cwd, "invocation cwd");
@@ -72,6 +77,7 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
   }
 
   async function cleanup(item, integrationWorktree) {
+    await guardBefore({ action: "cleanup", category: "integration", itemId: item.itemId, itemWorktree: item.worktree, integrationWorktree });
     await run(["worktree", "remove", "--force", integrationWorktree], item.repositoryRoot);
     await run(["worktree", "remove", "--force", item.worktree], item.repositoryRoot);
     await run(["branch", "-D", item.branch], item.repositoryRoot);
@@ -179,6 +185,7 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
     }
 
     try {
+      await guardBefore({ action: "cas-publication", category: "integration", itemId: item.itemId, targetBranch: item.targetBranch, expectedBaseSha: item.targetBaseSha, candidateSha, itemWorktree: item.worktree, integrationWorktree: worktree });
       await run(["update-ref", `refs/heads/${item.targetBranch}`, candidateSha, item.targetBaseSha], item.repositoryRoot);
     } catch (error) {
       let currentTargetSha;

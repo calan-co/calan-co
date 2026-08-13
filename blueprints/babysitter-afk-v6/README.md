@@ -12,7 +12,16 @@ Then advance the durable run using `babysitter run:iterate <run-directory> --jso
 
 ## Run contract
 
-The process accepts an injected stack-neutral runner (`inputs.run`) and its run input. The runner writes and verifies the versioned `babysitter-evidence/v1` manifest in the run directory before each guarded delivery transition. Its eight required artifact categories are input, command, DV, review, diff, commit, integration, and hash.
+The process accepts only JSON-safe inputs. Provide an importable local `configModule` which exports `createPorts(runInput)` (or a default export) and returns the injected stack-neutral ports, plus `runInput` for the delivery request. Functions are resolved from that module inside the process and never encoded in JSON:
+
+```json
+{
+  "configModule": "/absolute/path/to/babysitter-ports.mjs",
+  "runInput": { "itemId": "wi-005", "cwd": "/repo", "runDirectory": "/repo/.babysitter/runs/wi-005" }
+}
+```
+
+The composition root writes and verifies the versioned `babysitter-evidence/v1` manifest in the run directory before each guarded delivery transition. Its eight required artifact categories are input, command, DV, review, diff, commit, integration, and hash. A missing/unimportable module or malformed ports fails closed before a worktree side effect.
 
 A repository may opt into the repository override `.babysitter/repository-override.json`. It is parsed by the existing Doc-Vader contract parser and must be compatible with `doc-vader-contract/v1`. It changes only Doc-Vader command argv; it cannot alter readiness, policy, acceptance, or evidence controls.
 
