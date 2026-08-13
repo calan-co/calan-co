@@ -5,11 +5,14 @@ type: work-item
 subtype: story
 lifecycle: active
 status: ready
+status_reason: recoverable
 priority: high
 links:
   depends_on:
     - '[[001-dv-contract-and-ready-selection]]'
     - '[[002-node-acceptance-discovery-and-affected-workspaces]]'
+  evidence:
+    - '[[record-wi-003-git-worktree-transaction-validation]]'
 tags:
   - afk
   - babysitter
