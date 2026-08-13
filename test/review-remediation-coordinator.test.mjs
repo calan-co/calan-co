@@ -11,7 +11,11 @@ test("returns a changes-requested review's exact findings without closing or int
   ];
   const coordinator = createReviewRemediationCoordinator({
     review: {
-      request: async () => ({ verdict: "changes-requested", findings }),
+      request: async () => ({
+        verdict: "changes-requested",
+        findings,
+        reviewer: { identity: "reviewer", context: "review-context" },
+      }),
     },
     dv: {
       close: async () => calls.push("dv-close"),
@@ -27,5 +31,44 @@ test("returns a changes-requested review's exact findings without closing or int
   });
 
   assert.deepEqual(result, { status: "changes-requested", findings });
+  assert.deepEqual(calls, []);
+});
+
+test("fails closed without closing or integrating for non-independent or malformed reviewer verdicts", async () => {
+  const calls = [];
+  const implementer = { identity: "implementer", context: "implementation-context" };
+  const validReviewer = { identity: "reviewer", context: "review-context" };
+  const coordinator = createReviewRemediationCoordinator({
+    review: {
+      request: async ({ item }) => item.verdict,
+    },
+    dv: {
+      close: async () => calls.push("dv-close"),
+    },
+    integration: {
+      deliver: async () => calls.push("integration"),
+    },
+  });
+
+  for (const verdict of [
+    {
+      verdict: "changes-requested",
+      findings: [],
+      reviewer: { identity: implementer.identity, context: validReviewer.context },
+    },
+    {
+      verdict: "changes-requested",
+      findings: [],
+      reviewer: { identity: validReviewer.identity, context: implementer.context },
+    },
+    { verdict: "changes-requested", findings: [], reviewer: { identity: validReviewer.identity } },
+    { verdict: "unknown", reviewer: validReviewer },
+  ]) {
+    await assert.rejects(
+      coordinator.review({ item: { id: "wi-004", verdict }, implementer }),
+      /reviewer|independent|verdict|invalid/i,
+    );
+  }
+
   assert.deepEqual(calls, []);
 });
