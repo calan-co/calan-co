@@ -111,6 +111,67 @@ test("pauses and preserves the workspace when a finding fingerprint repeats", as
   assert.deepEqual(calls, []);
 });
 
+test("pauses a second no-acceptance changes-requested review when canonical findings repeat without fingerprints", async () => {
+  const calls = [];
+  const item = { itemId: "wi-004" };
+  const findings = [{ path: "src/widget.js", line: 17, message: "Handle the missing widget ID." }];
+  const coordinator = createReviewRemediationCoordinator({
+    ...successfulReviewPorts(),
+    journal: { append: async () => calls.push("journal") },
+    review: {
+      request: async () => {
+        calls.push("review");
+        return {
+          verdict: "changes-requested",
+          findings: [{ ...findings[0] }],
+          reviewer: { identity: "reviewer", context: "review-context" },
+        };
+      },
+    },
+  });
+  const input = {
+    item,
+    implementer: { identity: "implementer", context: "implementation-context" },
+  };
+
+  assert.deepEqual(await coordinator.review(input), { status: "changes-requested", findings: [{ ...findings[0] }] });
+  assert.deepEqual(await coordinator.review(input), { status: "paused" });
+  assert.deepEqual(calls, ["review", "journal", "review", "journal"]);
+});
+
+test("pauses a reused reviewer context after remediation before journaling or remediating a second changes-requested verdict", async () => {
+  const calls = [];
+  const item = { itemId: "wi-004" };
+  const reviewResults = [
+    { verdict: "changes-requested", findings: [{ path: "src/widget.js", line: 17, message: "First finding." }] },
+    { verdict: "changes-requested", findings: [{ path: "src/widget.js", line: 18, message: "Second finding." }] },
+  ];
+  const coordinator = createReviewRemediationCoordinator({
+    ...successfulReviewPorts(),
+    journal: { append: async () => calls.push("journal") },
+    review: {
+      request: async () => {
+        calls.push("review");
+        return {
+          ...reviewResults.shift(),
+          reviewer: { identity: "reviewer", context: "reused-review-context" },
+        };
+      },
+    },
+    acceptance: { execute: async () => { calls.push("acceptance"); return { passed: true }; } },
+  });
+
+  assert.deepEqual(await coordinator.review({
+    item,
+    implementer: {
+      identity: "implementer",
+      context: "implementation-context",
+      remediate: async () => calls.push("remediate"),
+    },
+  }), { status: "paused" });
+  assert.deepEqual(calls, ["review", "journal", "remediate", "acceptance", "review"]);
+});
+
 test("rejects whitespace-equivalent reviewer identity or context before prohibited calls", async () => {
   const calls = [];
   const implementer = { identity: "implementer", context: "implementation-context" };
