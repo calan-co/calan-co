@@ -31,10 +31,13 @@ export function createReviewRemediationCoordinator({ review, dv, workspace, inte
         return { status: "changes-requested", findings: result.findings };
       }
 
+      const transactionId = item?.itemId;
+      if (typeof transactionId !== "string" || transactionId.trim() === "") return { status: "paused" };
+
       try {
-        const acknowledgement = parseCloseResult(await dv.close({ workId: item.id, cwd: item.worktree }));
-        if (acknowledgement.id !== item.id) return { status: "paused" };
-        if (await workspace.commitTracked({ cwd: item.worktree }) === false) return { status: "paused" };
+        const acknowledgement = parseCloseResult(await dv.close({ workId: transactionId, cwd: item.worktree }));
+        if (acknowledgement.id !== transactionId) return { status: "paused" };
+        if (!isCommitted(await workspace.commitTracked({ cwd: item.worktree }))) return { status: "paused" };
       } catch {
         return { status: "paused" };
       }
@@ -56,6 +59,17 @@ function isIndependentReviewer(reviewer, implementer) {
     implementerContext !== "" &&
     reviewerIdentity !== implementerIdentity &&
     reviewerContext !== implementerContext
+  );
+}
+
+function isCommitted(result) {
+  return (
+    result !== null &&
+    typeof result === "object" &&
+    !Array.isArray(result) &&
+    Object.hasOwn(result, "committed") &&
+    result.committed === true &&
+    Reflect.ownKeys(result).length === 1
   );
 }
 
