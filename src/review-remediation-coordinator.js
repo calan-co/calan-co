@@ -9,6 +9,9 @@ export function createReviewRemediationCoordinator({
   dv,
   workspace,
   integration,
+  policy,
+  journal,
+  globalAllowedPaths,
   maxReviewCycles = 2,
 }) {
   const findingFingerprintsByItem = new Map();
@@ -17,6 +20,20 @@ export function createReviewRemediationCoordinator({
 
   return {
     async review({ item, implementer }) {
+      if (typeof policy?.authorize !== "function") return { status: "paused" };
+
+      try {
+        const authorized = await policy.authorize({
+          item,
+          changedPaths: item?.changedPaths,
+          globalAllowedPaths,
+        });
+        if (authorized !== true) return { status: "paused" };
+      } catch {
+        return { status: "paused" };
+      }
+      if (typeof journal?.append !== "function") return { status: "paused" };
+
       let completedCycles = 0;
       while (true) {
         const result = await review.request({ item, implementer });
@@ -25,6 +42,12 @@ export function createReviewRemediationCoordinator({
           !isIndependentReviewer(result?.reviewer, implementer)
         ) {
           throw new Error("Invalid verdict or non-independent reviewer");
+        }
+
+        try {
+          await journal.append(reviewEvidence(item, result, completedCycles));
+        } catch {
+          return { status: "paused" };
         }
 
         if (result.verdict === "blocked") {
@@ -75,6 +98,19 @@ export function createReviewRemediationCoordinator({
         return integration.deliver({ item });
       }
     },
+  };
+}
+
+function reviewEvidence(item, result, cycle) {
+  const findings = Array.isArray(result.findings) ? result.findings : [];
+  return {
+    type: "review-evidence",
+    itemId: itemKey(item),
+    verdict: result.verdict,
+    reviewer: result.reviewer,
+    findings,
+    findingFingerprints: findings.map((finding) => canonicalFingerprint(finding)),
+    cycle,
   };
 }
 
