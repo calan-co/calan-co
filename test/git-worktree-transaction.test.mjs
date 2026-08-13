@@ -20,6 +20,7 @@ function createHarness({
   checksThrow = false,
   journalFails = false,
   publicationIntentJournalFails = false,
+  outcomeJournalFailsAt,
   casFailureTargetSha = casFailures > 0 ? "cccccccc" : undefined,
   reviewApproves = true,
   guardFailsAt,
@@ -70,6 +71,7 @@ function createHarness({
     journal: { append: async (event) => {
       if (publicationIntentJournalFails && event.type === "delivery-publication-intent") throw new Error("intent journal unavailable");
       if (journalFails && event.type === "delivery-published") throw new Error("journal unavailable");
+      if (outcomeJournalFailsAt === event.action && (event.type === "delivery-action-outcome" || event.type === "delivery-cleanup-outcome")) throw new Error("outcome journal unavailable");
       events.push(event);
       timeline.push({ operation: "journal", event });
     } },
@@ -340,6 +342,26 @@ test("writes durable publication intent before CAS and aborts before CAS when in
     strategy: "merge-commit",
   });
   assert.ok(successfulIntent.timeline.findIndex(({ operation, event }) => operation === "journal" && event === intent) < successfulIntent.timeline.findIndex(({ operation, command }) => operation === "git" && command.startsWith("update-ref ")));
+});
+
+test("never misreports post-effect journal failure as an action failure", async (t) => {
+  await t.test("CAS outcome persistence failure reports already-published uncertainty, not stale", async () => {
+    const { calls, transaction } = createHarness({ outcomeJournalFailsAt: "cas-publication" });
+    const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+    const result = await transaction.deliver({ item });
+    assert.equal(result.status, "published-but-cas-recording-uncertain");
+    assert.equal(result.recovery.sideEffectMayHaveSucceeded, true);
+    assert.equal(calls.some(({ args }) => args[0] === "worktree" && args[1] === "remove"), false);
+  });
+  await t.test("cleanup outcome persistence failure preserves recovery identity without retry", async () => {
+    const { calls, transaction } = createHarness({ outcomeJournalFailsAt: "item-worktree-remove" });
+    const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+    const result = await transaction.deliver({ item });
+    assert.equal(result.status, "published-but-cleanup-recording-uncertain");
+    assert.equal(result.recovery.sideEffectMayHaveSucceeded, true);
+    assert.equal(result.recovery.effect.action, "item-worktree-remove");
+    assert.equal(calls.filter(({ args }) => args[0] === "worktree" && args[1] === "remove").length, 2);
+  });
 });
 
 test("fails closed before CAS publication or cleanup when action evidence guard fails", async (t) => {

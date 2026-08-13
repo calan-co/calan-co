@@ -88,8 +88,8 @@ export function createReviewRemediationCoordinator({
               return { status: "paused" };
             }
             if (!isPassedAcceptance(await ports.acceptance.execute({ item }))) return { status: "paused" };
-          } catch {
-            return { status: "paused" };
+          } catch (error) {
+            return postEffectPaused(error, item);
           }
           completedCycles += 1;
           continue;
@@ -102,8 +102,8 @@ export function createReviewRemediationCoordinator({
           const acknowledgement = parseCloseResult(await ports.dv.close({ workId: transactionId, cwd: item.worktree }));
           if (acknowledgement.id !== transactionId) return { status: "paused" };
           if (!isCommitted(await ports.workspace.commitTracked({ cwd: item.worktree }))) return { status: "paused" };
-        } catch {
-          return { status: "paused" };
+        } catch (error) {
+          return postEffectPaused(error, item);
         }
         const delivery = await ports.integration.deliver({ item });
         if (delivery?.status !== "stale") return delivery;
@@ -195,6 +195,13 @@ function guardedCoordinatorPorts({ guards, review, acceptance, dv, workspace, in
       ? { ...implementer, remediate: guards.remediate(implementer) }
       : implementer,
   };
+}
+
+function postEffectPaused(error, item) {
+  if (error?.postEffectRecord === true) {
+    return { status: "paused-after-side-effect", recovery: { sideEffectMayHaveSucceeded: true, effect: error.effect, itemWorktree: item?.worktree, recordError: error.message, required: ["inspect-side-effect", "repair-evidence", "do-not-retry-effect"] } };
+  }
+  return { status: "paused" };
 }
 
 function reviewEvidence(item, result, cycle) {

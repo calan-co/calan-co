@@ -86,7 +86,15 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
   }
 
   async function actionOutcome(event, result, error) {
-    await record({ type: "delivery-action-outcome", ...event, result, ...(error ? { error: error.message } : {}) });
+    try {
+      await record({ type: "delivery-action-outcome", ...event, result, ...(error ? { error: error.message } : {}) });
+    } catch (recordError) {
+      // The side effect already completed; callers must not recast this as an
+      // operation failure or retry a destructive/non-idempotent operation.
+      recordError.postEffectRecord = true;
+      recordError.effect = event;
+      throw recordError;
+    }
   }
 
   async function cleanup(item, integrationWorktree) {
@@ -108,7 +116,13 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
         await record({ type: "delivery-cleanup-outcome", ...event, result: "failed", error: error.message });
         throw error;
       }
-      await record({ type: "delivery-cleanup-outcome", ...event, result: "succeeded" });
+      try {
+        await record({ type: "delivery-cleanup-outcome", ...event, result: "succeeded" });
+      } catch (recordError) {
+        recordError.postEffectRecord = true;
+        recordError.effect = event;
+        throw recordError;
+      }
     }
   }
 
@@ -249,6 +263,12 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
       await run(["update-ref", `refs/heads/${item.targetBranch}`, candidateSha, item.targetBaseSha], item.repositoryRoot);
       await actionOutcome(cas, "succeeded");
     } catch (error) {
+      if (error?.postEffectRecord === true) {
+        return {
+          status: "published-but-cas-recording-uncertain", targetBranch: item.targetBranch, publishedSha: candidateSha,
+          recovery: { sideEffectMayHaveSucceeded: true, action: "cas-publication", effect: error.effect, itemWorktree: item.worktree, integrationWorktree: worktree, recordError: error.message, required: ["inspect-target-ref", "repair-evidence", "do-not-retry-cas"] },
+        };
+      }
       await actionOutcome({ action: "cas-publication", category: "integration", itemId: item.itemId, targetBranch: item.targetBranch, expectedBaseSha: item.targetBaseSha, candidateSha, itemWorktree: item.worktree, integrationWorktree: worktree }, "failed", error).catch(() => {});
       let currentTargetSha;
       try {
@@ -290,6 +310,12 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
     try {
       await cleanup(item, worktree);
     } catch (error) {
+      if (error?.postEffectRecord === true) {
+        return {
+          status: "published-but-cleanup-recording-uncertain", targetBranch: item.targetBranch, publishedSha: candidateSha,
+          recovery: { targetAlreadyPublished: true, cleanupRequired: true, sideEffectMayHaveSucceeded: true, action: "cleanup", effect: error.effect, itemWorktree: item.worktree, integrationWorktree: worktree, recordError: error.message, required: ["inspect-cleanup-state", "repair-evidence", "do-not-retry-effect"] },
+        };
+      }
       const recovery = {
         targetAlreadyPublished: true,
         cleanupRequired: true,

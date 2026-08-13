@@ -11,7 +11,14 @@ function guarded(port, method, transition, verify, journal, category) {
     await journal.append({ category, transition, type: `${transition}:intent`, input });
     await verify(transition);
     const result = await port[method](input);
-    await journal.append({ category, transition, type: `${transition}:after`, result });
+    try {
+      await journal.append({ category, transition, type: `${transition}:after`, result });
+    } catch (recordError) {
+      const error = new Error(`post-effect evidence recording is uncertain for ${transition}: ${recordError.message}`);
+      error.postEffectRecord = true;
+      error.effect = { category, transition, input, result };
+      throw error;
+    }
     return result;
   };
 }
