@@ -34,6 +34,70 @@ test("returns a changes-requested review's exact findings without closing or int
   assert.deepEqual(calls, []);
 });
 
+test("pauses and preserves the workspace when an independent reviewer is blocked", async () => {
+  const calls = [];
+  const coordinator = createReviewRemediationCoordinator({
+    review: {
+      request: async () => ({
+        verdict: "blocked",
+        reviewer: { identity: "reviewer", context: "review-context" },
+      }),
+    },
+    dv: {
+      close: async () => calls.push("dv-close"),
+    },
+    integration: {
+      deliver: async () => calls.push("integration"),
+    },
+  });
+
+  const result = await coordinator.review({
+    item: { id: "wi-004" },
+    implementer: { identity: "implementer", context: "implementation-context" },
+  });
+
+  assert.equal(result?.status, "paused");
+  assert.deepEqual(calls, []);
+});
+
+test("pauses and preserves the workspace when a finding fingerprint repeats", async () => {
+  const calls = [];
+  const fingerprint = "src/widget.js:17:missing-widget-id";
+  const coordinator = createReviewRemediationCoordinator({
+    review: {
+      request: async () => ({
+        verdict: "changes-requested",
+        findings: [
+          {
+            path: "src/widget.js",
+            line: 17,
+            message: "Handle the missing widget ID.",
+            fingerprint,
+          },
+        ],
+        reviewer: { identity: "reviewer", context: "review-context" },
+      }),
+    },
+    dv: {
+      close: async () => calls.push("dv-close"),
+    },
+    integration: {
+      deliver: async () => calls.push("integration"),
+    },
+  });
+  const input = {
+    item: { id: "wi-004" },
+    implementer: { identity: "implementer", context: "implementation-context" },
+  };
+
+  const first = await coordinator.review(input);
+  const repeated = await coordinator.review(input);
+
+  assert.equal(first.status, "changes-requested");
+  assert.equal(repeated?.status, "paused");
+  assert.deepEqual(calls, []);
+});
+
 test("rejects whitespace-equivalent reviewer identity or context before prohibited calls", async () => {
   const calls = [];
   const implementer = { identity: "implementer", context: "implementation-context" };
