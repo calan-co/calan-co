@@ -41,7 +41,7 @@ export function createReviewRemediationCoordinator({
         }
         if (
           result.verdict === "approved" &&
-          completedCycles > 1 &&
+          completedCycles > 0 &&
           reviewerContexts.has(reviewerContext(result))
         ) {
           return { status: "paused" };
