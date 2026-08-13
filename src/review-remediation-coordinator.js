@@ -13,13 +13,17 @@ export function createReviewRemediationCoordinator({
   journal,
   globalAllowedPaths,
   maxReviewCycles = 2,
+  reviewConfig,
 }) {
   const findingFingerprintsByItem = new Map();
   const legacyFindingFingerprintsByItem = new Map();
-  const remediationCycles = validReviewCycles(maxReviewCycles);
+  const remediationCycles = reviewConfig === undefined
+    ? validReviewCycles(maxReviewCycles)
+    : configuredReviewCycles(reviewConfig);
 
   return {
     async review({ item, implementer }) {
+      if (remediationCycles === null) return { status: "paused" };
       if (typeof policy?.authorize !== "function") return { status: "paused" };
 
       try {
@@ -37,10 +41,7 @@ export function createReviewRemediationCoordinator({
       let completedCycles = 0;
       while (true) {
         const result = await review.request({ item, implementer });
-        if (
-          !["approved", "changes-requested", "blocked"].includes(result?.verdict) ||
-          !isIndependentReviewer(result?.reviewer, implementer)
-        ) {
+        if (!isValidReviewResult(result, implementer)) {
           throw new Error("Invalid verdict or non-independent reviewer");
         }
 
@@ -99,10 +100,68 @@ export function createReviewRemediationCoordinator({
         } catch {
           return { status: "paused" };
         }
-        return integration.deliver({ item });
+        const delivery = await integration.deliver({ item });
+        if (delivery?.status !== "stale") return delivery;
+        return recoverStaleDelivery({
+          stale: delivery,
+          item,
+          implementer,
+          review,
+          acceptance,
+          integration,
+          journal,
+          cycle: completedCycles + 1,
+        });
       }
     },
   };
+}
+
+async function recoverStaleDelivery({
+  stale,
+  item,
+  implementer,
+  review,
+  acceptance,
+  integration,
+  journal,
+  cycle,
+}) {
+  if (
+    typeof integration?.refreshStale !== "function" ||
+    typeof integration?.retryStale !== "function" ||
+    typeof acceptance?.execute !== "function"
+  ) {
+    return { status: "paused" };
+  }
+
+  try {
+    const refreshed = await integration.refreshStale({ stale });
+    if (!isRefreshedStaleCandidate(refreshed)) return { status: "paused" };
+    if (!isPassedAcceptance(await acceptance.execute({ item, candidate: refreshed }))) {
+      return { status: "paused" };
+    }
+
+    const result = await review.request({ item, implementer, candidate: refreshed });
+    if (!isValidReviewResult(result, implementer) || result.verdict !== "approved") {
+      return { status: "paused" };
+    }
+    if (typeof journal?.append !== "function") return { status: "paused" };
+    await journal.append(reviewEvidence(item, result, cycle));
+
+    return await integration.retryStale({
+      refreshed,
+      independentReview: {
+        approved: true,
+        fresh: true,
+        candidateSha: refreshed.candidateSha,
+        reviewer: result.reviewer,
+        implementer,
+      },
+    });
+  } catch {
+    return { status: "paused" };
+  }
 }
 
 function reviewEvidence(item, result, cycle) {
@@ -140,6 +199,19 @@ function validReviewCycles(value) {
   return Number.isInteger(value) && value >= 0 ? value : 2;
 }
 
+function configuredReviewCycles(config) {
+  return (
+    config !== null &&
+    typeof config === "object" &&
+    !Array.isArray(config) &&
+    Object.hasOwn(config, "maxCycles") &&
+    Number.isInteger(config.maxCycles) &&
+    config.maxCycles > 0
+  )
+    ? config.maxCycles
+    : null;
+}
+
 function itemKey(item) {
   const itemId = normalizeString(item?.itemId);
   return itemId === "" ? null : itemId;
@@ -164,6 +236,13 @@ function canonicalFingerprint(finding) {
   return `${path}:${line}:${message}`;
 }
 
+function isValidReviewResult(result, implementer) {
+  return (
+    ["approved", "changes-requested", "blocked"].includes(result?.verdict) &&
+    isIndependentReviewer(result?.reviewer, implementer)
+  );
+}
+
 function isIndependentReviewer(reviewer, implementer) {
   const reviewerIdentity = normalizeString(reviewer?.identity);
   const reviewerContext = normalizeString(reviewer?.context);
@@ -177,6 +256,16 @@ function isIndependentReviewer(reviewer, implementer) {
     implementerContext !== "" &&
     reviewerIdentity !== implementerIdentity &&
     reviewerContext !== implementerContext
+  );
+}
+
+function isRefreshedStaleCandidate(candidate) {
+  return (
+    candidate !== null &&
+    typeof candidate === "object" &&
+    !Array.isArray(candidate) &&
+    candidate.status === "refreshed" &&
+    normalizeString(candidate.candidateSha) !== ""
   );
 }
 
