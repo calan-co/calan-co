@@ -4,13 +4,18 @@ title: Add independent review, remediation, and workspace-local closure transact
 type: work-item
 subtype: story
 lifecycle: active
-status: ready
+status: completed
+status_reason: completed
 priority: high
+actual: 1
+completed_date: '2026-08-13'
 links:
   depends_on:
     - '[[001-dv-contract-and-ready-selection]]'
     - '[[002-node-acceptance-discovery-and-affected-workspaces]]'
     - '[[003-isolated-worktrees-and-cas-integration]]'
+  evidence:
+    - '[[record-wi-004-implementation-validated-and-independently-approved-after-remediation]]'
 tags:
   - afk
   - babysitter
@@ -28,12 +33,12 @@ The implementer may create isolated workspace commits under blanket authorizatio
 
 ## Tasks
 
-- [ ] Define and validate reviewer verdicts: `approved`, `changes-requested`, and `blocked`.
-- [ ] Require reviewer identity/context distinct from the implementer.
-- [ ] Implement remediation cycles with configurable count, default two, plus repeated-finding/churn detection.
-- [ ] Re-run affected checks and use a fresh independent review after each remediation or target-branch refresh.
-- [ ] Run workspace-local DV close only after reviewer approval; require its tracked changes to commit successfully before integration.
-- [ ] Enforce protected control-file and global allowed-path policies for profile-enabled unattended authorization.
+- [x] Define and validate reviewer verdicts: `approved`, `changes-requested`, and `blocked`.
+- [x] Require reviewer identity/context distinct from the implementer.
+- [x] Implement remediation cycles with configurable count, default two, plus repeated-finding/churn detection.
+- [x] Re-run affected checks and use a fresh independent review after each remediation or target-branch refresh.
+- [x] Run workspace-local DV close only after reviewer approval; require its tracked changes to commit successfully before integration.
+- [x] Enforce protected control-file and global allowed-path policies for profile-enabled unattended authorization.
 
 ## Deliverables
 
@@ -43,13 +48,15 @@ The implementer may create isolated workspace commits under blanket authorizatio
 
 ## Acceptance Criteria
 
-- [ ] `blocked`, churn, closure failure, or exhausted repository-configured review cycles pauses and preserves the item workspace.
-- [ ] `changes-requested` returns exact findings to the implementer and cannot bypass fresh checks/review.
-- [ ] The final item branch contains both implementation and tracked closure changes before it becomes integration-eligible.
-- [ ] The implementer cannot modify DV work items, policy/override files, acceptance commands, or evidence controls.
+- [x] `blocked`, churn, closure failure, or exhausted repository-configured review cycles pauses and preserves the item workspace.
+- [x] `changes-requested` returns exact findings to the implementer and cannot bypass fresh checks/review.
+- [x] The final item branch contains both implementation and tracked closure changes before it becomes integration-eligible.
+- [x] The implementer cannot modify DV work items, policy/override files, acceptance commands, or evidence controls.
 
 ## Dependencies
 
 [[001-dv-contract-and-ready-selection]]
 [[002-node-acceptance-discovery-and-affected-workspaces]]
 [[003-isolated-worktrees-and-cas-integration]]
+
+- 2026-08-13: Closed as completed with evidence in backlog/audit/auditing-backlog-report.json.
