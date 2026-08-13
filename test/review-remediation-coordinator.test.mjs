@@ -3,6 +3,13 @@ import test from "node:test";
 
 import { createReviewRemediationCoordinator } from "../src/review-remediation-coordinator.js";
 
+function successfulReviewPorts() {
+  return {
+    policy: { authorize: async () => true },
+    journal: { append: async () => {} },
+  };
+}
+
 test("returns a changes-requested review's exact findings without closing or integrating", async () => {
   const calls = [];
   const findings = [
@@ -10,6 +17,7 @@ test("returns a changes-requested review's exact findings without closing or int
     { path: "test/widget.test.mjs", line: 42, message: "Cover the missing-ID case." },
   ];
   const coordinator = createReviewRemediationCoordinator({
+    ...successfulReviewPorts(),
     review: {
       request: async () => ({
         verdict: "changes-requested",
@@ -37,6 +45,7 @@ test("returns a changes-requested review's exact findings without closing or int
 test("pauses and preserves the workspace when an independent reviewer is blocked", async () => {
   const calls = [];
   const coordinator = createReviewRemediationCoordinator({
+    ...successfulReviewPorts(),
     review: {
       request: async () => ({
         verdict: "blocked",
@@ -64,6 +73,7 @@ test("pauses and preserves the workspace when a finding fingerprint repeats", as
   const calls = [];
   const fingerprint = "src/widget.js:17:missing-widget-id";
   const coordinator = createReviewRemediationCoordinator({
+    ...successfulReviewPorts(),
     review: {
       request: async () => ({
         verdict: "changes-requested",
@@ -102,6 +112,7 @@ test("rejects whitespace-equivalent reviewer identity or context before prohibit
   const calls = [];
   const implementer = { identity: "implementer", context: "implementation-context" };
   const coordinator = createReviewRemediationCoordinator({
+    ...successfulReviewPorts(),
     review: {
       request: async () => ({
         verdict: "approved",
@@ -137,6 +148,7 @@ test("closes a valid independently approved git-worktree transaction item by ite
     lifecycle: "closed",
   };
   const coordinator = createReviewRemediationCoordinator({
+    ...successfulReviewPorts(),
     review: {
       request: async () => ({
         verdict: "approved",
@@ -176,6 +188,7 @@ test("pauses without committing or integrating when a close acknowledgement name
   const calls = [];
   const item = { itemId: "wi-004", worktree: "/items/wi-004" };
   const coordinator = createReviewRemediationCoordinator({
+    ...successfulReviewPorts(),
     review: {
       request: async () => ({
         verdict: "approved",
@@ -217,6 +230,7 @@ test("requires an explicit committed true result before integrating an approved 
   for (const commitResult of [undefined, false, {}, { committed: false }, { committed: "true" }]) {
     const calls = [];
     const coordinator = createReviewRemediationCoordinator({
+      ...successfulReviewPorts(),
       review: {
         request: async () => ({
           verdict: "approved",
@@ -265,6 +279,7 @@ test("fails closed without committing or integrating when close throws or return
   ]) {
     const calls = [];
     const coordinator = createReviewRemediationCoordinator({
+      ...successfulReviewPorts(),
       review: {
         request: async () => ({
           verdict: "approved",
@@ -306,6 +321,7 @@ test("remediates changes-requested findings before each fresh review, uses two d
     ]],
   ]);
   const coordinator = createReviewRemediationCoordinator({
+    ...successfulReviewPorts(),
     review: {
       request: async ({ item }) => {
         calls.push(`review:${item.itemId}`);
@@ -483,6 +499,7 @@ test("fails closed without closing or integrating for non-independent or malform
   const implementer = { identity: "implementer", context: "implementation-context" };
   const validReviewer = { identity: "reviewer", context: "review-context" };
   const coordinator = createReviewRemediationCoordinator({
+    ...successfulReviewPorts(),
     review: {
       request: async ({ item }) => item.verdict,
     },
