@@ -344,6 +344,140 @@ test("remediates changes-requested findings before each fresh review, uses two d
   ]);
 });
 
+test("uses injected policy authorization to deny protected and non-global changed paths before review, close, or integration", async () => {
+  const protectedPaths = [
+    "backlog/004-review-remediation-and-closure-transaction.md",
+    "policy/unattended-authorization.json",
+    "overrides/repository-doc-vader.json",
+    "config/acceptance-commands.json",
+    "evidence/controls.json",
+    "scripts/not-globally-allowed.js",
+  ];
+  const globalAllowedPaths = ["src/**", "test/**"];
+  const implementer = { identity: "implementer", context: "implementation-context" };
+
+  for (const changedPath of protectedPaths) {
+    const calls = [];
+    const item = { itemId: "wi-004", changedPaths: [changedPath] };
+    const coordinator = createReviewRemediationCoordinator({
+      policy: {
+        authorize: async (authorization) => {
+          calls.push({ operation: "authorize", authorization });
+          return authorization.changedPaths.every((path) =>
+            globalAllowedPaths.some((pattern) => path.startsWith(pattern.slice(0, -2))),
+          );
+        },
+      },
+      globalAllowedPaths,
+      review: {
+        request: async () => {
+          calls.push({ operation: "review" });
+          return {
+            verdict: "blocked",
+            reviewer: { identity: "reviewer", context: "review-context" },
+          };
+        },
+      },
+      dv: { close: async () => calls.push({ operation: "close" }) },
+      integration: { deliver: async () => calls.push({ operation: "integration" }) },
+    });
+
+    assert.deepEqual(await coordinator.review({ item, implementer }), { status: "paused" }, changedPath);
+    assert.deepEqual(calls, [{
+      operation: "authorize",
+      authorization: { item, changedPaths: [changedPath], globalAllowedPaths },
+    }], changedPath);
+  }
+});
+
+test("authorizes configured global paths and journals canonical review evidence before remediation or closure transitions", async () => {
+  const calls = [];
+  const item = {
+    itemId: "wi-004",
+    worktree: "/items/wi-004",
+    changedPaths: ["src/widget.js", "test/widget.test.mjs"],
+  };
+  const implementer = { identity: "implementer", context: "implementation-context" };
+  const reviewer = { identity: "reviewer", context: "review-context" };
+  const finding = { path: "src/widget.js", line: 17, message: "Handle the missing widget ID." };
+  const reviewResults = [
+    { verdict: "changes-requested", findings: [finding], reviewer },
+    { verdict: "approved", findings: [], reviewer },
+  ];
+  const coordinator = createReviewRemediationCoordinator({
+    policy: {
+      authorize: async (authorization) => {
+        calls.push({ operation: "authorize", authorization });
+        return authorization.changedPaths.every((path) =>
+          authorization.globalAllowedPaths.some((pattern) => path.startsWith(pattern.slice(0, -2))),
+        );
+      },
+    },
+    globalAllowedPaths: ["src/**", "test/**"],
+    journal: {
+      append: async (event) => calls.push({ operation: "journal", event }),
+    },
+    review: {
+      request: async () => {
+        calls.push({ operation: "review" });
+        return reviewResults.shift();
+      },
+    },
+    acceptance: { execute: async () => calls.push({ operation: "acceptance" }) },
+    dv: {
+      close: async () => {
+        calls.push({ operation: "close" });
+        return { schemaVersion: "task-close/v1", id: item.itemId, status: "closed", lifecycle: "closed" };
+      },
+    },
+    workspace: { commitTracked: async () => { calls.push({ operation: "commit" }); return { committed: true }; } },
+    integration: { deliver: async () => calls.push({ operation: "integration" }) },
+  });
+
+  await coordinator.review({ item, implementer });
+
+  assert.deepEqual(calls, [
+    {
+      operation: "authorize",
+      authorization: {
+        item,
+        changedPaths: item.changedPaths,
+        globalAllowedPaths: ["src/**", "test/**"],
+      },
+    },
+    { operation: "review" },
+    {
+      operation: "journal",
+      event: {
+        type: "review-evidence",
+        itemId: "wi-004",
+        verdict: "changes-requested",
+        reviewer,
+        findings: [finding],
+        findingFingerprints: ["src/widget.js:17:Handle the missing widget ID."],
+        cycle: 0,
+      },
+    },
+    { operation: "acceptance" },
+    { operation: "review" },
+    {
+      operation: "journal",
+      event: {
+        type: "review-evidence",
+        itemId: "wi-004",
+        verdict: "approved",
+        reviewer,
+        findings: [],
+        findingFingerprints: [],
+        cycle: 1,
+      },
+    },
+    { operation: "close" },
+    { operation: "commit" },
+    { operation: "integration" },
+  ]);
+});
+
 test("fails closed without closing or integrating for non-independent or malformed reviewer verdicts", async () => {
   const calls = [];
   const implementer = { identity: "implementer", context: "implementation-context" };
