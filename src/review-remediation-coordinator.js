@@ -24,26 +24,29 @@ export function createReviewRemediationCoordinator({
   return {
     async review({ item, implementer }) {
       if (remediationCycles === null) return { status: "paused" };
-      if (typeof policy?.authorize !== "function") return { status: "paused" };
-
-      try {
-        const authorized = await policy.authorize({
-          item,
-          changedPaths: item?.changedPaths,
-          globalAllowedPaths,
-        });
-        if (authorized !== true) return { status: "paused" };
-      } catch {
+      if (!await authorizeChangedPaths({ policy, item, globalAllowedPaths, phase: "initial" })) {
         return { status: "paused" };
       }
       if (typeof journal?.append !== "function") return { status: "paused" };
 
       let completedCycles = 0;
+      const reviewerContexts = new Set();
       while (true) {
         const result = await review.request({ item, implementer });
         if (!isValidReviewResult(result, implementer)) {
           throw new Error("Invalid verdict or non-independent reviewer");
         }
+        if (result.verdict === "changes-requested" && !hasStructuredFindings(result.findings)) {
+          return { status: "paused" };
+        }
+        if (
+          result.verdict === "approved" &&
+          completedCycles > 1 &&
+          reviewerContexts.has(reviewerContext(result))
+        ) {
+          return { status: "paused" };
+        }
+        reviewerContexts.add(reviewerContext(result));
 
         try {
           await journal.append(reviewEvidence(item, result, completedCycles));
@@ -82,6 +85,9 @@ export function createReviewRemediationCoordinator({
             if (await implementer.remediate({ item, findings: result.findings }) === false) {
               return { status: "paused" };
             }
+            if (!await authorizeChangedPaths({ policy, item, globalAllowedPaths, phase: "post-remediation" })) {
+              return { status: "paused" };
+            }
             if (!isPassedAcceptance(await acceptance.execute({ item }))) return { status: "paused" };
           } catch {
             return { status: "paused" };
@@ -111,6 +117,7 @@ export function createReviewRemediationCoordinator({
           integration,
           journal,
           cycle: completedCycles + 1,
+          reviewerContexts,
         });
       }
     },
@@ -126,6 +133,7 @@ async function recoverStaleDelivery({
   integration,
   journal,
   cycle,
+  reviewerContexts,
 }) {
   if (
     typeof integration?.refreshStale !== "function" ||
@@ -143,9 +151,14 @@ async function recoverStaleDelivery({
     }
 
     const result = await review.request({ item, implementer, candidate: refreshed });
-    if (!isValidReviewResult(result, implementer) || result.verdict !== "approved") {
+    if (
+      !isValidReviewResult(result, implementer) ||
+      result.verdict !== "approved" ||
+      reviewerContexts.has(reviewerContext(result))
+    ) {
       return { status: "paused" };
     }
+    reviewerContexts.add(reviewerContext(result));
     if (typeof journal?.append !== "function") return { status: "paused" };
     await journal.append(reviewEvidence(item, result, cycle));
 
@@ -241,6 +254,38 @@ function isValidReviewResult(result, implementer) {
     ["approved", "changes-requested", "blocked"].includes(result?.verdict) &&
     isIndependentReviewer(result?.reviewer, implementer)
   );
+}
+
+async function authorizeChangedPaths({ policy, item, globalAllowedPaths, phase }) {
+  if (typeof policy?.changedPaths !== "function" || typeof policy.authorize !== "function") {
+    return false;
+  }
+
+  try {
+    const changedPaths = await policy.changedPaths({ item });
+    if (!areRepositoryRelativePaths(changedPaths)) return false;
+    return await policy.authorize({ item, changedPaths, globalAllowedPaths, phase }) === true;
+  } catch {
+    return false;
+  }
+}
+
+function areRepositoryRelativePaths(paths) {
+  return Array.isArray(paths) && paths.length > 0 && paths.every(isRepositoryRelativePath);
+}
+
+function isRepositoryRelativePath(path) {
+  if (typeof path !== "string" || path.trim() === "") return false;
+  if (/^(?:[\\/]|[A-Za-z]:)/.test(path) || path.includes("\\")) return false;
+  return path.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..");
+}
+
+function hasStructuredFindings(findings) {
+  return Array.isArray(findings) && findings.length > 0 && findings.every((finding) => canonicalFingerprint(finding) !== "");
+}
+
+function reviewerContext(result) {
+  return normalizeString(result?.reviewer?.context);
 }
 
 function isIndependentReviewer(reviewer, implementer) {
