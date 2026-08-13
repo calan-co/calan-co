@@ -3,47 +3,125 @@ import { parseCloseResult } from "./doc-vader-contract.mjs";
 /**
  * Coordinates independent review outcomes for an implementation work item.
  */
-export function createReviewRemediationCoordinator({ review, dv, workspace, integration }) {
-  const findingFingerprints = new Set();
+export function createReviewRemediationCoordinator({
+  review,
+  acceptance,
+  dv,
+  workspace,
+  integration,
+  maxReviewCycles = 2,
+}) {
+  const findingFingerprintsByItem = new Map();
+  const legacyFindingFingerprintsByItem = new Map();
+  const remediationCycles = validReviewCycles(maxReviewCycles);
 
   return {
     async review({ item, implementer }) {
-      const result = await review.request({ item, implementer });
-      if (
-        !["approved", "changes-requested", "blocked"].includes(result?.verdict) ||
-        !isIndependentReviewer(result?.reviewer, implementer)
-      ) {
-        throw new Error("Invalid verdict or non-independent reviewer");
-      }
+      let completedCycles = 0;
+      while (true) {
+        const result = await review.request({ item, implementer });
+        if (
+          !["approved", "changes-requested", "blocked"].includes(result?.verdict) ||
+          !isIndependentReviewer(result?.reviewer, implementer)
+        ) {
+          throw new Error("Invalid verdict or non-independent reviewer");
+        }
 
-      if (result.verdict === "blocked") {
-        return { status: "paused" };
-      }
-
-      if (result.verdict === "changes-requested") {
-        const fingerprints = result.findings
-          .map((finding) => normalizeString(finding?.fingerprint))
-          .filter(Boolean);
-        if (fingerprints.some((fingerprint) => findingFingerprints.has(fingerprint))) {
+        if (result.verdict === "blocked") {
           return { status: "paused" };
         }
-        fingerprints.forEach((fingerprint) => findingFingerprints.add(fingerprint));
-        return { status: "changes-requested", findings: result.findings };
-      }
 
-      const transactionId = item?.itemId;
-      if (typeof transactionId !== "string" || transactionId.trim() === "") return { status: "paused" };
+        if (result.verdict === "changes-requested") {
+          if (typeof acceptance?.execute !== "function") {
+            if (hasRepeatedLegacyFingerprint(item, result.findings, legacyFindingFingerprintsByItem)) {
+              return { status: "paused" };
+            }
+            return { status: "changes-requested", findings: result.findings };
+          }
 
-      try {
-        const acknowledgement = parseCloseResult(await dv.close({ workId: transactionId, cwd: item.worktree }));
-        if (acknowledgement.id !== transactionId) return { status: "paused" };
-        if (!isCommitted(await workspace.commitTracked({ cwd: item.worktree }))) return { status: "paused" };
-      } catch {
-        return { status: "paused" };
+          const findingFingerprints = fingerprintsFor(item, result.findings);
+          if (findingFingerprints === null) return { status: "paused" };
+          const key = itemKey(item);
+          const persistedFingerprints = findingFingerprintsByItem.get(key) ?? new Set();
+          if (
+            new Set(findingFingerprints).size !== findingFingerprints.length ||
+            findingFingerprints.some((fingerprint) => persistedFingerprints.has(fingerprint))
+          ) {
+            return { status: "paused" };
+          }
+          findingFingerprints.forEach((fingerprint) => persistedFingerprints.add(fingerprint));
+          findingFingerprintsByItem.set(key, persistedFingerprints);
+
+          if (completedCycles >= remediationCycles) return { status: "paused" };
+          try {
+            if (await acceptance.execute({ item }) === false) return { status: "paused" };
+          } catch {
+            return { status: "paused" };
+          }
+          completedCycles += 1;
+          continue;
+        }
+
+        const transactionId = item?.itemId;
+        if (typeof transactionId !== "string" || transactionId.trim() === "") return { status: "paused" };
+
+        try {
+          const acknowledgement = parseCloseResult(await dv.close({ workId: transactionId, cwd: item.worktree }));
+          if (acknowledgement.id !== transactionId) return { status: "paused" };
+          if (!isCommitted(await workspace.commitTracked({ cwd: item.worktree }))) return { status: "paused" };
+        } catch {
+          return { status: "paused" };
+        }
+        return integration.deliver({ item });
       }
-      return integration.deliver({ item });
     },
   };
+}
+
+function hasRepeatedLegacyFingerprint(item, findings, fingerprintsByItem) {
+  const fingerprints = legacyFingerprintsFor(findings);
+  if (fingerprints.length === 0) return false;
+  const key = legacyItemKey(item);
+  if (key === null) return true;
+  const persistedFingerprints = fingerprintsByItem.get(key) ?? new Set();
+  if (fingerprints.some((fingerprint) => persistedFingerprints.has(fingerprint))) return true;
+  fingerprints.forEach((fingerprint) => persistedFingerprints.add(fingerprint));
+  fingerprintsByItem.set(key, persistedFingerprints);
+  return false;
+}
+
+function legacyFingerprintsFor(findings) {
+  return Array.isArray(findings)
+    ? findings.map((finding) => normalizeString(finding?.fingerprint)).filter(Boolean)
+    : [];
+}
+
+function validReviewCycles(value) {
+  return Number.isInteger(value) && value >= 0 ? value : 2;
+}
+
+function itemKey(item) {
+  const itemId = normalizeString(item?.itemId);
+  return itemId === "" ? null : itemId;
+}
+
+function legacyItemKey(item) {
+  const itemId = itemKey(item) ?? normalizeString(item?.id);
+  return itemId === "" ? null : itemId;
+}
+
+function fingerprintsFor(item, findings) {
+  if (itemKey(item) === null || !Array.isArray(findings)) return null;
+  const fingerprints = findings.map(canonicalFingerprint);
+  return fingerprints.some((fingerprint) => fingerprint === "") ? null : fingerprints;
+}
+
+function canonicalFingerprint(finding) {
+  const path = normalizeString(finding?.path);
+  const line = finding?.line;
+  const message = normalizeString(finding?.message);
+  if (path === "" || !Number.isInteger(line) || line < 1 || message === "") return "";
+  return `${path}:${line}:${message}`;
 }
 
 function isIndependentReviewer(reviewer, implementer) {
