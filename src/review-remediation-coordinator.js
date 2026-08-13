@@ -1,7 +1,9 @@
+import { parseCloseResult } from "./doc-vader-contract.mjs";
+
 /**
  * Coordinates independent review outcomes for an implementation work item.
  */
-export function createReviewRemediationCoordinator({ review }) {
+export function createReviewRemediationCoordinator({ review, dv, workspace, integration }) {
   const findingFingerprints = new Set();
 
   return {
@@ -28,6 +30,15 @@ export function createReviewRemediationCoordinator({ review }) {
         fingerprints.forEach((fingerprint) => findingFingerprints.add(fingerprint));
         return { status: "changes-requested", findings: result.findings };
       }
+
+      try {
+        const acknowledgement = parseCloseResult(await dv.close({ workId: item.id, cwd: item.worktree }));
+        if (acknowledgement.id !== item.id) return { status: "paused" };
+        if (await workspace.commitTracked({ cwd: item.worktree }) === false) return { status: "paused" };
+      } catch {
+        return { status: "paused" };
+      }
+      return integration.deliver({ item });
     },
   };
 }
