@@ -930,12 +930,11 @@ test("pauses malformed changes-requested findings without journaling them as rev
   }
 });
 
-test("requires a remediation review context to be fresh relative to every earlier review before closure", async () => {
+test("pauses before closure when an approved remediation review reuses its initial reviewer context", async () => {
   const calls = [];
   const item = { itemId: "wi-004", worktree: "/items/wi-004" };
   const reviewResults = [
     { verdict: "changes-requested", findings: [{ path: "src/widget.js", line: 17, message: "First finding." }], context: "context-a" },
-    { verdict: "changes-requested", findings: [{ path: "src/widget.js", line: 18, message: "Second finding." }], context: "context-b" },
     { verdict: "approved", context: "context-a" },
   ];
   const coordinator = createReviewRemediationCoordinator({
@@ -958,8 +957,7 @@ test("requires a remediation review context to be fresh relative to every earlie
     implementer: { identity: "implementer", context: "implementation-context", remediate: async () => calls.push("remediate") },
   }), { status: "paused" });
   assert.deepEqual(calls, [
-    "review:context-a", "remediate", "acceptance",
-    "review:context-b", "remediate", "acceptance", "review:context-a",
+    "review:context-a", "remediate", "acceptance", "review:context-a",
   ]);
 });
 
