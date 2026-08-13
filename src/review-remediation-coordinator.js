@@ -39,11 +39,7 @@ export function createReviewRemediationCoordinator({
         if (result.verdict === "changes-requested" && !hasStructuredFindings(result.findings)) {
           return { status: "paused" };
         }
-        if (
-          result.verdict === "approved" &&
-          completedCycles > 0 &&
-          reviewerContexts.has(reviewerContext(result))
-        ) {
+        if (completedCycles > 0 && reviewerContexts.has(reviewerContext(result))) {
           return { status: "paused" };
         }
         reviewerContexts.add(reviewerContext(result));
@@ -204,7 +200,7 @@ function hasRepeatedLegacyFingerprint(item, findings, fingerprintsByItem) {
 
 function legacyFingerprintsFor(findings) {
   return Array.isArray(findings)
-    ? findings.map((finding) => normalizeString(finding?.fingerprint)).filter(Boolean)
+    ? findings.map(canonicalFingerprint).filter(Boolean)
     : [];
 }
 
