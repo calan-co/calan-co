@@ -18,11 +18,12 @@ function validSha(value) {
  * `journal`, `paths`, and `acceptance` are injected so this module has no Node
  * process, filesystem, or acceptance-stack dependency.
  */
-export function createGitWorktreeTransaction({ git, journal, paths, acceptance }) {
+export function createGitWorktreeTransaction({ git, journal, paths, acceptance, review }) {
   if (typeof git !== "function") throw new TypeError("git runner must be a function");
   if (!journal || typeof journal.append !== "function") throw new TypeError("journal sink must append evidence");
   if (!paths || typeof paths.item !== "function" || typeof paths.integration !== "function") throw new TypeError("worktree paths must be provided");
   if (!acceptance || typeof acceptance.run !== "function") throw new TypeError("acceptance adapter must run checks");
+  if (!review || typeof review.verify !== "function") throw new TypeError("review verifier must validate evidence");
 
   const run = async (args, cwd) => text(await git({ args, cwd }));
   const record = async (event) => journal.append(event);
@@ -138,30 +139,97 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance }
     };
   }
 
+  function publicationIntent(item, worktree, strategy, candidateSha) {
+    return {
+      type: "delivery-publication-intent",
+      itemId: item.itemId,
+      repositoryRoot: item.repositoryRoot,
+      targetBranch: item.targetBranch,
+      expectedBaseSha: item.targetBaseSha,
+      candidateSha,
+      itemWorktree: item.worktree,
+      integrationWorktree: worktree,
+      strategy,
+    };
+  }
+
+  function publicationFailure(item, worktree, strategy, candidateSha, intent, error) {
+    return {
+      status: "publication-failed",
+      itemWorktree: item.worktree,
+      integrationWorktree: worktree,
+      candidateSha,
+      recovery: {
+        action: "retryPublication",
+        required: ["inspect-publication-state", "explicit-retry"],
+        item,
+        strategy,
+        publicationIntent: intent,
+        ...(error ? { error: error.message } : {}),
+      },
+    };
+  }
+
   async function publish(item, worktree, strategy, candidateSha) {
+    const intent = publicationIntent(item, worktree, strategy, candidateSha);
+    try {
+      await record(intent);
+    } catch (error) {
+      return publicationFailure(item, worktree, strategy, candidateSha, intent, error);
+    }
+
     try {
       await run(["update-ref", `refs/heads/${item.targetBranch}`, candidateSha, item.targetBaseSha], item.repositoryRoot);
     } catch (error) {
-      await record({ type: "delivery-stale", itemId: item.itemId, targetBranch: item.targetBranch, targetBaseSha: item.targetBaseSha, candidateSha, itemWorktree: item.worktree, integrationWorktree: worktree, strategy, error: error.message });
-      return staleResult(item, worktree, strategy, candidateSha);
+      let currentTargetSha;
+      try {
+        currentTargetSha = await run(["rev-parse", "--verify", `refs/heads/${item.targetBranch}`], item.repositoryRoot);
+      } catch (readError) {
+        return publicationFailure(item, worktree, strategy, candidateSha, intent, readError);
+      }
+      if (currentTargetSha !== item.targetBaseSha) {
+        await record({ ...intent, type: "delivery-stale", targetBaseSha: item.targetBaseSha, currentTargetSha, error: error.message });
+        return staleResult(item, worktree, strategy, candidateSha);
+      }
+      const failed = { ...intent, type: "delivery-publication-failed", error: error.message };
+      try {
+        await record(failed);
+      } catch (recordError) {
+        return publicationFailure(item, worktree, strategy, candidateSha, intent, recordError);
+      }
+      return publicationFailure(item, worktree, strategy, candidateSha, intent, error);
     }
 
     const published = { type: "delivery-published", itemId: item.itemId, targetBranch: item.targetBranch, expectedBaseSha: item.targetBaseSha, publishedSha: candidateSha, strategy };
-    let journalError;
-    try { await record(published); } catch (error) { journalError = error; }
-    let cleanupError;
-    try { await cleanup(item, worktree); } catch (error) { cleanupError = error; }
-    if (journalError || cleanupError) {
+    try {
+      await record(published);
+    } catch (error) {
+      return {
+        status: "published-but-recording-failed",
+        targetBranch: item.targetBranch,
+        publishedSha: candidateSha,
+        recovery: {
+          targetAlreadyPublished: true,
+          cleanupRequired: true,
+          itemWorktree: item.worktree,
+          integrationWorktree: worktree,
+          publicationIntent: intent,
+          publicationJournalError: error.message,
+        },
+      };
+    }
+    try {
+      await cleanup(item, worktree);
+    } catch (error) {
       const recovery = {
         targetAlreadyPublished: true,
         cleanupRequired: true,
         itemWorktree: item.worktree,
         integrationWorktree: worktree,
-        ...(journalError ? { publicationJournalError: journalError.message } : {}),
-        ...(cleanupError ? { cleanupError: cleanupError.message } : {}),
+        cleanupError: error.message,
       };
       try {
-        await record({ type: "delivery-published-but-cleanup-failed", ...published, recovery });
+        await record({ ...published, type: "delivery-published-but-cleanup-failed", recovery });
       } catch (recoveryJournalError) {
         recovery.recoveryJournalError = recoveryJournalError.message;
       }
@@ -204,9 +272,30 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance }
 
   async function retryStale({ refreshed, independentReview } = {}) {
     if (!refreshed || refreshed.status !== "refreshed") throw new TypeError("refreshed stale evidence is required");
-    if (!independentReview || independentReview.approved !== true || independentReview.candidateSha !== refreshed.candidateSha) {
+    const reviewer = independentReview?.reviewer;
+    const implementer = independentReview?.implementer;
+    if (
+      !independentReview || independentReview.approved !== true || independentReview.fresh !== true
+      || independentReview.candidateSha !== refreshed.candidateSha
+      || typeof reviewer?.identity !== "string" || typeof reviewer?.context !== "string"
+      || typeof implementer?.identity !== "string" || typeof implementer?.context !== "string"
+      || reviewer.identity === implementer.identity || reviewer.context === implementer.context
+    ) {
       throw new TypeError("fresh independent review approval for this candidate is required");
     }
+    const verified = await review.verify({
+      evidence: independentReview,
+      candidate: {
+        candidateSha: refreshed.candidateSha,
+        targetBranch: refreshed.item.targetBranch,
+        targetBaseSha: refreshed.item.targetBaseSha,
+        itemWorktree: refreshed.item.worktree,
+        integrationWorktree: refreshed.integrationWorktree,
+        strategy: refreshed.recovery.strategy,
+        attempt: refreshed.recovery.attempt,
+      },
+    });
+    if (verified !== true) throw new TypeError("fresh independent review approval for this candidate is required");
     return publish(refreshed.item, refreshed.integrationWorktree, refreshed.recovery.strategy, refreshed.candidateSha);
   }
 

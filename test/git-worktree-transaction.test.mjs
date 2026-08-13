@@ -18,13 +18,20 @@ function createHarness({
   checksPass = true,
   checksThrow = false,
   journalFails = false,
+  publicationIntentJournalFails = false,
+  casFailureTargetSha = casFailures > 0 ? "cccccccc" : undefined,
+  reviewApproves = true,
 } = {}) {
   const calls = [];
   const events = [];
+  const timeline = [];
   const acceptanceCalls = [];
+  const reviewCalls = [];
+  let targetSha = "aaaaaaaa";
   let remainingCasFailures = casFailures;
   const git = async ({ args, cwd }) => {
     calls.push({ args, cwd });
+    timeline.push({ operation: "git", command: args.join(" ") });
     const command = args.join(" ");
     if (command.startsWith("worktree add --detach") && integrationProvisionFails) throw new Error("disk unavailable");
     if (command.startsWith("worktree remove") && cleanupFails) throw new Error("cleanup unavailable");
@@ -34,7 +41,7 @@ function createHarness({
       return `${branch}\n`;
     }
     if (command.startsWith("check-ref-format --branch ")) return `${args.at(-1)}\n`;
-    if (command === "rev-parse --verify refs/heads/main") return "aaaaaaaa\n";
+    if (command === "rev-parse --verify refs/heads/main") return `${targetSha}\n`;
     if (command === "rev-parse HEAD") return "bbbbbbbb\n";
     if (command === "diff --name-only --diff-filter=U") return mergeFails ? "conflicted-file\n" : "";
     if (command.startsWith("merge ") && (mergeFails || mergeOperationalFails)) {
@@ -44,23 +51,28 @@ function createHarness({
     }
     if (command.startsWith("update-ref ") && remainingCasFailures > 0) {
       remainingCasFailures -= 1;
+      if (casFailureTargetSha) targetSha = casFailureTargetSha;
       throw new Error("cannot lock ref");
     }
+    if (command.startsWith("update-ref ")) targetSha = args[2];
     return "";
   };
   const transaction = createGitWorktreeTransaction({
     git,
     journal: { append: async (event) => {
+      if (publicationIntentJournalFails && event.type === "delivery-publication-intent") throw new Error("intent journal unavailable");
       if (journalFails && event.type === "delivery-published") throw new Error("journal unavailable");
       events.push(event);
+      timeline.push({ operation: "journal", event });
     } },
     paths: {
       item: ({ itemId }) => ({ branch: `items/${itemId}`, worktree: `/items/${itemId}` }),
       integration: ({ itemId }) => ({ worktree: `/integration/${itemId}` }),
     },
     acceptance: { run: async (input) => { acceptanceCalls.push(input); if (checksThrow) throw new Error("root check failed"); return checksPass; } },
+    review: { verify: async (input) => { reviewCalls.push(input); return reviewApproves; } },
   });
-  return { calls, events, acceptanceCalls, transaction };
+  return { calls, events, timeline, acceptanceCalls, reviewCalls, transaction };
 }
 
 test("creates an isolated item worktree from the invocation PWD branch and journals its base", async () => {
@@ -174,8 +186,21 @@ test("returns an explicit stale recovery contract rather than publishing a stale
   assert.equal(typeof transaction.retryStale, "function");
 });
 
-test("refreshes stale candidates through root acceptance and gates retry on fresh independent review", async () => {
-  const { acceptanceCalls, transaction } = createHarness({ casFailures: 1 });
+test("treats a CAS failure without target movement as a recoverable publication failure", async () => {
+  const { calls, events, transaction } = createHarness({ casFails: true, casFailureTargetSha: "aaaaaaaa" });
+  const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+
+  const result = await transaction.deliver({ item });
+
+  assert.equal(result.status, "publication-failed");
+  assert.equal(result.recovery.action, "retryPublication");
+  assert.equal(calls.filter(({ args }) => args.join(" ") === "rev-parse --verify refs/heads/main").length, 2);
+  assert.equal(calls.some(({ args }) => args[0] === "worktree" && args[1] === "remove"), false);
+  assert.equal(events.at(-1).type, "delivery-publication-failed");
+});
+
+test("refreshes stale candidates through root acceptance and gates retry on verified fresh independent review", async () => {
+  const { acceptanceCalls, reviewCalls, transaction } = createHarness({ casFailures: 1 });
   const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
   const stale = await transaction.deliver({ item });
 
@@ -186,28 +211,93 @@ test("refreshes stale candidates through root acceptance and gates retry on fres
   await assert.rejects(transaction.retryStale({ refreshed }), /independent review/);
   const result = await transaction.retryStale({
     refreshed,
-    independentReview: { approved: true, candidateSha: refreshed.candidateSha },
+    independentReview: {
+      approved: true,
+      fresh: true,
+      candidateSha: refreshed.candidateSha,
+      reviewer: { identity: "reviewer", context: "independent-review-context" },
+      implementer: { identity: "implementer", context: "implementation-context" },
+    },
   });
   assert.equal(result.status, "delivered");
+  assert.equal(reviewCalls.length, 1);
+  assert.equal(reviewCalls[0].candidate.candidateSha, refreshed.candidateSha);
 });
 
-test("turns post-publication cleanup and journal failures into inspectable recovery states", async () => {
-  for (const [name, options] of [
-    ["cleanup", { cleanupFails: true }],
-    ["publication journal", { journalFails: true }],
-  ]) {
-    const { calls, events, transaction } = createHarness(options);
-    const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+test("requires review evidence to be structured, independent, fresh, and accepted by the injected verifier", async () => {
+  const { transaction } = createHarness({ casFailures: 1, reviewApproves: false });
+  const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+  const stale = await transaction.deliver({ item });
+  const refreshed = await transaction.refreshStale({ stale });
+  const evidence = {
+    approved: true,
+    fresh: true,
+    candidateSha: refreshed.candidateSha,
+    reviewer: { identity: "reviewer", context: "independent-review-context" },
+    implementer: { identity: "implementer", context: "implementation-context" },
+  };
 
-    const result = await transaction.deliver({ item });
+  await assert.rejects(transaction.retryStale({ refreshed, independentReview: { approved: true, candidateSha: refreshed.candidateSha } }), /independent review/);
+  await assert.rejects(transaction.retryStale({ refreshed, independentReview: { ...evidence, reviewer: evidence.implementer } }), /independent review/);
+  await assert.rejects(transaction.retryStale({ refreshed, independentReview: evidence }), /independent review/);
+});
 
-    assert.equal(result.status, "published-but-cleanup-failed", name);
-    assert.equal(result.recovery.targetAlreadyPublished, true, name);
-    assert.equal(result.recovery.cleanupRequired, true, name);
-    assert.equal(result.recovery.itemWorktree, item.worktree, name);
-    assert.equal(calls.some(({ args }) => args[0] === "update-ref"), true, name);
-    assert.ok(events.some((event) => event.type === "delivery-published" || event.type === "delivery-published-but-cleanup-failed") || result.recovery.publicationJournalError, name);
-  }
+test("writes durable publication intent before CAS and aborts before CAS when intent journaling fails", async () => {
+  const failedIntent = createHarness({ publicationIntentJournalFails: true });
+  const failedItem = await failedIntent.transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+
+  const failedResult = await failedIntent.transaction.deliver({ item: failedItem });
+
+  assert.equal(failedResult.status, "publication-failed");
+  assert.equal(failedResult.recovery.action, "retryPublication");
+  assert.equal(failedIntent.calls.some(({ args }) => args[0] === "update-ref"), false);
+  assert.equal(failedIntent.calls.some(({ args }) => args[0] === "worktree" && args[1] === "remove"), false);
+
+  const successfulIntent = createHarness();
+  const item = await successfulIntent.transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+  await successfulIntent.transaction.deliver({ item });
+  const intent = successfulIntent.events.find((event) => event.type === "delivery-publication-intent");
+  assert.deepEqual(intent, {
+    type: "delivery-publication-intent",
+    itemId: "003",
+    repositoryRoot: "/repo",
+    targetBranch: "main",
+    expectedBaseSha: "aaaaaaaa",
+    candidateSha: "bbbbbbbb",
+    itemWorktree: "/items/003",
+    integrationWorktree: "/integration/003",
+    strategy: "merge-commit",
+  });
+  assert.ok(successfulIntent.timeline.findIndex(({ operation, event }) => operation === "journal" && event === intent) < successfulIntent.timeline.findIndex(({ operation, command }) => operation === "git" && command.startsWith("update-ref ")));
+});
+
+test("uses durable publication intent and preserves worktrees when post-CAS publication journaling fails", async () => {
+  const { calls, events, transaction } = createHarness({ journalFails: true });
+  const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+
+  const result = await transaction.deliver({ item });
+
+  assert.equal(result.status, "published-but-recording-failed");
+  assert.equal(result.recovery.targetAlreadyPublished, true);
+  assert.equal(result.recovery.cleanupRequired, true);
+  assert.equal(result.recovery.publicationIntent.type, "delivery-publication-intent");
+  assert.equal(calls.some(({ args }) => args[0] === "worktree" && args[1] === "remove"), false);
+  assert.ok(events.some((event) => event.type === "delivery-publication-intent"));
+  assert.equal(events.some((event) => event.type === "delivery-published"), false);
+});
+
+test("turns post-publication cleanup failures into inspectable recovery states", async () => {
+  const { calls, events, transaction } = createHarness({ cleanupFails: true });
+  const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+
+  const result = await transaction.deliver({ item });
+
+  assert.equal(result.status, "published-but-cleanup-failed");
+  assert.equal(result.recovery.targetAlreadyPublished, true);
+  assert.equal(result.recovery.cleanupRequired, true);
+  assert.equal(result.recovery.itemWorktree, item.worktree);
+  assert.equal(calls.some(({ args }) => args[0] === "update-ref"), true);
+  assert.ok(events.some((event) => event.type === "delivery-published-but-cleanup-failed"));
 });
 
 test("reports worktree provisioning failures separately from integration conflicts", async () => {
@@ -250,7 +340,7 @@ function temporaryRepository() {
   return root;
 }
 
-function realTransaction(root, { acceptance = async () => true, beforeUpdateRef } = {}) {
+function realTransaction(root, { acceptance = async () => true, beforeUpdateRef, review = { verify: async () => true } } = {}) {
   const events = [];
   const git = async ({ args, cwd }) => {
     if (args[0] === "update-ref" && beforeUpdateRef) await beforeUpdateRef();
@@ -270,6 +360,7 @@ function realTransaction(root, { acceptance = async () => true, beforeUpdateRef 
       integration: ({ itemId, attempt = 0 }) => ({ worktree: join(root, `.integration-${itemId}-${attempt}`) }),
     },
     acceptance: { run: acceptance },
+    review,
   });
   return { events, transaction };
 }
