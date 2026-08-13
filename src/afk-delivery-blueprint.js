@@ -41,12 +41,13 @@ export function createAfkDeliveryBlueprint({ worktreeTransaction, delivery, stat
       try {
         // Bind the transaction's internal CAS/cleanup effect boundary to this
         // same durable run journal; an unguarded transaction is not admissible.
-        const transactionJournal = Object.freeze({ append: async (event) => {
-          const action = event?.action;
-          const transactionTransition = action === "cas-publication" || action === "cleanup" ? action : "integration-deliver";
-          return journal.append({ category: "integration", transition: transactionTransition, type: "transaction-effect", event });
-        } });
-        worktreeTransaction.withEvidenceGuard({ before: async ({ action }) => verify(action), journal: transactionJournal });
+        const transactionTransition = (action) => action === "cas-publication" ? action
+          : ["integration-worktree-remove", "item-worktree-remove", "branch-delete"].includes(action) ? "cleanup"
+            : "integration-deliver";
+        const transactionJournal = Object.freeze({ append: async (event) => journal.append({
+          category: "integration", transition: transactionTransition(event?.action), type: "transaction-effect", event,
+        }) });
+        worktreeTransaction.withEvidenceGuard({ before: async ({ action }) => verify(transactionTransition(action)), journal: transactionJournal });
         const transition = guarded(state, "transition", "state-transition", verify, journal, "command");
         const prepareItem = guarded(worktreeTransaction, "prepareItem", "prepare-item", verify, journal, "command");
         await transition({ type: "evidence-journal-created", itemId, runDirectory });

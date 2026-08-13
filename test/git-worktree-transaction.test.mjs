@@ -15,6 +15,7 @@ function createHarness({
   mergeOperationalFails = false,
   integrationProvisionFails = false,
   cleanupFails = false,
+  cleanupFailsAt,
   checksPass = true,
   checksThrow = false,
   journalFails = false,
@@ -35,7 +36,8 @@ function createHarness({
     timeline.push({ operation: "git", command: args.join(" ") });
     const command = args.join(" ");
     if (command.startsWith("worktree add --detach") && integrationProvisionFails) throw new Error("disk unavailable");
-    if (command.startsWith("worktree remove") && cleanupFails) throw new Error("cleanup unavailable");
+    if (command.startsWith("worktree remove") && (cleanupFails || (cleanupFailsAt === "item-worktree-remove" && args.at(-1).startsWith("/items/")))) throw new Error("cleanup unavailable");
+    if (command.startsWith("branch -D") && cleanupFailsAt === "branch-delete") throw new Error("cleanup unavailable");
     if (command === "rev-parse --show-toplevel") return "/repo\n";
     if (command === "symbolic-ref --quiet --short HEAD") {
       if (!branch) throw new Error("detached HEAD");
@@ -97,7 +99,7 @@ test("journals all successful inner integration effects with typed records", asy
     assert.ok(events.some((event) => event.type === type), type);
   }
   assert.ok(events.some((event) => event.action === "cas-publication"));
-  assert.ok(events.some((event) => event.action === "cleanup"));
+  assert.ok(events.some((event) => event.transition === "cleanup"));
 });
 
 test("creates an isolated item worktree from the invocation PWD branch and journals its base", async () => {
@@ -143,16 +145,33 @@ test("records durable cleanup outcome after success and failure", async (t) => {
     const { events, transaction } = createHarness();
     const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
     await transaction.deliver({ item });
-    const intent = events.findIndex((event) => event.type === "delivery-action-intent" && event.action === "cleanup");
-    const outcome = events.findIndex((event) => event.type === "delivery-action-outcome" && event.action === "cleanup" && event.result === "succeeded");
+    const intent = events.findIndex((event) => event.type === "delivery-cleanup-intent" && event.action === "branch-delete");
+    const outcome = events.findIndex((event) => event.type === "delivery-cleanup-outcome" && event.action === "branch-delete" && event.result === "succeeded");
     assert.ok(intent >= 0 && outcome > intent);
   });
   await t.test("cleanup failure appends a failure outcome for reconstruction", async () => {
     const { events, transaction } = createHarness({ cleanupFails: true });
     const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
     await transaction.deliver({ item });
-    assert.ok(events.some((event) => event.type === "delivery-action-outcome" && event.action === "cleanup" && event.result === "failed"));
+    assert.ok(events.some((event) => event.type === "delivery-cleanup-outcome" && event.action === "integration-worktree-remove" && event.result === "failed"));
   });
+});
+
+test("cleanup reconstructs partial destructive effects in order", async (t) => {
+  for (const [name, cleanupFailsAt, succeeded, failed] of [
+    ["item removal fails after integration removal", "item-worktree-remove", "integration-worktree-remove", "item-worktree-remove"],
+    ["branch deletion fails after both worktree removals", "branch-delete", "item-worktree-remove", "branch-delete"],
+  ]) {
+    await t.test(name, async () => {
+      const { events, transaction } = createHarness({ cleanupFailsAt });
+      const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+      const result = await transaction.deliver({ item });
+      assert.equal(result.status, "published-but-cleanup-failed");
+      const success = events.findIndex((event) => event.type === "delivery-cleanup-outcome" && event.action === succeeded && event.result === "succeeded");
+      const failure = events.findIndex((event) => event.type === "delivery-cleanup-outcome" && event.action === failed && event.result === "failed");
+      assert.ok(success >= 0 && failure > success);
+    });
+  }
 });
 
 test("successful candidate effects append outcomes after each completed effect", async () => {
@@ -186,7 +205,7 @@ test("runs merge-commit integration checks in a temporary worktree and only then
     ["branch", "-D", "items/003"],
   ]);
   assert.ok(events.some((event) => event.type === "delivery-published"));
-  assert.equal(events.at(-1).type, "delivery-action-outcome");
+  assert.equal(events.at(-1).type, "delivery-cleanup-outcome");
 });
 
 test("preserves item and integration worktrees with recovery evidence after conflict, failed checks, or stale CAS", async () => {
@@ -334,13 +353,13 @@ test("fails closed before CAS publication or cleanup when action evidence guard 
     assert.ok(guardCalls.some((event) => event.action === "cas-publication" && event.category === "integration"));
   });
   await t.test("cleanup guard leaves published target and both worktrees for recovery", async () => {
-    const { calls, guardCalls, transaction } = createHarness({ guardFailsAt: "cleanup" });
+    const { calls, guardCalls, transaction } = createHarness({ guardFailsAt: "integration-worktree-remove" });
     const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
     const result = await transaction.deliver({ item });
     assert.equal(result.status, "published-but-cleanup-failed");
     assert.equal(calls.some(({ args }) => args[0] === "update-ref"), true);
     assert.equal(calls.some(({ args }) => args[0] === "worktree" && args[1] === "remove"), false);
-    assert.ok(guardCalls.some((event) => event.action === "cleanup" && event.category === "integration"));
+    assert.ok(guardCalls.some((event) => event.action === "integration-worktree-remove" && event.category === "integration"));
   });
 });
 
@@ -482,7 +501,7 @@ test("real Git evidence guard fails closed before CAS and cleanup", async (t) =>
   await t.test("cleanup verification failure retains both worktrees after publication", async () => {
     const root = temporaryRepository();
     try {
-      const { transaction } = realTransaction(root, { guard: { before: async ({ action }) => { if (action === "cleanup") throw new Error("evidence unavailable"); } } });
+      const { transaction } = realTransaction(root, { guard: { before: async ({ action }) => { if (action === "integration-worktree-remove") throw new Error("evidence unavailable"); } } });
       const item = await transaction.prepareItem({ itemId: "003", cwd: root });
       commitItemChange(item);
       const result = await transaction.deliver({ item });

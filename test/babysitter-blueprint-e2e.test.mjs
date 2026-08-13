@@ -211,7 +211,7 @@ test("blueprint composed real Git fixtures preserve delivery policy", async (t) 
   await runScenario("reviewed closure commit and CAS success", { assert: async ({ root, result, closes }) => {
     assert.equal(result.status, "delivered"); assert.equal(closes, 1); assert.match(gitIn(root, ["log", "-1", "--format=%s", "main"]), /Merge branch/);
     const runEvents = (await readFile(path.join(root, "run", "journal.ndjson"), "utf8")).trim().split("\n").map(JSON.parse);
-    for (const action of ["cas-publication", "cleanup"]) assert.ok(runEvents.some((event) => event.event?.action === action), action);
+    for (const action of ["cas-publication", "integration-worktree-remove", "item-worktree-remove", "branch-delete"]) assert.ok(runEvents.some((event) => event.event?.action === action), action);
     assert.ok(runEvents.every((event, index) => event.sequence === index + 1));
   } });
   await runScenario("changes-requested remediates, accepts, and receives fresh review", { review: (n) => n === 1 ? { verdict: "changes-requested", findings: [{ path: "README.md", line: 1, message: "fix" }], reviewer: { identity: "reviewer-1", context: "review-1" } } : { verdict: "approved", reviewer: { identity: "reviewer-2", context: "review-2" } }, assert: ({ result, reviews }) => { assert.equal(result.status, "delivered"); assert.equal(reviews, 2); } });

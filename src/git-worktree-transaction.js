@@ -90,17 +90,26 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
   }
 
   async function cleanup(item, integrationWorktree) {
-    const event = { action: "cleanup", category: "integration", itemId: item.itemId, itemWorktree: item.worktree, integrationWorktree };
-    await guardBefore(event);
-    try {
-      await run(["worktree", "remove", "--force", integrationWorktree], item.repositoryRoot);
-      await run(["worktree", "remove", "--force", item.worktree], item.repositoryRoot);
-      await run(["branch", "-D", item.branch], item.repositoryRoot);
-    } catch (error) {
-      await actionOutcome(event, "failed", error);
-      throw error;
+    const shared = { category: "integration", itemId: item.itemId, itemWorktree: item.worktree, integrationWorktree, branch: item.branch };
+    const effects = [
+      { action: "integration-worktree-remove", args: ["worktree", "remove", "--force", integrationWorktree] },
+      { action: "item-worktree-remove", args: ["worktree", "remove", "--force", item.worktree] },
+      { action: "branch-delete", args: ["branch", "-D", item.branch] },
+    ];
+    for (const effect of effects) {
+      const event = { ...shared, action: effect.action, transition: "cleanup" };
+      // An individual intent/outcome pair permits deterministic recovery after
+      // a crash or partial destructive cleanup.
+      await record({ type: "delivery-cleanup-intent", ...event });
+      try {
+        await guardBefore(event);
+        await run(effect.args, item.repositoryRoot);
+      } catch (error) {
+        await record({ type: "delivery-cleanup-outcome", ...event, result: "failed", error: error.message });
+        throw error;
+      }
+      await record({ type: "delivery-cleanup-outcome", ...event, result: "succeeded" });
     }
-    await actionOutcome(event, "succeeded");
   }
 
   function failure(item, worktree, strategy, phase, error) {
