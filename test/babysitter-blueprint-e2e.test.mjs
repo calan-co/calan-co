@@ -101,6 +101,7 @@ test("Babysitter blueprint fails closed before worktree preparation or state tra
       });
       assert.equal(result.status, "paused");
       assert.match(result.reason, /evidence|manifest|hash/i);
+      await assert.rejects(readFile(path.join(repositoryRoot, "evidence", "journal.ndjson")), /ENOENT/);
       assert.deepEqual(harness.transitionCalls, []);
       assert.deepEqual(harness.prepareCalls, []);
     });

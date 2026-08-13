@@ -81,6 +81,25 @@ function createHarness({
   return { calls, events, timeline, acceptanceCalls, reviewCalls, guardCalls, transaction };
 }
 
+test("refuses externally callable delivery transactions without an evidence guard", () => {
+  assert.throws(() => createGitWorktreeTransaction({
+    git: async () => "", journal: { append: async () => {} },
+    paths: { item: async () => ({}), integration: async () => ({}) },
+    acceptance: { run: async () => true }, review: { verify: async () => true },
+  }), /evidence guard/i);
+});
+
+test("journals all successful inner integration effects with typed records", async () => {
+  const { events, transaction } = createHarness();
+  const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+  await transaction.deliver({ item });
+  for (const type of ["delivery-integration-worktree-created", "delivery-integration-strategy", "delivery-root-acceptance", "delivery-candidate-created", "delivery-publication-intent", "delivery-action-intent", "delivery-published"]) {
+    assert.ok(events.some((event) => event.type === type), type);
+  }
+  assert.ok(events.some((event) => event.action === "cas-publication"));
+  assert.ok(events.some((event) => event.action === "cleanup"));
+});
+
 test("creates an isolated item worktree from the invocation PWD branch and journals its base", async () => {
   const { calls, events, transaction } = createHarness();
 
@@ -382,7 +401,7 @@ function realTransaction(root, { acceptance = async () => true, beforeUpdateRef,
   };
   const transaction = createGitWorktreeTransaction({
     git,
-    guard,
+    guard: guard ?? { before: async () => {} },
     journal: { append: async (event) => events.push(event) },
     paths: {
       item: ({ itemId }) => ({ branch: `items/${itemId}`, worktree: join(root, `.item-${itemId}`) }),

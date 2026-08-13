@@ -32,6 +32,9 @@ export function createAfkDeliveryBlueprint({ worktreeTransaction, delivery, stat
       let journal;
       try {
         await loadRepositoryOverride({ repositoryRoot: cwd, repositoryOverridePath });
+        // A supplied manifest is an evidence contract, never disposable input.
+        // Reject it before journal initialization can replace it.
+        if (evidenceManifestPath !== undefined) await verifyEvidenceManifest({ runDirectory, manifestPath: evidenceManifestPath });
         journal = await journalFactory({ runDirectory, input: { itemId, cwd, targetBranch } });
       } catch (error) { return paused(error instanceof Error ? error.message : "override or journal initialization failed"); }
       const verify = (transition) => verifyEvidenceManifest({ runDirectory: journal.runDirectory ?? runDirectory, manifestPath: evidenceManifestPath ?? path.join(journal.runDirectory ?? runDirectory, "manifest.json"), expectedTransition: transition });

@@ -24,7 +24,7 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
   if (!paths || typeof paths.item !== "function" || typeof paths.integration !== "function") throw new TypeError("worktree paths must be provided");
   if (!acceptance || typeof acceptance.run !== "function") throw new TypeError("acceptance adapter must run checks");
   if (!review || typeof review.verify !== "function") throw new TypeError("review verifier must validate evidence");
-  if (guard !== undefined && typeof guard?.before !== "function") throw new TypeError("transaction guard must verify actions");
+  if (!guard || typeof guard.before !== "function") throw new TypeError("transaction evidence guard must verify actions");
 
   let activeJournal = journal;
   let activeGuard = guard;
@@ -32,7 +32,7 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
   const record = async (event) => activeJournal.append(event);
   const guardBefore = async (event) => {
     await record({ type: "delivery-action-intent", ...event });
-    if (activeGuard) await activeGuard.before(event);
+    await activeGuard.before(event);
   };
   function withEvidenceGuard({ before, journal: evidenceJournal } = {}) {
     if (typeof before !== "function" || !evidenceJournal || typeof evidenceJournal.append !== "function") throw new TypeError("evidence guard and journal are required");
@@ -62,6 +62,7 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
   }
 
   async function prepareItem({ itemId, cwd, targetBranch } = {}) {
+    await guardBefore({ action: "prepare-item", category: "integration", itemId, targetBranch });
     requireString(itemId, "item ID");
     const target = await resolveTarget({ cwd, targetBranch });
     const location = await paths.item({ itemId, ...target });
@@ -98,6 +99,7 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
   async function createCandidate(item, strategy, worktree) {
     try {
       const start = strategy === "rebase" ? item.branch : item.targetBaseSha;
+      await record({ type: "delivery-integration-worktree-created", category: "integration", action: "integration-worktree-create", itemId: item.itemId, strategy, worktree, start });
       await run(["worktree", "add", "--detach", worktree, start], item.repositoryRoot);
     } catch (error) {
       await record(failure(item, worktree, strategy, "provisioning", error));
@@ -105,11 +107,15 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
     }
     try {
       if (strategy === "merge-commit") {
+        await record({ type: "delivery-integration-strategy", category: "integration", action: "merge", itemId: item.itemId, strategy, worktree, branch: item.branch });
         await run(["merge", "--no-ff", "--no-edit", item.branch], worktree);
       } else if (strategy === "squash") {
+        await record({ type: "delivery-integration-strategy", category: "integration", action: "squash", itemId: item.itemId, strategy, worktree, branch: item.branch });
         await run(["merge", "--squash", item.branch], worktree);
+        await record({ type: "delivery-integration-commit", category: "commit", action: "squash-commit", itemId: item.itemId, strategy, worktree });
         await run(["commit", "--no-edit", "-m", `Integrate ${item.itemId}`], worktree);
       } else {
+        await record({ type: "delivery-integration-strategy", category: "integration", action: "rebase", itemId: item.itemId, strategy, worktree, targetBranch: item.targetBranch });
         await run(["rebase", item.targetBranch], worktree);
       }
     } catch (error) {
@@ -123,6 +129,7 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
     }
     let checksPassed;
     try {
+      await record({ type: "delivery-root-acceptance", category: "command", action: "root-acceptance", itemId: item.itemId, strategy, worktree });
       checksPassed = await acceptance.run({ candidate: "integration", repositoryRoot: item.repositoryRoot, worktree, item, strategy });
     } catch (error) {
       await record(failure(item, worktree, strategy, "acceptance", error));
@@ -134,6 +141,7 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
     }
     const candidateSha = await run(["rev-parse", "HEAD"], worktree);
     if (!validSha(candidateSha)) throw new Error("integration candidate did not produce a Git SHA");
+    await record({ type: "delivery-candidate-created", category: "integration", action: "candidate-sha", itemId: item.itemId, strategy, worktree, candidateSha });
     return { status: "candidate", candidateSha, worktree };
   }
 
@@ -254,6 +262,7 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
   }
 
   async function deliver({ item, strategy = "merge-commit" } = {}) {
+    await guardBefore({ action: "integration-deliver", category: "integration", itemId: item?.itemId, strategy });
     assertItem(item);
     assertStrategy(strategy);
     const location = await paths.integration({ itemId: item.itemId, item, strategy, attempt: 0 });
@@ -264,6 +273,7 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
   }
 
   async function refreshStale({ stale } = {}) {
+    await guardBefore({ action: "integration-refresh", category: "integration", itemId: stale?.recovery?.item?.itemId });
     if (!stale || stale.status !== "stale" || !stale.recovery) throw new TypeError("stale recovery evidence is required");
     const { item: priorItem, strategy, attempt } = stale.recovery;
     assertItem(priorItem);
@@ -286,6 +296,7 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
   }
 
   async function retryStale({ refreshed, independentReview } = {}) {
+    await guardBefore({ action: "integration-retry", category: "integration", itemId: refreshed?.item?.itemId });
     if (!refreshed || refreshed.status !== "refreshed") throw new TypeError("refreshed stale evidence is required");
     const reviewer = independentReview?.reviewer;
     const implementer = independentReview?.implementer;
