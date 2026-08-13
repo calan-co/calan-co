@@ -199,7 +199,8 @@ test("fails closed without committing or integrating when close throws or return
       },
     });
 
-    await assert.rejects(coordinator.review({ item, implementer }), /close|closed|DV/i);
+    const result = await coordinator.review({ item, implementer });
+    assert.deepEqual(result, { status: "paused" });
     assert.deepEqual(calls, [{ operation: "close", workId: "wi-004", cwd: "/items/wi-004" }]);
   }
 });
