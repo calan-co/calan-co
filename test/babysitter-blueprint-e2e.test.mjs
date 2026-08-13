@@ -156,6 +156,7 @@ test("fixture-driven blueprint outcomes preserve delivery policy seams", async (
         assert.equal(result.status, expected);
         assert.equal(harness.prepareCalls.length, 1);
         assert.equal(harness.deliveryCalls.length, 1);
+        assert.equal(typeof harness.deliveryCalls[0].verifyEvidence, "function");
         assert.ok(harness.transitionCalls.length >= 2);
       });
     });
