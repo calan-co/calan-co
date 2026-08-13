@@ -19,6 +19,7 @@ function createHarness({
   checksPass = true,
   checksThrow = false,
   journalFails = false,
+  itemCreationJournalFails = false,
   publicationIntentJournalFails = false,
   outcomeJournalFailsAt,
   casFailureTargetSha = casFailures > 0 ? "cccccccc" : undefined,
@@ -69,6 +70,7 @@ function createHarness({
       if (event.action === guardFailsAt) throw new Error(`evidence unavailable before ${event.action}`);
     } },
     journal: { append: async (event) => {
+      if (itemCreationJournalFails && event.type === "item-worktree-created") throw new Error("item creation journal unavailable");
       if (publicationIntentJournalFails && event.type === "delivery-publication-intent") throw new Error("intent journal unavailable");
       if (journalFails && event.type === "delivery-published") throw new Error("journal unavailable");
       if (outcomeJournalFailsAt === event.action && (event.type === "delivery-action-outcome" || event.type === "delivery-cleanup-outcome")) throw new Error("outcome journal unavailable");
@@ -129,6 +131,11 @@ test("creates an isolated item worktree from the invocation PWD branch and journ
     branch: "items/003",
     worktree: "/items/003",
   });
+});
+
+test("item worktree creation record failure preserves post-effect uncertainty identity", async () => {
+  const { transaction } = createHarness({ itemCreationJournalFails: true });
+  await assert.rejects(transaction.prepareItem({ itemId: "003", cwd: "/repo" }), (error) => error.postEffectRecord === true && error.effect.action === "item-worktree-create");
 });
 
 test("fails closed for detached or unknown explicit target branches", async () => {
@@ -352,6 +359,25 @@ test("never misreports post-effect journal failure as an action failure", async 
     assert.equal(result.status, "published-but-cas-recording-uncertain");
     assert.equal(result.recovery.sideEffectMayHaveSucceeded, true);
     assert.equal(calls.some(({ args }) => args[0] === "worktree" && args[1] === "remove"), false);
+  });
+  await t.test("candidate creation outcome persistence failure preserves effect identity without retry", async () => {
+    const { calls, transaction } = createHarness({ outcomeJournalFailsAt: "integration-worktree-create" });
+    const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+    const result = await transaction.deliver({ item });
+    assert.equal(result.status, "integration-effect-recording-uncertain");
+    assert.equal(result.recovery.sideEffectMayHaveSucceeded, true);
+    assert.equal(result.recovery.effect.action, "integration-worktree-create");
+    assert.equal(calls.filter(({ args }) => args.join(" ").startsWith("worktree add --detach")).length, 1);
+  });
+  await t.test("merge and root acceptance outcome persistence failures preserve uncertainty", async () => {
+    for (const action of ["merge", "root-acceptance"]) {
+      const { calls, transaction } = createHarness({ outcomeJournalFailsAt: action });
+      const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+      const result = await transaction.deliver({ item });
+      assert.equal(result.status, "integration-effect-recording-uncertain", action);
+      assert.equal(result.recovery.effect.action, action);
+      assert.equal(calls.some(({ args }) => args[0] === "update-ref"), false, action);
+    }
   });
   await t.test("cleanup outcome persistence failure preserves recovery identity without retry", async () => {
     const { calls, transaction } = createHarness({ outcomeJournalFailsAt: "item-worktree-remove" });

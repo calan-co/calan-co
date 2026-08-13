@@ -75,7 +75,10 @@ export function createAfkDeliveryBlueprint({ worktreeTransaction, delivery, stat
         });
         await transition({ type: "delivery-outcome", itemId, status: outcome?.status });
         return outcome;
-      } catch (error) { return paused(error instanceof Error ? error.message : "delivery port failed"); }
+      } catch (error) {
+        if (error?.postEffectRecord === true) return { status: "paused-after-side-effect", recovery: { sideEffectMayHaveSucceeded: true, effect: error.effect, recordError: error.message, required: ["inspect-side-effect", "repair-evidence", "do-not-retry-effect"] } };
+        return paused(error instanceof Error ? error.message : "delivery port failed");
+      }
     },
   });
 }

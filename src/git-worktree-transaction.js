@@ -71,7 +71,13 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
     const worktree = requireString(location.worktree, "item worktree");
     await run(["worktree", "add", "-b", branch, worktree, target.targetBaseSha], target.repositoryRoot);
     const item = { itemId, ...target, branch, worktree };
-    await record({ type: "item-worktree-created", itemId, targetBranch: target.targetBranch, targetBaseSha: target.targetBaseSha, branch, worktree });
+    try {
+      await record({ type: "item-worktree-created", itemId, targetBranch: target.targetBranch, targetBaseSha: target.targetBaseSha, branch, worktree });
+    } catch (recordError) {
+      recordError.postEffectRecord = true;
+      recordError.effect = { category: "integration", action: "item-worktree-create", itemId, targetBranch: target.targetBranch, targetBaseSha: target.targetBaseSha, branch, worktree };
+      throw recordError;
+    }
     return item;
   }
 
@@ -130,6 +136,10 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
     return { type: "delivery-failed", itemId: item.itemId, targetBranch: item.targetBranch, targetBaseSha: item.targetBaseSha, itemWorktree: item.worktree, integrationWorktree: worktree, strategy, phase, ...(error ? { error: error.message } : {}) };
   }
 
+  function uncertainEffect(item, worktree, strategy, error) {
+    return { status: "integration-effect-recording-uncertain", itemWorktree: item.worktree, integrationWorktree: worktree, recovery: { sideEffectMayHaveSucceeded: true, effect: error.effect, item, strategy, recordError: error.message, required: ["inspect-effect-state", "repair-evidence", "do-not-retry-effect"] } };
+  }
+
   async function createCandidate(item, strategy, worktree) {
     let activeEffect;
     try {
@@ -140,6 +150,7 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
       await run(["worktree", "add", "--detach", worktree, start], item.repositoryRoot);
       await actionOutcome(create, "succeeded");
     } catch (error) {
+      if (error?.postEffectRecord === true) return uncertainEffect(item, worktree, strategy, error);
       if (activeEffect) await actionOutcome(activeEffect, "failed", error);
       await record(failure(item, worktree, strategy, "provisioning", error));
       return { status: "failed", itemWorktree: item.worktree, integrationWorktree: worktree };
@@ -171,6 +182,7 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
         await actionOutcome(rebase, "succeeded");
       }
     } catch (error) {
+      if (error?.postEffectRecord === true) return uncertainEffect(item, worktree, strategy, error);
       if (activeEffect) await actionOutcome(activeEffect, "failed", error);
       const unmergedPaths = await run(["diff", "--name-only", "--diff-filter=U"], worktree).catch(() => "");
       if (unmergedPaths) {
@@ -188,6 +200,7 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
       checksPassed = await acceptance.run({ candidate: "integration", repositoryRoot: item.repositoryRoot, worktree, item, strategy });
       await actionOutcome(rootAcceptance, checksPassed ? "succeeded" : "failed");
     } catch (error) {
+      if (error?.postEffectRecord === true) return uncertainEffect(item, worktree, strategy, error);
       if (activeEffect) await actionOutcome(activeEffect, "failed", error);
       await record(failure(item, worktree, strategy, "acceptance", error));
       return { status: "failed", itemWorktree: item.worktree, integrationWorktree: worktree };
@@ -196,10 +209,18 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
       await record(failure(item, worktree, strategy, "acceptance"));
       return { status: "failed", itemWorktree: item.worktree, integrationWorktree: worktree };
     }
-    const candidateSha = await run(["rev-parse", "HEAD"], worktree);
-    if (!validSha(candidateSha)) throw new Error("integration candidate did not produce a Git SHA");
-    await actionOutcome({ category: "integration", action: "candidate-sha", itemId: item.itemId, strategy, worktree, candidateSha }, "succeeded");
-    return { status: "candidate", candidateSha, worktree };
+    const candidateEffect = { category: "integration", action: "candidate-sha", itemId: item.itemId, strategy, worktree };
+    try {
+      await record({ type: "delivery-candidate-sha-intent", ...candidateEffect });
+      const candidateSha = await run(["rev-parse", "HEAD"], worktree);
+      if (!validSha(candidateSha)) throw new Error("integration candidate did not produce a Git SHA");
+      await actionOutcome({ ...candidateEffect, candidateSha }, "succeeded");
+      return { status: "candidate", candidateSha, worktree };
+    } catch (error) {
+      if (error?.postEffectRecord === true) return uncertainEffect(item, worktree, strategy, error);
+      await actionOutcome(candidateEffect, "failed", error);
+      return { status: "failed", itemWorktree: item.worktree, integrationWorktree: worktree };
+    }
   }
 
   function staleResult(item, worktree, strategy, candidateSha) {

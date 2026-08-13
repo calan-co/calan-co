@@ -35,7 +35,8 @@ export function createReviewRemediationCoordinator({
       let completedCycles = 0;
       const reviewerContexts = new Set();
       while (true) {
-        const result = await ports.review.request({ item, implementer });
+        let result;
+        try { result = await ports.review.request({ item, implementer }); } catch (error) { return postEffectPaused(error, item); }
         if (!isValidReviewResult(result, implementer)) {
           throw new Error("Invalid verdict or non-independent reviewer");
         }
@@ -105,7 +106,8 @@ export function createReviewRemediationCoordinator({
         } catch (error) {
           return postEffectPaused(error, item);
         }
-        const delivery = await ports.integration.deliver({ item });
+        let delivery;
+        try { delivery = await ports.integration.deliver({ item }); } catch (error) { return postEffectPaused(error, item); }
         if (delivery?.status !== "stale") return delivery;
         return recoverStaleDelivery({
           stale: delivery,
