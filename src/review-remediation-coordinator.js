@@ -50,8 +50,10 @@ export function createReviewRemediationCoordinator({
 
         try {
           await journal.append(reviewEvidence(item, result, completedCycles));
-        } catch {
-          return { status: "paused" };
+        } catch (error) {
+          error.postEffectRecord = true;
+          error.effect = { category: "review", action: "review-decision", itemId: itemKey(item), verdict: result.verdict, reviewer: result.reviewer, cycle: completedCycles };
+          return postEffectPaused(error, item);
         }
 
         if (result.verdict === "blocked") {
@@ -161,7 +163,13 @@ async function recoverStaleDelivery({
     }
     reviewerContexts.add(reviewerContext(result));
     if (typeof journal?.append !== "function") return { status: "paused" };
-    await journal.append(reviewEvidence(item, result, cycle));
+    try {
+      await journal.append(reviewEvidence(item, result, cycle));
+    } catch (error) {
+      error.postEffectRecord = true;
+      error.effect = { category: "review", action: "stale-review-decision", itemId: itemKey(item), verdict: result.verdict, reviewer: result.reviewer, cycle };
+      return postEffectPaused(error, item);
+    }
 
     return await integration.retryStale({
       refreshed,
@@ -173,8 +181,8 @@ async function recoverStaleDelivery({
         implementer,
       },
     });
-  } catch {
-    return { status: "paused" };
+  } catch (error) {
+    return postEffectPaused(error, item);
   }
 }
 
