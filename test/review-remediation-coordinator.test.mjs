@@ -127,6 +127,83 @@ test("rejects whitespace-equivalent reviewer identity or context before prohibit
   assert.deepEqual(calls, []);
 });
 
+test("closes a valid independently approved item in its worktree, commits tracked closure changes, then integrates", async () => {
+  const calls = [];
+  const item = { id: "wi-004", worktree: "/items/wi-004" };
+  const acknowledgement = {
+    schemaVersion: "task-close/v1",
+    id: item.id,
+    status: "closed",
+    lifecycle: "closed",
+  };
+  const coordinator = createReviewRemediationCoordinator({
+    review: {
+      request: async () => ({
+        verdict: "approved",
+        reviewer: { identity: "reviewer", context: "review-context" },
+      }),
+    },
+    dv: {
+      close: async ({ workId, cwd }) => {
+        calls.push({ operation: "close", workId, cwd });
+        return acknowledgement;
+      },
+    },
+    workspace: {
+      commitTracked: async ({ cwd }) => calls.push({ operation: "commit", cwd }),
+    },
+    integration: {
+      deliver: async ({ item: deliveredItem }) => calls.push({ operation: "integration", item: deliveredItem }),
+    },
+  });
+
+  await coordinator.review({
+    item,
+    implementer: { identity: "implementer", context: "implementation-context" },
+  });
+
+  assert.deepEqual(calls, [
+    { operation: "close", workId: "wi-004", cwd: "/items/wi-004" },
+    { operation: "commit", cwd: "/items/wi-004" },
+    { operation: "integration", item },
+  ]);
+});
+
+test("fails closed without committing or integrating when close throws or returns an invalid acknowledgement", async () => {
+  const item = { id: "wi-004", worktree: "/items/wi-004" };
+  const implementer = { identity: "implementer", context: "implementation-context" };
+
+  for (const close of [
+    async () => { throw new Error("DV close failed"); },
+    async () => ({ schemaVersion: "task-close/v1", id: item.id, status: "ready", lifecycle: "active" }),
+  ]) {
+    const calls = [];
+    const coordinator = createReviewRemediationCoordinator({
+      review: {
+        request: async () => ({
+          verdict: "approved",
+          reviewer: { identity: "reviewer", context: "review-context" },
+        }),
+      },
+      dv: {
+        close: async ({ workId, cwd }) => {
+          calls.push({ operation: "close", workId, cwd });
+          return close();
+        },
+      },
+      workspace: {
+        commitTracked: async () => calls.push({ operation: "commit" }),
+      },
+      integration: {
+        deliver: async () => calls.push({ operation: "integration" }),
+      },
+    });
+
+    await assert.rejects(coordinator.review({ item, implementer }), /close|closed|DV/i);
+    assert.deepEqual(calls, [{ operation: "close", workId: "wi-004", cwd: "/items/wi-004" }]);
+  }
+});
+
 test("fails closed without closing or integrating for non-independent or malformed reviewer verdicts", async () => {
   const calls = [];
   const implementer = { identity: "implementer", context: "implementation-context" };
