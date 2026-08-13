@@ -4,9 +4,11 @@ title: Implement isolated worktree lifecycle and CAS-protected integration
 type: work-item
 subtype: story
 lifecycle: active
-status: ready
-status_reason: recoverable
+status: completed
+status_reason: completed
 priority: high
+actual: 1
+completed_date: '2026-08-13'
 links:
   depends_on:
     - '[[001-dv-contract-and-ready-selection]]'
@@ -55,3 +57,5 @@ Concurrent item work must never overwrite target-branch progress. Workspace comm
 
 [[001-dv-contract-and-ready-selection]]
 [[002-node-acceptance-discovery-and-affected-workspaces]]
+
+- 2026-08-13: Closed as completed with evidence in backlog/audit/auditing-backlog-report.json.
