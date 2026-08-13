@@ -256,12 +256,12 @@ test("requires an explicit committed true result before integrating an approved 
 });
 
 test("fails closed without committing or integrating when close throws or returns an invalid acknowledgement", async () => {
-  const item = { id: "wi-004", worktree: "/items/wi-004" };
+  const item = { itemId: "wi-004", worktree: "/items/wi-004" };
   const implementer = { identity: "implementer", context: "implementation-context" };
 
   for (const close of [
     async () => { throw new Error("DV close failed"); },
-    async () => ({ schemaVersion: "task-close/v1", id: item.id, status: "ready", lifecycle: "active" }),
+    async () => ({ schemaVersion: "task-close/v1", id: item.itemId, status: "ready", lifecycle: "active" }),
   ]) {
     const calls = [];
     const coordinator = createReviewRemediationCoordinator({
@@ -289,6 +289,59 @@ test("fails closed without committing or integrating when close throws or return
     assert.deepEqual(result, { status: "paused" });
     assert.deepEqual(calls, [{ operation: "close", workId: "wi-004", cwd: "/items/wi-004" }]);
   }
+});
+
+test("remediates changes-requested findings before each fresh review, uses two default cycles, and pauses only repeated canonical findings for the same item", async () => {
+  const calls = [];
+  const finding = { path: "src/widget.js", line: 17, message: "Handle the missing widget ID." };
+  const resultsByItem = new Map([
+    ["wi-004", [
+      { verdict: "changes-requested", findings: [finding] },
+      { verdict: "changes-requested", findings: [{ ...finding }] },
+    ]],
+    ["wi-005", [
+      { verdict: "changes-requested", findings: [finding] },
+      { verdict: "changes-requested", findings: [{ path: "src/widget.js", line: 18, message: "Handle the missing widget ID." }] },
+      { verdict: "changes-requested", findings: [{ path: "src/widget.js", line: 19, message: "Handle the missing widget ID." }] },
+    ]],
+  ]);
+  const coordinator = createReviewRemediationCoordinator({
+    review: {
+      request: async ({ item }) => {
+        calls.push(`review:${item.itemId}`);
+        return {
+          ...resultsByItem.get(item.itemId).shift(),
+          reviewer: { identity: "reviewer", context: "review-context" },
+        };
+      },
+    },
+    acceptance: {
+      execute: async ({ item }) => calls.push(`acceptance:${item.itemId}`),
+    },
+    dv: { close: async () => calls.push("dv-close") },
+    workspace: { commitTracked: async () => calls.push("commit") },
+    integration: { deliver: async () => calls.push("integration") },
+  });
+  const implementer = { identity: "implementer", context: "implementation-context" };
+
+  assert.deepEqual(
+    await coordinator.review({ item: { itemId: "wi-004" }, implementer }),
+    { status: "paused" },
+  );
+  assert.deepEqual(
+    await coordinator.review({ item: { itemId: "wi-005" }, implementer }),
+    { status: "paused" },
+  );
+  assert.deepEqual(calls, [
+    "review:wi-004",
+    "acceptance:wi-004",
+    "review:wi-004",
+    "review:wi-005",
+    "acceptance:wi-005",
+    "review:wi-005",
+    "acceptance:wi-005",
+    "review:wi-005",
+  ]);
 });
 
 test("fails closed without closing or integrating for non-independent or malformed reviewer verdicts", async () => {
