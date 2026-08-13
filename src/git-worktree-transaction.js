@@ -85,11 +85,22 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
     if (!["merge-commit", "squash", "rebase"].includes(strategy)) throw new TypeError("unknown integration strategy");
   }
 
+  async function actionOutcome(event, result, error) {
+    await record({ type: "delivery-action-outcome", ...event, result, ...(error ? { error: error.message } : {}) });
+  }
+
   async function cleanup(item, integrationWorktree) {
-    await guardBefore({ action: "cleanup", category: "integration", itemId: item.itemId, itemWorktree: item.worktree, integrationWorktree });
-    await run(["worktree", "remove", "--force", integrationWorktree], item.repositoryRoot);
-    await run(["worktree", "remove", "--force", item.worktree], item.repositoryRoot);
-    await run(["branch", "-D", item.branch], item.repositoryRoot);
+    const event = { action: "cleanup", category: "integration", itemId: item.itemId, itemWorktree: item.worktree, integrationWorktree };
+    await guardBefore(event);
+    try {
+      await run(["worktree", "remove", "--force", integrationWorktree], item.repositoryRoot);
+      await run(["worktree", "remove", "--force", item.worktree], item.repositoryRoot);
+      await run(["branch", "-D", item.branch], item.repositoryRoot);
+    } catch (error) {
+      await actionOutcome(event, "failed", error);
+      throw error;
+    }
+    await actionOutcome(event, "succeeded");
   }
 
   function failure(item, worktree, strategy, phase, error) {
@@ -97,28 +108,47 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
   }
 
   async function createCandidate(item, strategy, worktree) {
+    let activeEffect;
     try {
       const start = strategy === "rebase" ? item.branch : item.targetBaseSha;
-      await record({ type: "delivery-integration-worktree-created", category: "integration", action: "integration-worktree-create", itemId: item.itemId, strategy, worktree, start });
+      const create = { category: "integration", action: "integration-worktree-create", itemId: item.itemId, strategy, worktree, start };
+      activeEffect = create;
+      await record({ type: "delivery-integration-worktree-intent", ...create });
       await run(["worktree", "add", "--detach", worktree, start], item.repositoryRoot);
+      await actionOutcome(create, "succeeded");
     } catch (error) {
+      if (activeEffect) await actionOutcome(activeEffect, "failed", error);
       await record(failure(item, worktree, strategy, "provisioning", error));
       return { status: "failed", itemWorktree: item.worktree, integrationWorktree: worktree };
     }
     try {
+      activeEffect = undefined;
       if (strategy === "merge-commit") {
-        await record({ type: "delivery-integration-strategy", category: "integration", action: "merge", itemId: item.itemId, strategy, worktree, branch: item.branch });
+        const merge = { category: "integration", action: "merge", itemId: item.itemId, strategy, worktree, branch: item.branch };
+        activeEffect = merge;
+        await record({ type: "delivery-integration-strategy-intent", ...merge });
         await run(["merge", "--no-ff", "--no-edit", item.branch], worktree);
+        await actionOutcome(merge, "succeeded");
       } else if (strategy === "squash") {
-        await record({ type: "delivery-integration-strategy", category: "integration", action: "squash", itemId: item.itemId, strategy, worktree, branch: item.branch });
+        const squash = { category: "integration", action: "squash", itemId: item.itemId, strategy, worktree, branch: item.branch };
+        activeEffect = squash;
+        await record({ type: "delivery-integration-strategy-intent", ...squash });
         await run(["merge", "--squash", item.branch], worktree);
-        await record({ type: "delivery-integration-commit", category: "commit", action: "squash-commit", itemId: item.itemId, strategy, worktree });
+        await actionOutcome(squash, "succeeded");
+        const commit = { category: "commit", action: "squash-commit", itemId: item.itemId, strategy, worktree };
+        activeEffect = commit;
+        await record({ type: "delivery-integration-commit-intent", ...commit });
         await run(["commit", "--no-edit", "-m", `Integrate ${item.itemId}`], worktree);
+        await actionOutcome(commit, "succeeded");
       } else {
-        await record({ type: "delivery-integration-strategy", category: "integration", action: "rebase", itemId: item.itemId, strategy, worktree, targetBranch: item.targetBranch });
+        const rebase = { category: "integration", action: "rebase", itemId: item.itemId, strategy, worktree, targetBranch: item.targetBranch };
+        activeEffect = rebase;
+        await record({ type: "delivery-integration-strategy-intent", ...rebase });
         await run(["rebase", item.targetBranch], worktree);
+        await actionOutcome(rebase, "succeeded");
       }
     } catch (error) {
+      if (activeEffect) await actionOutcome(activeEffect, "failed", error);
       const unmergedPaths = await run(["diff", "--name-only", "--diff-filter=U"], worktree).catch(() => "");
       if (unmergedPaths) {
         await record({ type: "delivery-conflict", itemId: item.itemId, targetBranch: item.targetBranch, targetBaseSha: item.targetBaseSha, itemWorktree: item.worktree, integrationWorktree: worktree, strategy, phase: "integration", error: error.message });
@@ -129,9 +159,13 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
     }
     let checksPassed;
     try {
-      await record({ type: "delivery-root-acceptance", category: "command", action: "root-acceptance", itemId: item.itemId, strategy, worktree });
+      const rootAcceptance = { category: "command", action: "root-acceptance", itemId: item.itemId, strategy, worktree };
+      activeEffect = rootAcceptance;
+      await record({ type: "delivery-root-acceptance-intent", ...rootAcceptance });
       checksPassed = await acceptance.run({ candidate: "integration", repositoryRoot: item.repositoryRoot, worktree, item, strategy });
+      await actionOutcome(rootAcceptance, checksPassed ? "succeeded" : "failed");
     } catch (error) {
+      if (activeEffect) await actionOutcome(activeEffect, "failed", error);
       await record(failure(item, worktree, strategy, "acceptance", error));
       return { status: "failed", itemWorktree: item.worktree, integrationWorktree: worktree };
     }
@@ -141,7 +175,7 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
     }
     const candidateSha = await run(["rev-parse", "HEAD"], worktree);
     if (!validSha(candidateSha)) throw new Error("integration candidate did not produce a Git SHA");
-    await record({ type: "delivery-candidate-created", category: "integration", action: "candidate-sha", itemId: item.itemId, strategy, worktree, candidateSha });
+    await actionOutcome({ category: "integration", action: "candidate-sha", itemId: item.itemId, strategy, worktree, candidateSha }, "succeeded");
     return { status: "candidate", candidateSha, worktree };
   }
 
@@ -201,9 +235,12 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance, 
     }
 
     try {
-      await guardBefore({ action: "cas-publication", category: "integration", itemId: item.itemId, targetBranch: item.targetBranch, expectedBaseSha: item.targetBaseSha, candidateSha, itemWorktree: item.worktree, integrationWorktree: worktree });
+      const cas = { action: "cas-publication", category: "integration", itemId: item.itemId, targetBranch: item.targetBranch, expectedBaseSha: item.targetBaseSha, candidateSha, itemWorktree: item.worktree, integrationWorktree: worktree };
+      await guardBefore(cas);
       await run(["update-ref", `refs/heads/${item.targetBranch}`, candidateSha, item.targetBaseSha], item.repositoryRoot);
+      await actionOutcome(cas, "succeeded");
     } catch (error) {
+      await actionOutcome({ action: "cas-publication", category: "integration", itemId: item.itemId, targetBranch: item.targetBranch, expectedBaseSha: item.targetBaseSha, candidateSha, itemWorktree: item.worktree, integrationWorktree: worktree }, "failed", error).catch(() => {});
       let currentTargetSha;
       try {
         currentTargetSha = await run(["rev-parse", "--verify", `refs/heads/${item.targetBranch}`], item.repositoryRoot);

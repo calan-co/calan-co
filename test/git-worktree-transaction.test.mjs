@@ -93,7 +93,7 @@ test("journals all successful inner integration effects with typed records", asy
   const { events, transaction } = createHarness();
   const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
   await transaction.deliver({ item });
-  for (const type of ["delivery-integration-worktree-created", "delivery-integration-strategy", "delivery-root-acceptance", "delivery-candidate-created", "delivery-publication-intent", "delivery-action-intent", "delivery-published"]) {
+  for (const type of ["delivery-integration-worktree-intent", "delivery-integration-strategy-intent", "delivery-root-acceptance-intent", "delivery-publication-intent", "delivery-action-intent", "delivery-action-outcome", "delivery-published"]) {
     assert.ok(events.some((event) => event.type === type), type);
   }
   assert.ok(events.some((event) => event.action === "cas-publication"));
@@ -138,6 +138,32 @@ test("fails closed for detached or unknown explicit target branches", async () =
   );
 });
 
+test("records durable cleanup outcome after success and failure", async (t) => {
+  await t.test("successful cleanup follows its intent with a success outcome", async () => {
+    const { events, transaction } = createHarness();
+    const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+    await transaction.deliver({ item });
+    const intent = events.findIndex((event) => event.type === "delivery-action-intent" && event.action === "cleanup");
+    const outcome = events.findIndex((event) => event.type === "delivery-action-outcome" && event.action === "cleanup" && event.result === "succeeded");
+    assert.ok(intent >= 0 && outcome > intent);
+  });
+  await t.test("cleanup failure appends a failure outcome for reconstruction", async () => {
+    const { events, transaction } = createHarness({ cleanupFails: true });
+    const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+    await transaction.deliver({ item });
+    assert.ok(events.some((event) => event.type === "delivery-action-outcome" && event.action === "cleanup" && event.result === "failed"));
+  });
+});
+
+test("successful candidate effects append outcomes after each completed effect", async () => {
+  const { events, transaction } = createHarness();
+  const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+  await transaction.deliver({ item });
+  for (const action of ["integration-worktree-create", "merge", "root-acceptance", "candidate-sha"]) {
+    assert.ok(events.some((event) => event.type === "delivery-action-outcome" && event.action === action && event.result === "succeeded"), action);
+  }
+});
+
 test("runs merge-commit integration checks in a temporary worktree and only then CAS-publishes", async () => {
   const { calls, events, acceptanceCalls, transaction } = createHarness();
   const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
@@ -160,7 +186,7 @@ test("runs merge-commit integration checks in a temporary worktree and only then
     ["branch", "-D", "items/003"],
   ]);
   assert.ok(events.some((event) => event.type === "delivery-published"));
-  assert.equal(events.at(-1).type, "delivery-action-intent");
+  assert.equal(events.at(-1).type, "delivery-action-outcome");
 });
 
 test("preserves item and integration worktrees with recovery evidence after conflict, failed checks, or stale CAS", async () => {
