@@ -60,23 +60,35 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance }
     return item;
   }
 
+  function assertItem(item) {
+    if (!item || typeof item !== "object") throw new TypeError("item worktree evidence is required");
+    for (const key of ["itemId", "repositoryRoot", "targetBranch", "targetBaseSha", "branch", "worktree"]) requireString(item[key], `item.${key}`);
+    if (!validSha(item.targetBaseSha)) throw new TypeError("item.targetBaseSha must be a Git SHA");
+  }
+
+  function assertStrategy(strategy) {
+    if (!["merge-commit", "squash", "rebase"].includes(strategy)) throw new TypeError("unknown integration strategy");
+  }
+
   async function cleanup(item, integrationWorktree) {
     await run(["worktree", "remove", "--force", integrationWorktree], item.repositoryRoot);
     await run(["worktree", "remove", "--force", item.worktree], item.repositoryRoot);
     await run(["branch", "-D", item.branch], item.repositoryRoot);
   }
 
-  async function deliver({ item, strategy = "merge-commit" } = {}) {
-    if (!item || typeof item !== "object") throw new TypeError("item worktree evidence is required");
-    for (const key of ["itemId", "repositoryRoot", "targetBranch", "targetBaseSha", "branch", "worktree"]) requireString(item[key], `item.${key}`);
-    if (!validSha(item.targetBaseSha)) throw new TypeError("item.targetBaseSha must be a Git SHA");
-    if (!["merge-commit", "squash", "rebase"].includes(strategy)) throw new TypeError("unknown integration strategy");
-    const location = await paths.integration({ itemId: item.itemId, item, strategy });
-    const worktree = requireString(location?.worktree, "integration worktree");
+  function failure(item, worktree, strategy, phase, error) {
+    return { type: "delivery-failed", itemId: item.itemId, targetBranch: item.targetBranch, targetBaseSha: item.targetBaseSha, itemWorktree: item.worktree, integrationWorktree: worktree, strategy, phase, ...(error ? { error: error.message } : {}) };
+  }
 
+  async function createCandidate(item, strategy, worktree) {
     try {
       const start = strategy === "rebase" ? item.branch : item.targetBaseSha;
       await run(["worktree", "add", "--detach", worktree, start], item.repositoryRoot);
+    } catch (error) {
+      await record(failure(item, worktree, strategy, "provisioning", error));
+      return { status: "failed", itemWorktree: item.worktree, integrationWorktree: worktree };
+    }
+    try {
       if (strategy === "merge-commit") {
         await run(["merge", "--no-ff", "--no-edit", item.branch], worktree);
       } else if (strategy === "squash") {
@@ -86,35 +98,117 @@ export function createGitWorktreeTransaction({ git, journal, paths, acceptance }
         await run(["rebase", item.targetBranch], worktree);
       }
     } catch (error) {
-      await record({ type: "delivery-conflict", itemId: item.itemId, targetBranch: item.targetBranch, targetBaseSha: item.targetBaseSha, itemWorktree: item.worktree, integrationWorktree: worktree, strategy, error: error.message });
-      return { status: "conflict", itemWorktree: item.worktree, integrationWorktree: worktree };
+      const unmergedPaths = await run(["diff", "--name-only", "--diff-filter=U"], worktree).catch(() => "");
+      if (unmergedPaths) {
+        await record({ type: "delivery-conflict", itemId: item.itemId, targetBranch: item.targetBranch, targetBaseSha: item.targetBaseSha, itemWorktree: item.worktree, integrationWorktree: worktree, strategy, phase: "integration", error: error.message });
+        return { status: "conflict", itemWorktree: item.worktree, integrationWorktree: worktree };
+      }
+      await record(failure(item, worktree, strategy, "integration", error));
+      return { status: "failed", itemWorktree: item.worktree, integrationWorktree: worktree };
     }
-
     let checksPassed;
     try {
       checksPassed = await acceptance.run({ candidate: "integration", repositoryRoot: item.repositoryRoot, worktree, item, strategy });
     } catch (error) {
-      await record({ type: "delivery-failed", itemId: item.itemId, targetBranch: item.targetBranch, targetBaseSha: item.targetBaseSha, itemWorktree: item.worktree, integrationWorktree: worktree, strategy, error: error.message });
+      await record(failure(item, worktree, strategy, "acceptance", error));
       return { status: "failed", itemWorktree: item.worktree, integrationWorktree: worktree };
     }
     if (!checksPassed) {
-      await record({ type: "delivery-failed", itemId: item.itemId, targetBranch: item.targetBranch, targetBaseSha: item.targetBaseSha, itemWorktree: item.worktree, integrationWorktree: worktree, strategy });
+      await record(failure(item, worktree, strategy, "acceptance"));
       return { status: "failed", itemWorktree: item.worktree, integrationWorktree: worktree };
     }
-
     const candidateSha = await run(["rev-parse", "HEAD"], worktree);
     if (!validSha(candidateSha)) throw new Error("integration candidate did not produce a Git SHA");
+    return { status: "candidate", candidateSha, worktree };
+  }
+
+  function staleResult(item, worktree, strategy, candidateSha) {
+    return {
+      status: "stale",
+      itemWorktree: item.worktree,
+      integrationWorktree: worktree,
+      candidateSha,
+      recovery: {
+        action: "refreshStale",
+        required: ["refresh-at-current-target", "root-acceptance", "independent-review", "explicit-retry"],
+        item,
+        strategy,
+        attempt: 0,
+      },
+    };
+  }
+
+  async function publish(item, worktree, strategy, candidateSha) {
     try {
       await run(["update-ref", `refs/heads/${item.targetBranch}`, candidateSha, item.targetBaseSha], item.repositoryRoot);
     } catch (error) {
       await record({ type: "delivery-stale", itemId: item.itemId, targetBranch: item.targetBranch, targetBaseSha: item.targetBaseSha, candidateSha, itemWorktree: item.worktree, integrationWorktree: worktree, strategy, error: error.message });
-      return { status: "stale", itemWorktree: item.worktree, integrationWorktree: worktree, candidateSha };
+      return staleResult(item, worktree, strategy, candidateSha);
     }
 
-    await cleanup(item, worktree);
-    await record({ type: "delivery-published", itemId: item.itemId, targetBranch: item.targetBranch, expectedBaseSha: item.targetBaseSha, publishedSha: candidateSha, strategy });
+    const published = { type: "delivery-published", itemId: item.itemId, targetBranch: item.targetBranch, expectedBaseSha: item.targetBaseSha, publishedSha: candidateSha, strategy };
+    let journalError;
+    try { await record(published); } catch (error) { journalError = error; }
+    let cleanupError;
+    try { await cleanup(item, worktree); } catch (error) { cleanupError = error; }
+    if (journalError || cleanupError) {
+      const recovery = {
+        targetAlreadyPublished: true,
+        cleanupRequired: true,
+        itemWorktree: item.worktree,
+        integrationWorktree: worktree,
+        ...(journalError ? { publicationJournalError: journalError.message } : {}),
+        ...(cleanupError ? { cleanupError: cleanupError.message } : {}),
+      };
+      try {
+        await record({ type: "delivery-published-but-cleanup-failed", ...published, recovery });
+      } catch (recoveryJournalError) {
+        recovery.recoveryJournalError = recoveryJournalError.message;
+      }
+      return { status: "published-but-cleanup-failed", targetBranch: item.targetBranch, publishedSha: candidateSha, recovery };
+    }
     return { status: "delivered", targetBranch: item.targetBranch, publishedSha: candidateSha };
   }
 
-  return Object.freeze({ prepareItem, deliver });
+  async function deliver({ item, strategy = "merge-commit" } = {}) {
+    assertItem(item);
+    assertStrategy(strategy);
+    const location = await paths.integration({ itemId: item.itemId, item, strategy, attempt: 0 });
+    const worktree = requireString(location?.worktree, "integration worktree");
+    const candidate = await createCandidate(item, strategy, worktree);
+    if (candidate.status !== "candidate") return candidate;
+    return publish(item, worktree, strategy, candidate.candidateSha);
+  }
+
+  async function refreshStale({ stale } = {}) {
+    if (!stale || stale.status !== "stale" || !stale.recovery) throw new TypeError("stale recovery evidence is required");
+    const { item: priorItem, strategy, attempt } = stale.recovery;
+    assertItem(priorItem);
+    assertStrategy(strategy);
+    const targetBaseSha = await run(["rev-parse", "--verify", `refs/heads/${priorItem.targetBranch}`], priorItem.repositoryRoot);
+    if (!validSha(targetBaseSha)) throw new Error(`Unknown target branch: ${priorItem.targetBranch}`);
+    const item = { ...priorItem, targetBaseSha };
+    const nextAttempt = attempt + 1;
+    const location = await paths.integration({ itemId: item.itemId, item, strategy, attempt: nextAttempt });
+    const worktree = requireString(location?.worktree, "integration worktree");
+    const candidate = await createCandidate(item, strategy, worktree);
+    if (candidate.status !== "candidate") return candidate;
+    return {
+      status: "refreshed",
+      item,
+      candidateSha: candidate.candidateSha,
+      integrationWorktree: worktree,
+      recovery: { action: "retryStale", required: ["fresh-independent-review", "explicit-retry"], strategy, attempt: nextAttempt },
+    };
+  }
+
+  async function retryStale({ refreshed, independentReview } = {}) {
+    if (!refreshed || refreshed.status !== "refreshed") throw new TypeError("refreshed stale evidence is required");
+    if (!independentReview || independentReview.approved !== true || independentReview.candidateSha !== refreshed.candidateSha) {
+      throw new TypeError("fresh independent review approval for this candidate is required");
+    }
+    return publish(refreshed.item, refreshed.integrationWorktree, refreshed.recovery.strategy, refreshed.candidateSha);
+  }
+
+  return Object.freeze({ prepareItem, deliver, refreshStale, retryStale });
 }

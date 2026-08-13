@@ -1,15 +1,33 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { createGitWorktreeTransaction } from "../src/git-worktree-transaction.js";
 
-function createHarness({ branch = "main", casFails = false, mergeFails = false, checksPass = true, checksThrow = false } = {}) {
+function createHarness({
+  branch = "main",
+  casFails = false,
+  casFailures = casFails ? Infinity : 0,
+  mergeFails = false,
+  mergeOperationalFails = false,
+  integrationProvisionFails = false,
+  cleanupFails = false,
+  checksPass = true,
+  checksThrow = false,
+  journalFails = false,
+} = {}) {
   const calls = [];
   const events = [];
   const acceptanceCalls = [];
+  let remainingCasFailures = casFailures;
   const git = async ({ args, cwd }) => {
     calls.push({ args, cwd });
     const command = args.join(" ");
+    if (command.startsWith("worktree add --detach") && integrationProvisionFails) throw new Error("disk unavailable");
+    if (command.startsWith("worktree remove") && cleanupFails) throw new Error("cleanup unavailable");
     if (command === "rev-parse --show-toplevel") return "/repo\n";
     if (command === "symbolic-ref --quiet --short HEAD") {
       if (!branch) throw new Error("detached HEAD");
@@ -18,13 +36,24 @@ function createHarness({ branch = "main", casFails = false, mergeFails = false, 
     if (command.startsWith("check-ref-format --branch ")) return `${args.at(-1)}\n`;
     if (command === "rev-parse --verify refs/heads/main") return "aaaaaaaa\n";
     if (command === "rev-parse HEAD") return "bbbbbbbb\n";
-    if (command.startsWith("merge ") && mergeFails) throw new Error("merge conflict");
-    if (command.startsWith("update-ref ") && casFails) throw new Error("cannot lock ref");
+    if (command === "diff --name-only --diff-filter=U") return mergeFails ? "conflicted-file\n" : "";
+    if (command.startsWith("merge ") && (mergeFails || mergeOperationalFails)) {
+      const error = new Error(mergeFails ? "merge conflict" : "merge could not read object");
+      error.exitCode = 1;
+      throw error;
+    }
+    if (command.startsWith("update-ref ") && remainingCasFailures > 0) {
+      remainingCasFailures -= 1;
+      throw new Error("cannot lock ref");
+    }
     return "";
   };
   const transaction = createGitWorktreeTransaction({
     git,
-    journal: { append: async (event) => events.push(event) },
+    journal: { append: async (event) => {
+      if (journalFails && event.type === "delivery-published") throw new Error("journal unavailable");
+      events.push(event);
+    } },
     paths: {
       item: ({ itemId }) => ({ branch: `items/${itemId}`, worktree: `/items/${itemId}` }),
       integration: ({ itemId }) => ({ worktree: `/integration/${itemId}` }),
@@ -128,5 +157,192 @@ test("uses explicit target overrides and supports squash and rebase strategies",
     await transaction.deliver({ item, strategy });
     const commands = calls.map(({ args }) => args.join(" "));
     assert.ok(commands.includes(strategy === "squash" ? "merge --squash items/003" : "rebase main"), strategy);
+  }
+});
+
+test("returns an explicit stale recovery contract rather than publishing a stale candidate", async () => {
+  const { calls, transaction } = createHarness({ casFails: true });
+  const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+
+  const result = await transaction.deliver({ item });
+
+  assert.equal(result.status, "stale");
+  assert.equal(result.recovery.action, "refreshStale");
+  assert.deepEqual(result.recovery.required, ["refresh-at-current-target", "root-acceptance", "independent-review", "explicit-retry"]);
+  assert.equal(calls.filter(({ args }) => args[0] === "update-ref").length, 1);
+  assert.equal(typeof transaction.refreshStale, "function");
+  assert.equal(typeof transaction.retryStale, "function");
+});
+
+test("refreshes stale candidates through root acceptance and gates retry on fresh independent review", async () => {
+  const { acceptanceCalls, transaction } = createHarness({ casFailures: 1 });
+  const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+  const stale = await transaction.deliver({ item });
+
+  const refreshed = await transaction.refreshStale({ stale });
+
+  assert.equal(refreshed.status, "refreshed");
+  assert.equal(acceptanceCalls.length, 2);
+  await assert.rejects(transaction.retryStale({ refreshed }), /independent review/);
+  const result = await transaction.retryStale({
+    refreshed,
+    independentReview: { approved: true, candidateSha: refreshed.candidateSha },
+  });
+  assert.equal(result.status, "delivered");
+});
+
+test("turns post-publication cleanup and journal failures into inspectable recovery states", async () => {
+  for (const [name, options] of [
+    ["cleanup", { cleanupFails: true }],
+    ["publication journal", { journalFails: true }],
+  ]) {
+    const { calls, events, transaction } = createHarness(options);
+    const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+
+    const result = await transaction.deliver({ item });
+
+    assert.equal(result.status, "published-but-cleanup-failed", name);
+    assert.equal(result.recovery.targetAlreadyPublished, true, name);
+    assert.equal(result.recovery.cleanupRequired, true, name);
+    assert.equal(result.recovery.itemWorktree, item.worktree, name);
+    assert.equal(calls.some(({ args }) => args[0] === "update-ref"), true, name);
+    assert.ok(events.some((event) => event.type === "delivery-published" || event.type === "delivery-published-but-cleanup-failed") || result.recovery.publicationJournalError, name);
+  }
+});
+
+test("reports worktree provisioning failures separately from integration conflicts", async () => {
+  const provisioned = createHarness({ integrationProvisionFails: true });
+  const item = await provisioned.transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+  const provisionResult = await provisioned.transaction.deliver({ item });
+  assert.equal(provisionResult.status, "failed");
+  assert.equal(provisioned.events.at(-1).phase, "provisioning");
+
+  const conflicting = createHarness({ mergeFails: true });
+  const conflictItem = await conflicting.transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+  const conflictResult = await conflicting.transaction.deliver({ item: conflictItem });
+  assert.equal(conflictResult.status, "conflict");
+  assert.equal(conflicting.events.at(-1).phase, "integration");
+});
+
+test("treats an integration command error without unmerged paths as an operational failure", async () => {
+  const { events, transaction } = createHarness({ mergeOperationalFails: true });
+  const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+
+  const result = await transaction.deliver({ item });
+
+  assert.equal(result.status, "failed");
+  assert.equal(events.at(-1).type, "delivery-failed");
+  assert.equal(events.at(-1).phase, "integration");
+});
+
+function gitIn(cwd, args) {
+  return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+}
+
+function temporaryRepository() {
+  const root = mkdtempSync(join(tmpdir(), "git-worktree-transaction-"));
+  gitIn(root, ["init", "--initial-branch=main"]);
+  gitIn(root, ["config", "user.email", "test@example.invalid"]);
+  gitIn(root, ["config", "user.name", "Transaction Test"]);
+  writeFileSync(join(root, "README.md"), "base\n");
+  gitIn(root, ["add", "README.md"]);
+  gitIn(root, ["commit", "-m", "base"]);
+  return root;
+}
+
+function realTransaction(root, { acceptance = async () => true, beforeUpdateRef } = {}) {
+  const events = [];
+  const git = async ({ args, cwd }) => {
+    if (args[0] === "update-ref" && beforeUpdateRef) await beforeUpdateRef();
+    try {
+      return gitIn(cwd, args);
+    } catch (cause) {
+      const error = new Error(cause.stderr?.toString() || cause.message);
+      error.exitCode = cause.status;
+      throw error;
+    }
+  };
+  const transaction = createGitWorktreeTransaction({
+    git,
+    journal: { append: async (event) => events.push(event) },
+    paths: {
+      item: ({ itemId }) => ({ branch: `items/${itemId}`, worktree: join(root, `.item-${itemId}`) }),
+      integration: ({ itemId, attempt = 0 }) => ({ worktree: join(root, `.integration-${itemId}-${attempt}`) }),
+    },
+    acceptance: { run: acceptance },
+  });
+  return { events, transaction };
+}
+
+function commitItemChange(item) {
+  writeFileSync(join(item.worktree, "item.txt"), "item\n");
+  gitIn(item.worktree, ["add", "item.txt"]);
+  gitIn(item.worktree, ["commit", "-m", "item change"]);
+}
+
+test("real Git root-check failure leaves target unchanged and retains both worktrees", async () => {
+  const root = temporaryRepository();
+  try {
+    const { transaction } = realTransaction(root, { acceptance: async () => false });
+    const item = await transaction.prepareItem({ itemId: "003", cwd: root });
+    commitItemChange(item);
+    const before = gitIn(root, ["rev-parse", "main"]);
+
+    const result = await transaction.deliver({ item });
+
+    assert.equal(result.status, "failed");
+    assert.equal(gitIn(root, ["rev-parse", "main"]), before);
+    assert.equal(existsSync(item.worktree), true);
+    assert.equal(existsSync(join(root, ".integration-003-0")), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("real Git CAS race retains competing target and both recovery worktrees", async () => {
+  const root = temporaryRepository();
+  let raced = false;
+  try {
+    const { transaction } = realTransaction(root, {
+      beforeUpdateRef: async () => {
+        if (raced) return;
+        raced = true;
+        writeFileSync(join(root, "race.txt"), "competing\n");
+        gitIn(root, ["add", "race.txt"]);
+        gitIn(root, ["commit", "-m", "competing target advance"]);
+      },
+    });
+    const item = await transaction.prepareItem({ itemId: "003", cwd: root });
+    commitItemChange(item);
+
+    const result = await transaction.deliver({ item });
+
+    assert.equal(result.status, "stale");
+    assert.equal(gitIn(root, ["rev-parse", "main"]), gitIn(root, ["rev-parse", "HEAD"]));
+    assert.match(gitIn(root, ["log", "-1", "--format=%s", "main"]), /competing target advance/);
+    assert.equal(existsSync(item.worktree), true);
+    assert.equal(existsSync(join(root, ".integration-003-0")), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("real Git executes and publishes merge-commit, squash, and rebase candidates", async () => {
+  for (const strategy of ["merge-commit", "squash", "rebase"]) {
+    const root = temporaryRepository();
+    try {
+      const { transaction } = realTransaction(root);
+      const item = await transaction.prepareItem({ itemId: "003", cwd: root });
+      commitItemChange(item);
+
+      const result = await transaction.deliver({ item, strategy });
+
+      assert.equal(result.status, "delivered", strategy);
+      assert.match(gitIn(root, ["show", "main:item.txt"]), /item/, strategy);
+      if (strategy === "merge-commit") assert.equal(gitIn(root, ["rev-list", "--parents", "-n", "1", "main"]).split(" ").length, 3, strategy);
+      if (strategy === "squash") assert.match(gitIn(root, ["log", "-1", "--format=%s", "main"]), /Integrate 003/, strategy);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
