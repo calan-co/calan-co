@@ -76,8 +76,12 @@ export function createReviewRemediationCoordinator({
           findingFingerprintsByItem.set(key, persistedFingerprints);
 
           if (completedCycles >= remediationCycles) return { status: "paused" };
+          if (typeof implementer?.remediate !== "function") return { status: "paused" };
           try {
-            if (await acceptance.execute({ item }) === false) return { status: "paused" };
+            if (await implementer.remediate({ item, findings: result.findings }) === false) {
+              return { status: "paused" };
+            }
+            if (!isPassedAcceptance(await acceptance.execute({ item }))) return { status: "paused" };
           } catch {
             return { status: "paused" };
           }
@@ -173,6 +177,17 @@ function isIndependentReviewer(reviewer, implementer) {
     implementerContext !== "" &&
     reviewerIdentity !== implementerIdentity &&
     reviewerContext !== implementerContext
+  );
+}
+
+function isPassedAcceptance(result) {
+  return (
+    result !== null &&
+    typeof result === "object" &&
+    !Array.isArray(result) &&
+    Object.hasOwn(result, "passed") &&
+    result.passed === true &&
+    Reflect.ownKeys(result).length === 1
   );
 }
 
