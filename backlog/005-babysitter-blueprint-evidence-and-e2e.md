@@ -4,14 +4,19 @@ title: Package the Babysitter blueprint with durable evidence and end-to-end tes
 type: work-item
 subtype: story
 lifecycle: active
-status: ready
+status: completed
+status_reason: completed
 priority: high
+completed_date: '2026-08-17'
 links:
   depends_on:
     - '[[001-dv-contract-and-ready-selection]]'
     - '[[002-node-acceptance-discovery-and-affected-workspaces]]'
     - '[[003-isolated-worktrees-and-cas-integration]]'
     - '[[004-review-remediation-and-closure-transaction]]'
+  evidence:
+    - '[[task-record-preflight]]'
+    - '[[record-wi-005-blueprint-validation-and-independent-review]]'
 tags:
   - afk
   - babysitter
@@ -30,12 +35,12 @@ Babysitter supplies the durable journal, shell gates, and approval/process runti
 
 ## Tasks
 
-- [ ] Package the process as a versioned Babysitter blueprint with documented install/run commands.
-- [ ] Implement schema-validated repository override loading and compatibility checks before worktree creation.
-- [ ] Produce input, command, DV, review, diff, commit, integration, and hash evidence artifacts under the run directory.
-- [ ] Verify artifact existence, schema validity, and hashes before any state transition.
-- [ ] Build fixture-driven E2E coverage for success, reviewer remediation, close failure, root-check failure, stale CAS candidate, and merge conflict.
-- [ ] Document stack-neutral adapter seams and the Node-first acceptance adapter limits.
+- [x] Package the process as a versioned Babysitter blueprint with documented install/run commands.
+- [x] Implement schema-validated repository override loading and compatibility checks before worktree creation.
+- [x] Produce input, command, DV, review, diff, commit, integration, and hash evidence artifacts under the run directory.
+- [x] Verify artifact existence, schema validity, and hashes before any state transition.
+- [x] Build fixture-driven E2E coverage for success, reviewer remediation, close failure, root-check failure, stale CAS candidate, and merge conflict.
+- [x] Document stack-neutral adapter seams and the Node-first acceptance adapter limits.
 
 ## Deliverables
 
@@ -46,10 +51,10 @@ Babysitter supplies the durable journal, shell gates, and approval/process runti
 
 ## Acceptance Criteria
 
-- [ ] A run journal and evidence manifest permit independent reconstruction of every decision and side effect.
-- [ ] The process cannot create an item worktree when contract/override compatibility fails.
-- [ ] The E2E success path closes DV only through the reviewed, workspace-local branch transaction and publishes through CAS.
-- [ ] Failure fixtures prove that target branch integrity and preserved item worktrees match the delivery policy.
+- [x] A run journal and evidence manifest permit independent reconstruction of every decision and side effect.
+- [x] The process cannot create an item worktree when contract/override compatibility fails.
+- [x] The E2E success path closes DV only through the reviewed, workspace-local branch transaction and publishes through CAS.
+- [x] Failure fixtures prove that target branch integrity and preserved item worktrees match the delivery policy.
 
 ## Dependencies
 
@@ -57,3 +62,5 @@ Babysitter supplies the durable journal, shell gates, and approval/process runti
 [[002-node-acceptance-discovery-and-affected-workspaces]]
 [[003-isolated-worktrees-and-cas-integration]]
 [[004-review-remediation-and-closure-transaction]]
+
+- 2026-08-17: Closed as completed with evidence in backlog/audit/auditing-backlog-report.json.
