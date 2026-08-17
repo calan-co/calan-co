@@ -15,7 +15,6 @@ links:
     - '[[003-isolated-worktrees-and-cas-integration]]'
     - '[[004-review-remediation-and-closure-transaction]]'
   evidence:
-    - '[[task-record-preflight]]'
     - '[[record-wi-005-blueprint-validation-and-independent-review]]'
 tags:
   - afk
@@ -62,5 +61,3 @@ Babysitter supplies the durable journal, shell gates, and approval/process runti
 [[002-node-acceptance-discovery-and-affected-workspaces]]
 [[003-isolated-worktrees-and-cas-integration]]
 [[004-review-remediation-and-closure-transaction]]
-
-- 2026-08-17: Closed as completed with evidence in backlog/audit/auditing-backlog-report.json.

@@ -10,10 +10,10 @@ status: ready
 status_reason: recorded
 links:
   supporting_reference:
-    - '[[commit:e95688f6bf7881e3f676cd9f3106fd905b534972]]'
-    - '[[*.test.mjs]]'
-    - '[[command:dv backlog validate --dir backlog --fail-on error]]'
-    - '[[command:git diff --check]]'
+    - 'commit:e95688f6bf7881e3f676cd9f3106fd905b534972'
+    - '*.test.mjs'
+    - 'command:dv backlog validate --dir backlog --fail-on error'
+    - 'command:git diff --check'
 ---
 
 ## Recorded At
@@ -47,10 +47,10 @@ At commit e95688f6bf7881e3f676cd9f3106fd905b534972, focused validation passed 95
 
 ## Supporting References
 
-- [[commit:e95688f6bf7881e3f676cd9f3106fd905b534972]]
-- [[*.test.mjs]]
-- [[command:dv backlog validate --dir backlog --fail-on error]]
-- [[command:git diff --check]]
+- commit:e95688f6bf7881e3f676cd9f3106fd905b534972
+- *.test.mjs
+- command:dv backlog validate --dir backlog --fail-on error
+- command:git diff --check
 
 ## Notes
 
