@@ -13,6 +13,36 @@ function successfulReviewPorts() {
   };
 }
 
+test("preserves stale-refresh post-effect uncertainty instead of collapsing it to paused", async () => {
+  const item = { itemId: "wi-004", worktree: "/items/wi-004", changedPaths: ["src/widget.js"] };
+  for (const [name, method] of [["refresh", "refreshStale"], ["acceptance", "execute"], ["review", "request"], ["retry", "retryStale"]]) {
+    let reviewCalls = 0;
+    const coordinator = createReviewRemediationCoordinator({
+      ...successfulReviewPorts(),
+      review: { request: async () => ({ verdict: "approved", reviewer: { identity: "reviewer", context: `review-context-${reviewCalls += 1}` } }) },
+      acceptance: { execute: async () => ({ passed: true }) },
+      dv: { close: async () => ({ schemaVersion: "task-close/v1", id: "wi-004", status: "closed", lifecycle: "closed" }) },
+      workspace: { commitTracked: async () => ({ committed: true }) },
+      integration: {
+        deliver: async () => ({ status: "stale", recovery: { item, strategy: "merge-commit", attempt: 0 } }),
+        refreshStale: async () => ({ status: "refreshed", item, candidateSha: "candidate", integrationWorktree: "/integration", recovery: { strategy: "merge-commit", attempt: 1 } }),
+        retryStale: async () => ({ status: "delivered" }),
+      },
+    });
+    const guards = {
+      reviewRequest: (port) => async (input) => method === "request" ? Promise.reject(Object.assign(new Error(name), { postEffectRecord: true, effect: { action: name } })) : port.request(input),
+      remediate: (port) => port.remediate,
+      affectedAcceptance: (port) => async (input) => method === "execute" ? Promise.reject(Object.assign(new Error(name), { postEffectRecord: true, effect: { action: name } })) : port.execute(input),
+      close: (port) => port.close, closureCommit: (port) => port.commitTracked, integrationDeliver: (port) => port.deliver,
+      integrationRefresh: (port) => async (input) => method === "refreshStale" ? Promise.reject(Object.assign(new Error(name), { postEffectRecord: true, effect: { action: name } })) : port.refreshStale(input),
+      integrationRetry: (port) => async (input) => method === "retryStale" ? Promise.reject(Object.assign(new Error(name), { postEffectRecord: true, effect: { action: name } })) : port.retryStale(input),
+    };
+    const result = await coordinator.review({ item, implementer: { identity: "implementer", context: "implementation-context" }, guards });
+    assert.equal(result.status, "paused-after-side-effect", name);
+    assert.equal(result.recovery.sideEffectMayHaveSucceeded, true, name);
+  }
+});
+
 test("returns a changes-requested review's exact findings without closing or integrating", async () => {
   const calls = [];
   const findings = [

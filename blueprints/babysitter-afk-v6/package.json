@@ -1,0 +1,10 @@
+{
+  "name": "babysitter-afk-doc-vader",
+  "version": "6.0.0",
+  "description": "Babysitter v6 AFK delivery blueprint process",
+  "type": "module",
+  "exports": "./process.mjs",
+  "dependencies": {
+    "@a5c-ai/babysitter-sdk": "^6.0.0"
+  }
+}

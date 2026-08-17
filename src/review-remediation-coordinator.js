@@ -22,8 +22,11 @@ export function createReviewRemediationCoordinator({
     : configuredReviewCycles(reviewConfig);
 
   return {
-    async review({ item, implementer }) {
-      if (remediationCycles === null) return { status: "paused" };
+    async review({ item, implementer, guards, maxReviewCycles: requestedCycles } = {}) {
+      const cycles = requestedCycles === undefined ? remediationCycles : validReviewCycles(requestedCycles);
+      if (cycles === null) return { status: "paused" };
+      const ports = guardedCoordinatorPorts({ guards, review, acceptance, dv, workspace, integration, implementer });
+      if (ports === null) return { status: "paused" };
       if (!await authorizeChangedPaths({ policy, item, globalAllowedPaths, phase: "initial" })) {
         return { status: "paused" };
       }
@@ -32,7 +35,8 @@ export function createReviewRemediationCoordinator({
       let completedCycles = 0;
       const reviewerContexts = new Set();
       while (true) {
-        const result = await review.request({ item, implementer });
+        let result;
+        try { result = await ports.review.request({ item, implementer }); } catch (error) { return postEffectPaused(error, item); }
         if (!isValidReviewResult(result, implementer)) {
           throw new Error("Invalid verdict or non-independent reviewer");
         }
@@ -46,8 +50,10 @@ export function createReviewRemediationCoordinator({
 
         try {
           await journal.append(reviewEvidence(item, result, completedCycles));
-        } catch {
-          return { status: "paused" };
+        } catch (error) {
+          error.postEffectRecord = true;
+          error.effect = { category: "review", action: "review-decision", itemId: itemKey(item), verdict: result.verdict, reviewer: result.reviewer, cycle: completedCycles };
+          return postEffectPaused(error, item);
         }
 
         if (result.verdict === "blocked") {
@@ -75,18 +81,18 @@ export function createReviewRemediationCoordinator({
           findingFingerprints.forEach((fingerprint) => persistedFingerprints.add(fingerprint));
           findingFingerprintsByItem.set(key, persistedFingerprints);
 
-          if (completedCycles >= remediationCycles) return { status: "paused" };
+          if (completedCycles >= cycles) return { status: "paused" };
           if (typeof implementer?.remediate !== "function") return { status: "paused" };
           try {
-            if (await implementer.remediate({ item, findings: result.findings }) === false) {
+            if (await ports.implementer.remediate({ item, findings: result.findings }) === false) {
               return { status: "paused" };
             }
             if (!await authorizeChangedPaths({ policy, item, globalAllowedPaths, phase: "post-remediation" })) {
               return { status: "paused" };
             }
-            if (!isPassedAcceptance(await acceptance.execute({ item }))) return { status: "paused" };
-          } catch {
-            return { status: "paused" };
+            if (!isPassedAcceptance(await ports.acceptance.execute({ item }))) return { status: "paused" };
+          } catch (error) {
+            return postEffectPaused(error, item);
           }
           completedCycles += 1;
           continue;
@@ -96,21 +102,22 @@ export function createReviewRemediationCoordinator({
         if (typeof transactionId !== "string" || transactionId.trim() === "") return { status: "paused" };
 
         try {
-          const acknowledgement = parseCloseResult(await dv.close({ workId: transactionId, cwd: item.worktree }));
+          const acknowledgement = parseCloseResult(await ports.dv.close({ workId: transactionId, cwd: item.worktree }));
           if (acknowledgement.id !== transactionId) return { status: "paused" };
-          if (!isCommitted(await workspace.commitTracked({ cwd: item.worktree }))) return { status: "paused" };
-        } catch {
-          return { status: "paused" };
+          if (!isCommitted(await ports.workspace.commitTracked({ cwd: item.worktree }))) return { status: "paused" };
+        } catch (error) {
+          return postEffectPaused(error, item);
         }
-        const delivery = await integration.deliver({ item });
+        let delivery;
+        try { delivery = await ports.integration.deliver({ item }); } catch (error) { return postEffectPaused(error, item); }
         if (delivery?.status !== "stale") return delivery;
         return recoverStaleDelivery({
           stale: delivery,
           item,
-          implementer,
-          review,
-          acceptance,
-          integration,
+          implementer: ports.implementer,
+          review: ports.review,
+          acceptance: ports.acceptance,
+          integration: ports.integration,
           journal,
           cycle: completedCycles + 1,
           reviewerContexts,
@@ -156,7 +163,13 @@ async function recoverStaleDelivery({
     }
     reviewerContexts.add(reviewerContext(result));
     if (typeof journal?.append !== "function") return { status: "paused" };
-    await journal.append(reviewEvidence(item, result, cycle));
+    try {
+      await journal.append(reviewEvidence(item, result, cycle));
+    } catch (error) {
+      error.postEffectRecord = true;
+      error.effect = { category: "review", action: "stale-review-decision", itemId: itemKey(item), verdict: result.verdict, reviewer: result.reviewer, cycle };
+      return postEffectPaused(error, item);
+    }
 
     return await integration.retryStale({
       refreshed,
@@ -168,9 +181,37 @@ async function recoverStaleDelivery({
         implementer,
       },
     });
-  } catch {
-    return { status: "paused" };
+  } catch (error) {
+    return postEffectPaused(error, item);
   }
+}
+
+function guardedCoordinatorPorts({ guards, review, acceptance, dv, workspace, integration, implementer }) {
+  if (guards === undefined) return { review, acceptance, dv, workspace, integration, implementer };
+  const required = ["reviewRequest", "remediate", "affectedAcceptance", "close", "closureCommit", "integrationDeliver"];
+  if (!guards || required.some((name) => typeof guards[name] !== "function")) return null;
+  if (!review || !acceptance || !dv || !workspace || !integration) return null;
+  return {
+    review: { request: guards.reviewRequest(review) },
+    acceptance: { execute: guards.affectedAcceptance(acceptance) },
+    dv: { close: guards.close(dv) },
+    workspace: { commitTracked: guards.closureCommit(workspace) },
+    integration: {
+      deliver: guards.integrationDeliver(integration),
+      ...(typeof guards.integrationRefresh(integration) === "function" ? { refreshStale: guards.integrationRefresh(integration) } : {}),
+      ...(typeof guards.integrationRetry(integration) === "function" ? { retryStale: guards.integrationRetry(integration) } : {}),
+    },
+    implementer: implementer && typeof implementer.remediate === "function"
+      ? { ...implementer, remediate: guards.remediate(implementer) }
+      : implementer,
+  };
+}
+
+function postEffectPaused(error, item) {
+  if (error?.postEffectRecord === true) {
+    return { status: "paused-after-side-effect", recovery: { sideEffectMayHaveSucceeded: true, effect: error.effect, itemWorktree: item?.worktree, recordError: error.message, required: ["inspect-side-effect", "repair-evidence", "do-not-retry-effect"] } };
+  }
+  return { status: "paused" };
 }
 
 function reviewEvidence(item, result, cycle) {
