@@ -39,7 +39,9 @@ flowchart TD
 ## State and safety
 
 - Durable global state: `$PI_CODING_AGENT_DIR/triage-control-plane/state.json` (default `~/.pi/agent/triage-control-plane/state.json`), written through an exclusive lock plus atomic temp-file rename with restrictive permissions.
-- POC session IDs come from `ctx.sessionManager.getSessionId()` (the documented session API); the `/ttr-register` command never guesses one.
+- POC session IDs come from `ctx.sessionManager.getSessionId()` (the documented session API); `/ttr register` never guesses one.
+- Pi provides `ctx.cwd`, but no semantic domain API. When omitted from a TTR command, the domain is deterministically derived from the Git repository root name, falling back to the current directory name; supply a domain explicitly to override it.
+- Incoming `ttr_intake` reports must separately declare `sourceDomain`, `ownerDomain`, and `targetPocSessionId`. TTR resolves only `ownerDomain`; it never infers ownership from the sender workspace or source domain.
 - Secrets are not accepted in records or tools. Store only evidence references/paths, receipts, and commit SHA evidence.
 - The built-in `explicit-lifecycle` adapter stores the caller-supplied lifecycle states alongside the authoritative ID/path. It intentionally does **not** invent repository status names or mutate a repository work item. A repository integration can implement the exported `WorkItemAdapter` seam.
 
@@ -47,8 +49,8 @@ flowchart TD
 
 Enforced by supported TTR tools:
 
-- one active domain POC, explicit confirmation before active POC replacement;
-- evidence-only handoff generation in non-POC sessions;
+- one active POC registration per canonical domain or alias, with atomic multi-alias registration and explicit confirmation before active POC replacement;
+- evidence-only handoff generation when the resolved owner POC, declared target POC, and receiving session do not all match;
 - `ttr_prepare_work_lane` refuses to produce a supported diagnosis/review/validation/implementation lane contract until the authoritative work item exists, and its emitted preamble must be passed to the lane;
 - exactly one authoritative work-item reference per TTR defect, and only its configured lifecycle states;
 - requester-message category validation and evidence recording;
@@ -76,20 +78,26 @@ Do not substitute a name, fabricate a target, or silently reroute an unreachable
 ## Commands
 
 ```text
-/ttr-register payments                    # this session is POC
-/ttr-register payments <pi-session-id>    # explicit POC
-/ttr-register payments <id> --replace     # required to replace an active POC
-/ttr-poc payments
-/ttr-pocs
-/ttr-deactivate payments
+/ttr register                                            # register this session for the current repository domain
+/ttr register payments                                   # this session is POC for an explicit domain
+/ttr register pi-extensions ttr agent-workflows handoff  # register the same POC for a canonical domain plus aliases
+/ttr register payments --session-id <pi-session-id>      # explicit POC; positional values remain domains/aliases
+/ttr register payments ttr --replace                     # required to replace any active POC in the set
+/ttr poc                                                 # inspect the POC for the current repository domain
+/ttr poc payments
+/ttr pocs
+/ttr deactivate                                          # deactivate the POC for the current repository domain
+/ttr deactivate payments
 ```
 
 ## Tool examples
 
 ```ts
-// Record intake. Non-POC sessions receive a handoff only and must not start diagnosis/writer lanes.
+// Record intake. `sourceDomain` is evidence context; only `ownerDomain` selects the TTR POC.
+// A receiver may start a supported lane only when targetPocSessionId resolves to that same receiver.
 ttr_intake({
-  reporter: "customer", source: "support:123", domain: "payments",
+  reporter: "customer", source: "support:123", sourceDomain: "storefront",
+  ownerDomain: "payments", targetPocSessionId: "<addressed-poc-session-id>",
   symptom: "card declined", impact: "checkout blocked", environment: "prod",
   reproduction: "submit Visa test card", evidenceReferences: ["ticket:123", "request:req-7"]
 })

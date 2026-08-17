@@ -54,6 +54,9 @@ export interface Defect {
   intake: {
     reporter: string;
     source: string;
+    sourceDomain: string;
+    targetPocSessionId: string;
+    authorityConfirmed: boolean;
     symptom: string;
     impact: string;
     environment: string;
@@ -87,7 +90,12 @@ interface State {
 export interface IntakeInput {
   reporter: string;
   source: string;
-  domain: string;
+  /** The reporting system or domain; it never determines TTR ownership. */
+  sourceDomain: string;
+  /** The canonical TTR domain that owns the defect. */
+  ownerDomain: string;
+  /** The POC session explicitly addressed by the incoming report. */
+  targetPocSessionId: string;
   symptom: string;
   impact: string;
   environment: string;
@@ -166,16 +174,26 @@ export class TriageControlPlane {
   }
 
   async registerPoc(domain: string, input: Omit<PocRecord, "domain" | "registeredAt" | "active">, confirmReplacement: boolean): Promise<PocRecord> {
-    const key = normalizedDomain(domain);
+    return (await this.registerPocs([domain], input, confirmReplacement))[0]!;
+  }
+
+  async registerPocs(domains: string[], input: Omit<PocRecord, "domain" | "registeredAt" | "active">, confirmReplacement: boolean): Promise<PocRecord[]> {
+    const keys = [...new Set(domains.map(normalizedDomain))];
+    if (keys.length === 0) throw new Error("at least one POC domain is required");
     if (!input.sessionId?.trim()) throw new Error("POC sessionId is required and must come from Pi session APIs/environment");
     return this.transaction((state) => {
-      const current = state.registrations[key];
-      if (current?.active && current.sessionId !== input.sessionId.trim() && !confirmReplacement) {
-        throw new Error(`Active POC registration for ${key} exists; explicit replacement confirmation is required`);
+      for (const key of keys) {
+        const current = state.registrations[key];
+        if (current?.active && current.sessionId !== input.sessionId.trim() && !confirmReplacement) {
+          throw new Error(`Active POC registration for ${key} exists; explicit replacement confirmation is required`);
+        }
       }
-      const record: PocRecord = { domain: key, sessionId: input.sessionId.trim(), ...(input.projectBoundary ? { projectBoundary: input.projectBoundary } : {}), ...(input.requesterChannel ? { requesterChannel: input.requesterChannel } : {}), registeredAt: this.now(), active: true };
-      state.registrations[key] = record;
-      return record;
+      const registeredAt = this.now();
+      return keys.map((domain) => {
+        const record: PocRecord = { domain, sessionId: input.sessionId.trim(), ...(input.projectBoundary ? { projectBoundary: input.projectBoundary } : {}), ...(input.requesterChannel ? { requesterChannel: input.requesterChannel } : {}), registeredAt, active: true };
+        state.registrations[domain] = record;
+        return record;
+      });
     });
   }
 
@@ -201,25 +219,29 @@ export class TriageControlPlane {
   }
 
   async intake(input: IntakeInput): Promise<{ defect: Defect; role: "poc" | "non-poc" | "unassigned"; handoff?: { targetSessionId: string; delivery: "not-attempted"; payload: Record<string, unknown> } }> {
-    const domain = normalizedDomain(input.domain);
-    const poc = await this.resolvePoc(domain);
+    const domain = normalizedDomain(input.ownerDomain);
+    const sourceDomain = normalizedDomain(input.sourceDomain);
+    const targetPocSessionId = input.targetPocSessionId?.trim();
+    if (!targetPocSessionId) throw new Error("target POC sessionId is required for an incoming defect report");
     return this.transaction((state) => {
+      const poc = state.registrations[domain]?.active ? state.registrations[domain] : undefined;
+      const authorityConfirmed = poc?.sessionId === targetPocSessionId && targetPocSessionId === input.currentSessionId;
       const id = `ttr-${randomUUID()}`;
       const recordedAt = this.now();
       const defect: Defect = {
         id, domain, ownerPocSessionId: poc?.sessionId ?? "unassigned",
-        intake: { reporter: input.reporter, source: input.source, symptom: input.symptom, impact: input.impact, environment: input.environment, reproduction: input.reproduction, evidenceReferences: [...input.evidenceReferences], recordedAt },
+        intake: { reporter: input.reporter, source: input.source, sourceDomain, targetPocSessionId, authorityConfirmed, symptom: input.symptom, impact: input.impact, environment: input.environment, reproduction: input.reproduction, evidenceReferences: [...input.evidenceReferences], recordedAt },
         evidence: input.evidenceReferences.map(path => ({ id: randomUUID(), type: "intake", path, createdAt: recordedAt, status: "recorded" })),
         statusHistory: [],
       };
       state.defects[id] = defect;
       if (!poc) return { defect, role: "unassigned" as const };
-      if (poc.sessionId === input.currentSessionId) return { defect, role: "poc" as const };
+      if (authorityConfirmed) return { defect, role: "poc" as const };
       return {
         defect, role: "non-poc" as const,
         handoff: {
           targetSessionId: poc.sessionId, delivery: "not-attempted" as const,
-          payload: { defectId: id, domain, symptom: input.symptom, impact: input.impact, evidenceReferences: [...input.evidenceReferences] },
+          payload: { defectId: id, domain, sourceDomain, symptom: input.symptom, impact: input.impact, evidenceReferences: [...input.evidenceReferences] },
         },
       };
     });
@@ -230,9 +252,14 @@ export class TriageControlPlane {
     return state.defects[defectId] ? clone(state.defects[defectId]!) : undefined;
   }
 
-  async assignWorkItem(defectId: string, workItem: Omit<WorkItem, "adapter"> & { adapter?: string }): Promise<Defect> {
+  async ensurePocAuthority(defectId: string, actorSessionId: string): Promise<Defect> {
+    const state = await this.readState();
+    return clone(this.requirePocAuthority(state, defectId, actorSessionId));
+  }
+
+  async assignWorkItem(defectId: string, workItem: Omit<WorkItem, "adapter"> & { adapter?: string }, actorSessionId: string): Promise<Defect> {
     return this.transaction((state) => {
-      const defect = this.requireDefect(state, defectId);
+      const defect = this.requirePocAuthority(state, defectId, actorSessionId);
       if (defect.workItem) throw new Error(`Defect ${defectId} already has an authoritative work item: ${defect.workItem.id}`);
       if (!workItem.id || !workItem.path || !workItem.status || workItem.lifecycleStates.length === 0) throw new Error("work-item id, path, status, and configured lifecycleStates are required");
       if (!workItem.lifecycleStates.includes(workItem.status)) throw new Error("initial work-item status must be in configured lifecycleStates");
@@ -333,5 +360,13 @@ export class TriageControlPlane {
   }
 
   private requireDefect(state: State, defectId: string): Defect { const defect = state.defects[defectId]; if (!defect) throw new Error(`Unknown defect: ${defectId}`); return defect; }
+  private requirePocAuthority(state: State, defectId: string, actorSessionId: string): Defect {
+    const defect = this.requireDefect(state, defectId);
+    const activePoc = state.registrations[defect.domain];
+    if (!defect.intake.authorityConfirmed || defect.ownerPocSessionId !== actorSessionId || defect.intake.targetPocSessionId !== actorSessionId || !activePoc?.active || activePoc.sessionId !== actorSessionId) {
+      throw new Error(`Session is not authorized to assign a work item for defect ${defectId}`);
+    }
+    return defect;
+  }
   private requireWorkItem(defect: Defect): WorkItem { if (!defect.workItem) throw new Error(`Defect ${defect.id} has no authoritative work item`); return defect.workItem; }
 }

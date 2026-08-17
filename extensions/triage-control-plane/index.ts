@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "@sinclair/typebox";
@@ -9,6 +9,12 @@ const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "age
 const STATE_PATH = join(AGENT_DIR, "triage-control-plane", "state.json");
 const REQUESTER_CATEGORIES = [
   "request-reproduction", "request-logs", "request-access", "request-decision", "request-authority", "mitigation", "stop-change", "safe-to-proceed",
+] as const;
+const TTR_SUBCOMMANDS = [
+  { value: "register", label: "register", description: "Register the active POC for a domain" },
+  { value: "poc", label: "poc", description: "Inspect a domain's active POC" },
+  { value: "pocs", label: "pocs", description: "List active POC registrations" },
+  { value: "deactivate", label: "deactivate", description: "Deactivate a domain's POC" },
 ] as const;
 
 function json(value: unknown): { content: Array<{ type: "text"; text: string }>; details: unknown } {
@@ -21,12 +27,56 @@ function currentSessionId(ctx: ExtensionContext): string {
   return sessionId;
 }
 
-function parseRegisterArgs(args: string): { domain: string; sessionId?: string; replace: boolean } {
+function parseRegisterArgs(args: string, defaultDomain: string): { domains: string[]; sessionId?: string; replace: boolean } {
   const tokens = args.trim().split(/\s+/).filter(Boolean);
-  const replace = tokens.includes("--replace");
-  const values = tokens.filter(token => token !== "--replace");
-  if (values.length < 1 || values.length > 2) throw new Error("Usage: /ttr-register <domain> [session-id] [--replace]");
-  return { domain: values[0]!, sessionId: values[1], replace };
+  const domains: string[] = [];
+  let sessionId: string | undefined;
+  let replace = false;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]!;
+    if (token === "--replace") {
+      replace = true;
+      continue;
+    }
+    if (token === "--session-id") {
+      sessionId = tokens[index + 1];
+      if (!sessionId) throw new Error("Usage: /ttr register [domain] [aliases…] [--session-id <id>] [--replace]");
+      index += 1;
+      continue;
+    }
+    domains.push(token);
+  }
+  return { domains: domains.length > 0 ? domains : [defaultDomain], sessionId, replace };
+}
+
+async function domainFromContext(pi: ExtensionAPI, cwd: string): Promise<string> {
+  const root = await pi.exec("git", ["rev-parse", "--show-toplevel"], { cwd, timeout: 10_000 });
+  const directory = root.code === 0 && root.stdout.trim() ? root.stdout.trim() : cwd;
+  const domain = basename(directory);
+  if (!domain) throw new Error("Unable to derive a domain from the current directory; use /ttr <subcommand> <domain>");
+  return domain;
+}
+
+function parseDomain(args: string, defaultDomain: string, usage: string): string {
+  const values = args.trim().split(/\s+/).filter(Boolean);
+  if (values.length > 1) throw new Error(`Usage: ${usage}`);
+  return values[0] ?? defaultDomain;
+}
+
+function ttrArgumentCompletions(prefix: string) {
+  const hasTrailingSpace = /\s$/.test(prefix);
+  const tokens = prefix.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return [...TTR_SUBCOMMANDS];
+  if (tokens.length === 1 && !hasTrailingSpace) {
+    return TTR_SUBCOMMANDS.filter(item => item.value.startsWith(tokens[0]!));
+  }
+  if (tokens[0] !== "register") return null;
+  const current = hasTrailingSpace ? "" : tokens.at(-1)!;
+  const items = [
+    { value: "--replace", label: "--replace", description: "Replace an active POC explicitly" },
+    { value: "--session-id", label: "--session-id", description: "Register an explicit Pi session ID" },
+  ].filter(item => !tokens.includes(item.value) && item.value.startsWith(current));
+  return items.length > 0 ? items : null;
 }
 
 export default function triageControlPlane(pi: ExtensionAPI) {
@@ -43,23 +93,44 @@ export default function triageControlPlane(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerCommand("ttr-register", {
-    description: "Register this or an explicit Pi session as the active defect-domain POC; use --replace to replace an active POC.",
+  pi.registerCommand("ttr", {
+    description: "TTR control plane: register, poc, pocs, or deactivate. Domains default to the current repository name.",
+    getArgumentCompletions: ttrArgumentCompletions,
     handler: async (args, ctx) => {
-      const input = parseRegisterArgs(args || "");
-      const record = await plane.registerPoc(input.domain, { sessionId: input.sessionId ?? currentSessionId(ctx), projectBoundary: ctx.cwd }, input.replace);
-      ctx.ui.notify(`TTR POC registered: ${record.domain} → ${record.sessionId}`, "info");
+      const [subcommand = "", ...rest] = (args || "").trim().split(/\s+/).filter(Boolean);
+      const subcommandArgs = rest.join(" ");
+
+      if (subcommand === "register") {
+        const input = parseRegisterArgs(subcommandArgs, await domainFromContext(pi, ctx.cwd));
+        const records = await plane.registerPocs(input.domains, { sessionId: input.sessionId ?? currentSessionId(ctx), projectBoundary: ctx.cwd }, input.replace);
+        ctx.ui.notify(`TTR POC registered: ${records.map(record => record.domain).join(", ")} → ${records[0]!.sessionId}`, "info");
+        return;
+      }
+      if (subcommand === "poc") {
+        const domain = parseDomain(subcommandArgs, await domainFromContext(pi, ctx.cwd), "/ttr poc [domain]");
+        ctx.ui.notify(JSON.stringify(await plane.resolvePoc(domain), null, 2), "info");
+        return;
+      }
+      if (subcommand === "pocs") {
+        if (subcommandArgs) throw new Error("Usage: /ttr pocs");
+        ctx.ui.notify(JSON.stringify(await plane.listPocs(), null, 2), "info");
+        return;
+      }
+      if (subcommand === "deactivate") {
+        const domain = parseDomain(subcommandArgs, await domainFromContext(pi, ctx.cwd), "/ttr deactivate [domain]");
+        const record = await plane.deactivatePoc(domain);
+        ctx.ui.notify(`TTR POC deactivated: ${record.domain}`, "info");
+        return;
+      }
+      throw new Error("Usage: /ttr <register|poc|pocs|deactivate> [domain]");
     },
   });
-  pi.registerCommand("ttr-poc", { description: "Inspect the active TTR POC for a domain.", handler: async (args, ctx) => ctx.ui.notify(JSON.stringify(await plane.resolvePoc(args.trim()), null, 2), "info") });
-  pi.registerCommand("ttr-pocs", { description: "List active TTR POC registrations.", handler: async (_args, ctx) => ctx.ui.notify(JSON.stringify(await plane.listPocs(), null, 2), "info") });
-  pi.registerCommand("ttr-deactivate", { description: "Deactivate a TTR POC registration.", handler: async (args, ctx) => { const record = await plane.deactivatePoc(args.trim()); ctx.ui.notify(`TTR POC deactivated: ${record.domain}`, "info"); } });
 
   pi.registerTool({
-    name: "ttr_intake", label: "TTR Intake", description: "Record structured defect intake and determine the authoritative POC. Non-POC calls only produce an evidence-only handoff; they never diagnose, write, or transport it.",
-    promptSnippet: "Record a defect and resolve its designated POC before diagnosis or writer work.",
-    promptGuidelines: ["Use ttr_intake before diagnosis, subagent lanes, implementation, review, validation, deployment, or requester messaging for a defect."],
-    parameters: Type.Object({ reporter: Type.String(), source: Type.String(), domain: Type.String(), symptom: Type.String(), impact: Type.String(), environment: Type.String(), reproduction: Type.String(), evidenceReferences: Type.Array(Type.String()) }),
+    name: "ttr_intake", label: "TTR Intake", description: "Record a defect with explicit source, owning domain, and addressed POC. A receiver is authoritative only when all three routing assertions agree.",
+    promptSnippet: "Record a defect with sourceDomain, ownerDomain, and targetPocSessionId before diagnosis or writer work.",
+    promptGuidelines: ["Use ttr_intake before diagnosis, subagent lanes, implementation, review, validation, deployment, or requester messaging for a defect.", "Never infer ownerDomain from sourceDomain or a sender workspace; resolve it through the TTR POC registry."],
+    parameters: Type.Object({ reporter: Type.String(), source: Type.String(), sourceDomain: Type.String(), ownerDomain: Type.String(), targetPocSessionId: Type.String(), symptom: Type.String(), impact: Type.String(), environment: Type.String(), reproduction: Type.String(), evidenceReferences: Type.Array(Type.String()) }),
     async execute(_id, params, _signal, _update, ctx) {
       const result = await plane.intake({ ...params, currentSessionId: currentSessionId(ctx) });
       return json({ ...result, handoff: result.handoff ? { ...result.handoff, senderContract: `Use only an established channel after confirming the POC is reachable: intercom({ action: \"send\", to: ${JSON.stringify(result.handoff.targetSessionId)}, message: ${JSON.stringify(JSON.stringify(result.handoff.payload))} })` } : undefined });
@@ -69,7 +140,7 @@ export default function triageControlPlane(pi: ExtensionAPI) {
   pi.registerTool({
     name: "ttr_assign_work_item", label: "Assign Authoritative Work Item", description: "Assign the one authoritative work item and its explicitly configured repository lifecycle to a tracked defect.",
     parameters: Type.Object({ defectId: Type.String(), workItemId: Type.String(), workItemPath: Type.String(), status: Type.String(), lifecycleStates: Type.Array(Type.String()), adapter: Type.Optional(Type.String()) }),
-    async execute(_id, params) { return json(await plane.assignWorkItem(params.defectId, { id: params.workItemId, path: params.workItemPath, status: params.status, lifecycleStates: params.lifecycleStates, adapter: params.adapter })); },
+    async execute(_id, params, _signal, _update, ctx) { return json(await plane.assignWorkItem(params.defectId, { id: params.workItemId, path: params.workItemPath, status: params.status, lifecycleStates: params.lifecycleStates, adapter: params.adapter }, currentSessionId(ctx))); },
   });
   pi.registerTool({
     name: "ttr_transition_work_item", label: "Transition Work Item", description: "Record an authoritative work-item transition using only its configured lifecycle status; blockers and next action remain separate fields.",
@@ -79,8 +150,8 @@ export default function triageControlPlane(pi: ExtensionAPI) {
   pi.registerTool({
     name: "ttr_prepare_work_lane", label: "Prepare TTR Work Lane", description: "Produce the mandatory authoritative-work-item reference for a diagnosis, review, validation, or implementation lane. Use this before launching a supported work lane.",
     parameters: Type.Object({ defectId: Type.String(), lane: StringEnum(["tracking", "diagnosis", "review", "validation", "implementation"] as const) }),
-    async execute(_id, params) {
-      const defect = await plane.getDefect(params.defectId);
+    async execute(_id, params, _signal, _update, ctx) {
+      const defect = await plane.ensurePocAuthority(params.defectId, currentSessionId(ctx));
       if (!defect?.workItem) throw new Error(`Cannot prepare ${params.lane} lane: defect has no authoritative work item`);
       return json({ defectId: defect.id, lane: params.lane, workItem: defect.workItem, requiredTaskPreamble: `Authoritative defect work item: ${defect.workItem.id} (${defect.workItem.path}). Link all artifacts, findings, and status updates to this work item. Do not create another work item.` });
     },

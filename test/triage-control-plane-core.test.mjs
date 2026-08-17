@@ -30,27 +30,62 @@ test("POC registration persists, resolves, and needs explicit replacement confir
   assert.match(await readFile(statePath, "utf8"), /payments/);
 });
 
+test("POC aliases register atomically and resolve to the same session", async () => {
+  const { statePath } = await setup();
+  const plane = new TriageControlPlane({ statePath });
+  const records = await plane.registerPocs(["pi-extensions", "ttr", "agent-workflows", "handoff"], poc, false);
+
+  assert.deepEqual(records.map(record => record.domain), ["pi-extensions", "ttr", "agent-workflows", "handoff"]);
+  for (const domain of records.map(record => record.domain)) {
+    assert.equal((await plane.resolvePoc(domain))?.sessionId, poc.sessionId);
+  }
+});
+
 test("non-POC intake produces an evidence-only handoff and does not claim delivery", async () => {
   const { statePath } = await setup();
   const plane = new TriageControlPlane({ statePath });
   await plane.registerPoc("payments", poc, false);
   const intake = await plane.intake({
-    reporter: "customer", source: "support", domain: "payments", symptom: "card declined", impact: "checkout blocked",
+    reporter: "customer", source: "support", sourceDomain: "support", ownerDomain: "payments", targetPocSessionId: poc.sessionId, symptom: "card declined", impact: "checkout blocked",
     environment: "prod", reproduction: "submit card", evidenceReferences: ["ticket:123"], currentSessionId: "other-session",
   });
   assert.equal(intake.role, "non-poc");
   assert.equal(intake.handoff?.targetSessionId, poc.sessionId);
   assert.equal(intake.handoff?.delivery, "not-attempted");
-  assert.deepEqual(Object.keys(intake.handoff.payload).sort(), ["defectId", "domain", "evidenceReferences", "impact", "symptom"]);
+  assert.deepEqual(Object.keys(intake.handoff.payload).sort(), ["defectId", "domain", "evidenceReferences", "impact", "sourceDomain", "symptom"]);
+});
+
+test("intake separates source from owner domain and fail-closes a target-POC mismatch", async () => {
+  const { statePath } = await setup();
+  const plane = new TriageControlPlane({ statePath });
+  await plane.registerPoc("ttr", poc, false);
+  const input = {
+    reporter: "validator", source: "intercom", sourceDomain: "babysitter-dv", ownerDomain: "ttr", targetPocSessionId: poc.sessionId,
+    symptom: "routing mismatch", impact: "incorrect ownership", environment: "test", reproduction: "send cross-domain defect", evidenceReferences: [], currentSessionId: poc.sessionId,
+  };
+
+  const confirmed = await plane.intake(input);
+  assert.equal(confirmed.role, "poc");
+  assert.equal(confirmed.defect.domain, "ttr");
+  assert.equal(confirmed.defect.intake.sourceDomain, "babysitter-dv");
+  assert.equal(confirmed.defect.intake.targetPocSessionId, poc.sessionId);
+
+  const mismatched = await plane.intake({ ...input, targetPocSessionId: "different-session" });
+  assert.equal(mismatched.role, "non-poc");
+  assert.equal(mismatched.handoff?.targetSessionId, poc.sessionId);
+  await assert.rejects(
+    () => plane.assignWorkItem(mismatched.defect.id, { id: "BUG-2", path: "backlog/BUG-2.md", status: "proposed", lifecycleStates: ["proposed"] }, poc.sessionId),
+    /not authorized to assign a work item/i,
+  );
 });
 
 test("a defect has one authoritative work item and only configured lifecycle transitions", async () => {
   const { statePath } = await setup();
   const plane = new TriageControlPlane({ statePath });
   await plane.registerPoc("payments", poc, false);
-  const { defect } = await plane.intake({ reporter: "r", source: "s", domain: "payments", symptom: "x", impact: "high", environment: "prod", reproduction: "r", evidenceReferences: [], currentSessionId: poc.sessionId });
-  await plane.assignWorkItem(defect.id, { id: "BUG-1", path: "backlog/BUG-1.md", status: "proposed", lifecycleStates: ["proposed", "in-progress", "closed"] });
-  await assert.rejects(() => plane.assignWorkItem(defect.id, { id: "BUG-2", path: "backlog/BUG-2.md", status: "proposed", lifecycleStates: ["proposed"] }), /already has an authoritative/i);
+  const { defect } = await plane.intake({ reporter: "r", source: "s", sourceDomain: "s", ownerDomain: "payments", targetPocSessionId: poc.sessionId, symptom: "x", impact: "high", environment: "prod", reproduction: "r", evidenceReferences: [], currentSessionId: poc.sessionId });
+  await plane.assignWorkItem(defect.id, { id: "BUG-1", path: "backlog/BUG-1.md", status: "proposed", lifecycleStates: ["proposed", "in-progress", "closed"] }, poc.sessionId);
+  await assert.rejects(() => plane.assignWorkItem(defect.id, { id: "BUG-2", path: "backlog/BUG-2.md", status: "proposed", lifecycleStates: ["proposed"] }, poc.sessionId), /already has an authoritative/i);
   await assert.rejects(() => plane.transitionWorkItem(defect.id, "blocked"), /not configured/i);
   const updated = await plane.transitionWorkItem(defect.id, "in-progress", { blocker: "awaiting logs", nextAction: "request logs" });
   assert.equal(updated.workItem?.status, "in-progress");
@@ -61,7 +96,7 @@ test("requester-message categories reject noise and record accepted message evid
   const { statePath } = await setup();
   const plane = new TriageControlPlane({ statePath });
   await plane.registerPoc("payments", poc, false);
-  const { defect } = await plane.intake({ reporter: "r", source: "s", domain: "payments", symptom: "x", impact: "high", environment: "prod", reproduction: "r", evidenceReferences: [], currentSessionId: poc.sessionId });
+  const { defect } = await plane.intake({ reporter: "r", source: "s", sourceDomain: "s", ownerDomain: "payments", targetPocSessionId: poc.sessionId, symptom: "x", impact: "high", environment: "prod", reproduction: "r", evidenceReferences: [], currentSessionId: poc.sessionId });
   await assert.rejects(() => plane.recordRequesterMessage(defect.id, "progress-update", "still looking"), /unsupported requester-message category/i);
   const evidence = await plane.recordRequesterMessage(defect.id, "request-logs", "Please provide request id.");
   assert.equal(evidence.type, "requester-message");
@@ -81,8 +116,8 @@ test("release gate accepts SHA only in linked commit evidence and safe-to-procee
   let head = "predeploy-sha";
   const plane = new TriageControlPlane({ statePath, git: async () => ({ clean: true, head }) });
   await plane.registerPoc("payments", poc, false);
-  const { defect } = await plane.intake({ reporter: "r", source: "s", domain: "payments", symptom: "x", impact: "high", environment: "prod", reproduction: "r", evidenceReferences: [], currentSessionId: poc.sessionId });
-  await plane.assignWorkItem(defect.id, { id: "BUG-1", path: "backlog/BUG-1.md", status: "in-progress", lifecycleStates: ["in-progress", "closed"] });
+  const { defect } = await plane.intake({ reporter: "r", source: "s", sourceDomain: "s", ownerDomain: "payments", targetPocSessionId: poc.sessionId, symptom: "x", impact: "high", environment: "prod", reproduction: "r", evidenceReferences: [], currentSessionId: poc.sessionId });
+  await plane.assignWorkItem(defect.id, { id: "BUG-1", path: "backlog/BUG-1.md", status: "in-progress", lifecycleStates: ["in-progress", "closed"] }, poc.sessionId);
   await plane.recordEvidence(defect.id, { type: "validation", status: "passed", path: "evidence/test.txt" });
   await plane.recordEvidence(defect.id, { type: "review", status: "passed", path: "evidence/review.txt" });
   await plane.recordCommitEvidence(defect.id, { sha: "unphased-sha", phase: "other", path: "evidence/unphased-commit.json" });
