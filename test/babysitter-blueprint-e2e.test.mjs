@@ -16,6 +16,13 @@ const loadTransaction = () => import("../src/git-worktree-transaction.js");
 const sha256 = (contents) => createHash("sha256").update(contents).digest("hex");
 const categories = ["input", "command", "dv", "review", "diff", "commit", "integration", "hash"];
 
+function validDocVaderPort() {
+  const ready = { schemaVersion: "v1", workItems: [{ id: "wi-005", priority: "high", status: "ready", afk: true, hitl: false, dependencies: [] }] };
+  const show = { schemaVersion: "task-model/v1", id: "wi-005", title: "Pilot", filePath: "backlog/005.md", status: "ready", lifecycle: "active", tags: ["afk"], dependencies: [], body: {}, acceptanceCriteria: [], validation: {}, runtime: {} };
+  const status = { schemaVersion: "task-status/v1", id: "wi-005", title: "Pilot", filePath: "backlog/005.md", status: "ready", lifecycle: "active", validation: { isActive: true, isReady: true, isAfk: true, isHitl: false, dependenciesSatisfied: true }, runtime: {}, recovery: {}, graph: {} };
+  return { execute: async ({ args }) => args.includes("ready") ? ready : args.includes("show") ? show : status };
+}
+
 async function fixture(files) {
   const root = await mkdtemp(path.join(os.tmpdir(), "babysitter-blueprint-"));
   await Promise.all(Object.entries(files).map(async ([name, contents]) => {
@@ -48,8 +55,12 @@ function createHarness({ outcome = { status: "delivered" } } = {}) {
   const prepareCalls = [];
   const transitionCalls = [];
   const deliveryCalls = [];
+  const docVaderCalls = [];
+  const ready = { schemaVersion: "v1", workItems: [{ id: "wi-005", priority: "high", status: "ready", afk: true, hitl: false, dependencies: [] }] };
+  const show = { schemaVersion: "task-model/v1", id: "wi-005", title: "Pilot", filePath: "backlog/005.md", status: "ready", lifecycle: "active", tags: ["afk"], dependencies: [], body: {}, acceptanceCriteria: [], validation: {}, runtime: {} };
+  const status = { schemaVersion: "task-status/v1", id: "wi-005", title: "Pilot", filePath: "backlog/005.md", status: "ready", lifecycle: "active", validation: { isActive: true, isReady: true, isAfk: true, isHitl: false, dependenciesSatisfied: true }, runtime: {}, recovery: {}, graph: {} };
   return {
-    prepareCalls, transitionCalls, deliveryCalls,
+    prepareCalls, transitionCalls, deliveryCalls, docVaderCalls,
     blueprintOptions: {
       worktreeTransaction: {
         withEvidenceGuard: () => {},
@@ -61,6 +72,12 @@ function createHarness({ outcome = { status: "delivered" } } = {}) {
       delivery: {
         review: async (input) => { deliveryCalls.push(input); return outcome; },
       },
+      docVader: { execute: async (input) => {
+        docVaderCalls.push(input);
+        if (input.args.includes("ready")) return ready;
+        if (input.args.includes("show")) return show;
+        return status;
+      } },
       state: { transition: async (input) => transitionCalls.push(input) },
     },
   };
@@ -202,7 +219,7 @@ test("blueprint composed real Git fixtures preserve delivery policy", async (t) 
           dv: { close: async () => { closes += 1; if (setup.closeFails) throw new Error("close failed"); return { schemaVersion: "task-close/v1", id: "wi-005", status: "closed", lifecycle: "closed" }; } },
           workspace: { commitTracked: async ({ cwd }) => { writeFileSync(path.join(cwd, "closure.txt"), "closed\n"); gitIn(cwd, ["add", "closure.txt"]); gitIn(cwd, ["commit", "-m", "closure"]); return { committed: true }; } }, integration: transaction,
         });
-        const blueprint = createAfkDeliveryBlueprint({ worktreeTransaction: transaction, delivery: coordinator, state: { transition: async () => {} } });
+        const blueprint = createAfkDeliveryBlueprint({ worktreeTransaction: transaction, delivery: coordinator, docVader: validDocVaderPort(), state: { transition: async () => {} } });
         const result = await blueprint.run({ itemId: "wi-005", cwd: root, runDirectory: path.join(root, "run"), implementer: { identity: "implementer", context: "implementation", remediate: async () => true } });
         await setup.assert({ root, result, reviews, closes, events });
       } finally { rmSync(root, { recursive: true, force: true }); }
@@ -263,6 +280,7 @@ test("composed coordinator guards every side effect and leaves reconstructable t
     const blueprint = createAfkDeliveryBlueprint({
       worktreeTransaction: { withEvidenceGuard: () => {}, prepareItem: async () => ({ itemId: "wi-005", worktree: root, changedPaths: ["src/a.js"] }) },
       delivery: coordinator,
+      docVader: validDocVaderPort(),
       state: { transition: async () => {} },
     });
     const result = await blueprint.run({ itemId: "wi-005", cwd: root, runDirectory: path.join(root, "run"), implementer: { identity: "implementer", context: "implementation-1" } });
@@ -280,7 +298,7 @@ test("v6 process resolves ports from JSON-selected importable configuration", as
   const { process } = await import("../blueprints/babysitter-afk-v6/process.mjs");
   await withFixture({}, async (root) => {
     const config = path.join(root, "ports.mjs");
-    await writeFile(config, `export function createPorts() { return { maxReviewCycles: 10, worktreeTransaction: { withEvidenceGuard: () => {}, prepareItem: async () => ({ itemId: "wi-005", worktree: "/item" }) }, delivery: { review: async () => ({ status: "delivered" }) }, state: { transition: async () => {} } }; }`);
+    await writeFile(config, `export function createPorts() { const ready = { schemaVersion: "v1", workItems: [{ id: "wi-005", priority: "high", status: "ready", afk: true, hitl: false, dependencies: [] }] }; const show = { schemaVersion: "task-model/v1", id: "wi-005", title: "Pilot", filePath: "backlog/005.md", status: "ready", lifecycle: "active", tags: [], dependencies: [], body: {}, acceptanceCriteria: [], validation: {}, runtime: {} }; const status = { schemaVersion: "task-status/v1", id: "wi-005", title: "Pilot", filePath: "backlog/005.md", status: "ready", lifecycle: "active", validation: { isActive: true, isReady: true, isAfk: true, isHitl: false, dependenciesSatisfied: true }, runtime: {}, recovery: {}, graph: {} }; return { maxReviewCycles: 10, worktreeTransaction: { withEvidenceGuard: () => {}, prepareItem: async () => ({ itemId: "wi-005", worktree: "/item" }) }, delivery: { review: async () => ({ status: "delivered" }) }, docVader: { execute: async ({ args }) => args.includes("ready") ? ready : args.includes("show") ? show : status }, state: { transition: async () => {} } }; }`);
     const result = await process({ configModule: config, runInput: { itemId: "wi-005", cwd: root, runDirectory: path.join(root, "run") } }, { task: async () => ({}) });
     assert.equal(result.status, "delivered");
     await assert.rejects(process({ runInput: {} }, { task: async () => ({}) }), /configModule/i);
@@ -295,4 +313,61 @@ test("v6 package and operator documentation expose portable process contracts", 
   assert.equal(packageMetadata.version, "6.0.0");
   assert.equal(typeof process.process, "function");
   for (const phrase of ["babysitter run:create", "babysitter run:iterate", "configModule", "JSON-safe", "repository override", "run directory", "adapter", "Node-first", "lockfile"]) assert.match(docs, new RegExp(phrase, "i"));
+});
+
+test("blueprint blocks worktree creation when Doc-Vader validation rejects the selected item", async () => {
+  const { createAfkDeliveryBlueprint } = await loadBlueprint();
+  await withFixture(await validEvidenceFiles(), async (root) => {
+    const harness = createHarness();
+    const blueprint = createAfkDeliveryBlueprint({
+      ...harness.blueprintOptions,
+      docVader: { execute: async ({ args }) => {
+        if (args.includes("ready")) return { schemaVersion: "v1", workItems: [{ id: "wi-005", priority: "high", status: "ready", afk: true, hitl: false, dependencies: [] }] };
+        if (args.includes("show")) return { schemaVersion: "task-model/v1", id: "wi-005", title: "Pilot", filePath: "backlog/005.md", status: "ready", lifecycle: "active", tags: [], dependencies: [], body: {}, acceptanceCriteria: [], validation: {}, runtime: {} };
+        return { schemaVersion: "task-status/v1", id: "wi-005", title: "Pilot", filePath: "backlog/005.md", status: "ready", lifecycle: "active", validation: { isActive: true, isReady: false, isAfk: true, isHitl: false, dependenciesSatisfied: true }, runtime: {}, recovery: {}, graph: {} };
+      } },
+    });
+    const result = await blueprint.run({ itemId: "wi-005", cwd: root, runDirectory: path.join(root, "evidence") });
+    assert.equal(result.status, "paused");
+    assert.match(result.reason, /AFK-ready|validation/i);
+    assert.deepEqual(harness.prepareCalls, []);
+  });
+});
+
+test("blueprint executes the selected repository override's ready, show, and validate commands before worktree creation", async () => {
+  const { createAfkDeliveryBlueprint } = await loadBlueprint();
+  const calls = [];
+  const ready = { schemaVersion: "v1", workItems: [{ id: "wi-005", priority: "high", status: "ready", afk: true, hitl: false, dependencies: [] }] };
+  const show = { schemaVersion: "task-model/v1", id: "wi-005", title: "Pilot", filePath: "backlog/005.md", status: "ready", lifecycle: "active", tags: ["afk"], dependencies: [], body: {}, acceptanceCriteria: [], validation: {}, runtime: {} };
+  const status = { schemaVersion: "task-status/v1", id: "wi-005", title: "Pilot", filePath: "backlog/005.md", status: "ready", lifecycle: "active", validation: { isActive: true, isReady: true, isAfk: true, isHitl: false, dependenciesSatisfied: true }, runtime: {}, recovery: {}, graph: {} };
+  await withFixture({
+    ...(await validEvidenceFiles()),
+    ".babysitter/repository-override.json": {
+      schemaVersion: "doc-vader-override/v1", compatibleWith: ["doc-vader-contract/v1"],
+      commands: {
+        ready: ["repository-dv", "ready", "--json"],
+        show: ["repository-dv", "show", "{workId}", "--json"],
+        validate: ["repository-dv", "validate", "{workId}", "--json"],
+      },
+    },
+  }, async (root) => {
+    const harness = createHarness();
+    const blueprint = createAfkDeliveryBlueprint({
+      ...harness.blueprintOptions,
+      docVader: { execute: async ({ args, cwd }) => {
+        calls.push({ args, cwd, prepared: harness.prepareCalls.length });
+        if (args[1] === "ready") return ready;
+        if (args[1] === "show") return show;
+        return status;
+      } },
+    });
+    const result = await blueprint.run({ itemId: "wi-005", cwd: root, runDirectory: path.join(root, "evidence") });
+    assert.equal(result.status, "delivered", result.reason);
+    assert.deepEqual(calls.map((call) => call.args), [
+      ["repository-dv", "ready", "--json"],
+      ["repository-dv", "show", "wi-005", "--json"],
+      ["repository-dv", "validate", "wi-005", "--json"],
+    ]);
+    assert.ok(calls.every((call) => call.prepared === 0));
+  });
 });

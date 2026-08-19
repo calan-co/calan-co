@@ -197,6 +197,20 @@ export function parseStatusValidateResult(result) {
   return result;
 }
 
+/** Fail closed unless the selected work item remains ready after DV validation. */
+export function validateReadyWork(result, workId) {
+  const status = parseStatusValidateResult(result);
+  if (status.id !== workId) invalid(`validation result is for ${status.id}, expected ${workId}`);
+  const validation = status.validation;
+  if (
+    status.status !== "ready" || !validation.isActive || !validation.isReady
+    || !validation.isAfk || validation.isHitl || !validation.dependenciesSatisfied
+  ) {
+    invalid(`work item ${workId} is not AFK-ready after validation`);
+  }
+  return status;
+}
+
 /** Parse the canonical structured close acknowledgement. */
 export function parseCloseResult(result) {
   requireVersion(result, "task-close/v1");

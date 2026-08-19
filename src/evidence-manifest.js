@@ -4,7 +4,7 @@ import path from "node:path";
 
 export const EVIDENCE_SCHEMA_VERSION = "babysitter-evidence/v1";
 export const REQUIRED_EVIDENCE_CATEGORIES = Object.freeze(["input", "command", "dv", "review", "diff", "commit", "integration", "hash"]);
-export const GUARDED_TRANSITIONS = Object.freeze(["prepare-item", "state-transition", "review-request", "remediate", "affected-acceptance", "dv-close", "closure-commit", "integration-deliver", "integration-refresh", "integration-retry", "cas-publication", "cleanup"]);
+export const GUARDED_TRANSITIONS = Object.freeze(["dv-ready", "dv-show", "dv-validate", "prepare-item", "state-transition", "review-request", "remediate", "affected-acceptance", "dv-close", "closure-commit", "integration-deliver", "integration-refresh", "integration-retry", "cas-publication", "cleanup"]);
 const CATEGORIES = new Set(REQUIRED_EVIDENCE_CATEGORIES);
 const TRANSITIONS = new Set(GUARDED_TRANSITIONS);
 const SHA256 = /^[a-f0-9]{64}$/;

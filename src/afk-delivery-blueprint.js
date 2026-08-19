@@ -1,6 +1,7 @@
 import path from "node:path";
 import { createEvidenceJournal, verifyEvidenceManifest } from "./evidence-manifest.js";
 import { loadRepositoryOverride } from "./repository-override-loader.js";
+import { parseShowResult, selectReadyWork, validateReadyWork } from "./doc-vader-contract.mjs";
 
 function paused(reason) { return { status: "paused", reason }; }
 function guarded(port, method, transition, verify, journal, category) {
@@ -27,9 +28,10 @@ function guarded(port, method, transition, verify, journal, category) {
  * Stack-neutral composition root. Guarded wrappers make manifest verification
  * mandatory immediately before each coordinator and transaction side effect.
  */
-export function createAfkDeliveryBlueprint({ worktreeTransaction, delivery, state, journalFactory = createEvidenceJournal, maxReviewCycles = 10 } = {}) {
+export function createAfkDeliveryBlueprint({ worktreeTransaction, delivery, docVader, state, journalFactory = createEvidenceJournal, maxReviewCycles = 10 } = {}) {
   if (!worktreeTransaction || typeof worktreeTransaction.prepareItem !== "function" || typeof worktreeTransaction.withEvidenceGuard !== "function") throw new TypeError("guarded worktree transaction port is required");
   if (!delivery || typeof delivery.review !== "function") throw new TypeError("delivery review port is required");
+  if (!docVader || typeof docVader.execute !== "function") throw new TypeError("Doc-Vader command port is required");
   if (!state || typeof state.transition !== "function") throw new TypeError("state transition port is required");
   if (!Number.isInteger(maxReviewCycles) || maxReviewCycles !== 10) throw new TypeError("blueprint maxReviewCycles must be 10");
   return Object.freeze({
@@ -37,8 +39,9 @@ export function createAfkDeliveryBlueprint({ worktreeTransaction, delivery, stat
     async run({ itemId, cwd, runDirectory, repositoryOverridePath, evidenceManifestPath, targetBranch, implementer } = {}) {
       if (typeof itemId !== "string" || itemId === "" || typeof cwd !== "string" || cwd === "" || typeof runDirectory !== "string" || runDirectory === "") return paused("invalid blueprint run input");
       let journal;
+      let override;
       try {
-        await loadRepositoryOverride({ repositoryRoot: cwd, repositoryOverridePath });
+        override = await loadRepositoryOverride({ repositoryRoot: cwd, repositoryOverridePath });
         // A supplied manifest is an evidence contract, never disposable input.
         // Reject it before journal initialization can replace it.
         if (evidenceManifestPath !== undefined) await verifyEvidenceManifest({ runDirectory, manifestPath: evidenceManifestPath });
@@ -55,12 +58,23 @@ export function createAfkDeliveryBlueprint({ worktreeTransaction, delivery, stat
           category: "integration", transition: transactionTransition(event?.action), type: "transaction-effect", event,
         }) });
         worktreeTransaction.withEvidenceGuard({ before: async ({ action }) => verify(transactionTransition(action)), journal: transactionJournal });
+        // This composition root is the sole owner of effectful ports. Every
+        // command and worktree action crosses the same append-verify-effect
+        // boundary immediately before it executes.
         const transition = guarded(state, "transition", "state-transition", verify, journal, "command");
+        const runReady = guarded(docVader, "execute", "dv-ready", verify, journal, "dv");
+        const runShow = guarded(docVader, "execute", "dv-show", verify, journal, "dv");
+        const runValidate = guarded(docVader, "execute", "dv-validate", verify, journal, "dv");
         const prepareItem = guarded(worktreeTransaction, "prepareItem", "prepare-item", verify, journal, "command");
-        await transition({ type: "evidence-journal-created", itemId, runDirectory });
-        const item = await prepareItem({ itemId, cwd, targetBranch });
-        await transition({ type: "item-worktree-prepared", itemId, worktree: item.worktree });
-        const outcome = await delivery.review({
+        const reviewDelivery = guarded(delivery, "review", "integration-deliver", verify, journal, "integration");
+        const ready = selectReadyWork(await runReady({ args: override.commands.ready(), cwd }), { workId: itemId });
+        const show = parseShowResult(await runShow({ args: override.commands.show(ready.id), cwd }));
+        if (show.id !== ready.id) throw new Error(`Doc-Vader show result is for ${show.id}, expected ${ready.id}`);
+        validateReadyWork(await runValidate({ args: override.commands.validate(ready.id), cwd }), ready.id);
+        await transition({ type: "evidence-journal-created", itemId: ready.id, runDirectory });
+        const item = await prepareItem({ itemId: ready.id, cwd, targetBranch });
+        await transition({ type: "item-worktree-prepared", itemId: ready.id, worktree: item.worktree });
+        const outcome = await reviewDelivery({
           item, implementer, maxReviewCycles, verifyEvidence: verify,
           guards: Object.freeze({
             reviewRequest: (port) => guarded(port, "request", "review-request", verify, journal, "review"),
