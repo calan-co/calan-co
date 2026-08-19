@@ -1,10 +1,10 @@
 # Babysitter AFK Doc-Vader blueprint (v6)
 
-This package targets the installed Babysitter v6 CLI (`babysitter --version` reports 6.0.3 in the validated environment). Install its declared SDK dependency and run it with the concrete v6 commands:
+This package targets the installed Babysitter v6 CLI (`babysitter --version` reports 6.0.3 in the validated environment). Install from its pinned lockfile and run it with the concrete v6 commands:
 
 ```sh
 cd blueprints/babysitter-afk-v6
-npm install
+npm ci
 babysitter run:create --process-id babysitter-afk-doc-vader --entry "$PWD/process.mjs#process" --inputs ./inputs.json --non-interactive --json
 ```
 
@@ -21,7 +21,9 @@ The process accepts only JSON-safe inputs. Provide an importable local `configMo
 }
 ```
 
-The composition root writes and verifies the versioned `babysitter-evidence/v1` manifest in the run directory before each guarded delivery transition. Its eight required artifact categories are input, command, DV, review, diff, commit, integration, and hash. A missing/unimportable module or malformed ports fails closed before a worktree side effect.
+The composition root is the single owner of effectful ports. It writes and verifies the versioned `babysitter-evidence/v1` manifest in the run directory immediately before each guarded command, state transition, review, closure, integration, and cleanup transition. Its eight required artifact categories are input, command, DV, review, diff, commit, integration, and hash. A missing/unimportable module or malformed ports fails closed before a worktree side effect.
+
+Before it creates an item worktree, the root executes the selected repository's JSON-only `ready`, `show`, and `validate` commands through the injected `docVader.execute({ args, cwd })` port. It requires the requested item to be AFK-ready in both readiness and validation results. The resulting command intent/outcome events are manifest-linked as `dv-ready`, `dv-show`, and `dv-validate`.
 
 A repository may opt into the repository override `.babysitter/repository-override.json`. It is parsed by the existing Doc-Vader contract parser and must be compatible with `doc-vader-contract/v1`. It changes only Doc-Vader command argv; it cannot alter readiness, policy, acceptance, or evidence controls.
 
