@@ -23,7 +23,11 @@ Allow TTR to track related lifecycle defects independently while routing scoped 
 
 A Doc-Vader Babysitter lifecycle run can surface multiple integration defects. The current TTR model resolves POCs only by exact domain keys, permits only one defect per authoritative work item, and has no parent/child defect relation. Consequently, scoped domains can become unassigned and linked evidence must be split across duplicate work items.
 
-This is a TTR-extension defect, not a domain-PoC implementation assignment. Domain POCs may provide evidence but cannot be assigned solutioning without explicit authority.
+This is a TTR-extension defect, not a domain-POC implementation assignment. Domain POCs may provide evidence but cannot be assigned solutioning without explicit authority.
+
+## Supporting investigation
+
+See [`docs/architecture/ttr-related-defect-routing-investigation.md`](../docs/architecture/ttr-related-defect-routing-investigation.md) for the evidence-backed investigation that identified the exact-domain POC-routing and one-work-item-per-defect limitations addressed by this work item.
 
 ## Tasks
 
