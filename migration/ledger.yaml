@@ -1,5 +1,80 @@
 {
   "$schema": "../schema/migration-ledger.schema.json",
   "schemaVersion": 1,
-  "migrations": []
+  "migrations": [
+    {
+      "id": "doc-vader",
+      "source": "https://github.com/calan-co/doc-vader",
+      "targetPath": "packages/doc-vader",
+      "owner": "@chris-cald",
+      "artifacts": ["doc-vader"],
+      "state": "queued"
+    },
+    {
+      "id": "linkity",
+      "source": "https://github.com/calan-co/linkity",
+      "targetPath": "packages/linkity",
+      "owner": "@chris-cald",
+      "artifacts": ["linkity", "vscode-linkity"],
+      "state": "queued"
+    },
+    {
+      "id": "pi-extensions",
+      "source": "https://github.com/calan-co/pi-extensions",
+      "targetPath": "extensions/pi",
+      "owner": "@chris-cald",
+      "artifacts": ["pi-extensions"],
+      "state": "queued"
+    },
+    {
+      "id": "babysitter-dv",
+      "source": "https://github.com/calan-co/babysitter-dv",
+      "targetPath": "blueprints/babysitter-dv",
+      "owner": "@chris-cald",
+      "artifacts": ["babysitter-dv", "babysitter-afk-doc-vader"],
+      "state": "queued"
+    },
+    {
+      "id": "awx-ee-proxmox",
+      "source": "https://github.com/calan-co/awx-ee-proxmox",
+      "targetPath": "images/awx-ee-proxmox",
+      "owner": "@chris-cald",
+      "artifacts": ["awx-ee-proxmox"],
+      "state": "queued"
+    },
+    {
+      "id": "templjs",
+      "source": "https://github.com/templjs/templ.js",
+      "targetPath": "products/templjs",
+      "owner": "@chris-cald",
+      "artifacts": [
+        "templjs-core",
+        "templjs-cli",
+        "templjs-context-graph",
+        "templjs-volar",
+        "templjs-language-core",
+        "templjs-language-server",
+        "templjs-language-service",
+        "templjs-semantify",
+        "templjs-vscode"
+      ],
+      "state": "queued"
+    },
+    {
+      "id": "templjs-template",
+      "source": "https://github.com/templjs/template",
+      "targetPath": "legacy/template",
+      "owner": "@chris-cald",
+      "artifacts": ["templjs-template-history"],
+      "state": "queued"
+    },
+    {
+      "id": "templjs-temple",
+      "source": "https://github.com/templjs/temple",
+      "targetPath": "legacy/temple",
+      "owner": "@chris-cald",
+      "artifacts": ["templjs-temple-history"],
+      "state": "queued"
+    }
+  ]
 }

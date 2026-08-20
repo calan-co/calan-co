@@ -1,0 +1,188 @@
+{
+  "$schema": "../schema/migration-artifact-baseline.schema.json",
+  "schemaVersion": 1,
+  "sources": [
+    {
+      "id": "doc-vader",
+      "defaultSha": "a99b753f87b614c39d9ca09b9132c292cb27daf1",
+      "sourceDeclaredCommands": [
+        "pnpm install --frozen-lockfile",
+        "pnpm run lint",
+        "pnpm exec tsc --noEmit",
+        "pnpm run backlog:validate:ci",
+        "pnpm run build && pnpm run test -- --run",
+        "pnpm run build"
+      ],
+      "observedVersions": [
+        { "subject": "@calan-co/doc-vader", "path": "package.json", "version": "0.0.1" }
+      ],
+      "pending": [
+        "Repair or replace source CI references to nonexistent staging/scripts/docs-lint.sh and staging/scripts/backlog-hygiene-ci.sh before parity validation."
+      ],
+      "unattested": [
+        "Delegated reusable-workflow dry-run, publish, receipt, and rollback command strings.",
+        "Registry ownership, publication receipt, and rollback behavior."
+      ]
+    },
+    {
+      "id": "linkity",
+      "defaultSha": "4eacae036f935f987bbe4de18cca36034684c989",
+      "sourceDeclaredCommands": [
+        "npm run typecheck",
+        "npm run build",
+        "npm test",
+        "npm run lint:code",
+        "npm run lint:md",
+        "npm run docs:validate",
+        "npm run compile",
+        "npm run lint"
+      ],
+      "observedVersions": [
+        { "subject": "linkity", "path": "linkity/package.json", "version": "0.1.0" },
+        { "subject": "vscode-linkity", "path": "vscode-extension/package.json", "version": "0.1.0" }
+      ],
+      "pending": [
+        "Decide library registry and package ownership; replace placeholder repository metadata.",
+        "Commit a library lockfile or approve a different install policy and resolve the absent file:../doc-vader dependency.",
+        "Decide VS Code Marketplace publisher, credential ownership, and publication adapter while preserving or replacing file:../linkity."
+      ],
+      "unattested": [
+        "Configured registry, Marketplace publisher control, publish receipt, and rollback command."
+      ]
+    },
+    {
+      "id": "pi-extensions",
+      "defaultSha": "842f0264043c9b51509d0496c538a5845a0ab8c8",
+      "sourceDeclaredCommands": [
+        "pnpm test",
+        "pnpm run check",
+        "pnpm run coverage",
+        "pnpm run uat:agent-workflows:minimal-dv"
+      ],
+      "observedVersions": [
+        { "subject": "@calan-co/pi-extensions", "path": "package.json", "version": "0.1.0" }
+      ],
+      "pending": [
+        "Choose the Pi distribution target, install/link/copy mechanism, receipt test, and rollback procedure."
+      ],
+      "unattested": [
+        "Remote Pi registry, tarball, npm publication, VSIX identity, publication receipt, and rollback command."
+      ]
+    },
+    {
+      "id": "babysitter-dv",
+      "defaultSha": "458c9f66f4f3a4472c131244a8932ecd0ca4d31d",
+      "sourceDeclaredCommands": [
+        "npm ci",
+        "npm run test",
+        "npm run check",
+        "npm run pilot:rehearse",
+        "cd blueprints/babysitter-afk-v6 && npm ci",
+        "babysitter run:create --process-id babysitter-afk-doc-vader --entry \"$PWD/process.mjs#process\" --inputs ./inputs.json --non-interactive --json",
+        "babysitter run:iterate <run-directory> --json"
+      ],
+      "observedVersions": [
+        { "subject": "babysitter-dv", "path": "package.json", "version": "0.1.0" },
+        { "subject": "babysitter-afk-doc-vader", "path": "blueprints/babysitter-afk-v6/package.json", "version": "6.0.0" },
+        { "subject": "Babysitter CLI validated environment", "path": "blueprints/babysitter-afk-v6/README.md", "version": "6.0.3" }
+      ],
+      "pending": [
+        "Decide an internal blueprint delivery target and adapter.",
+        "Provide a declared or provisioned doc-vader dv command for root check parity."
+      ],
+      "unattested": [
+        "Babysitter publication, target registry, receipt, and rollback command."
+      ]
+    },
+    {
+      "id": "awx-ee-proxmox",
+      "defaultSha": "579aa7dbc2c721be6542afae531abd2075718ef2",
+      "sourceDeclaredCommands": [
+        "ansible-builder build --tag quay.io/calan/awx/ee:24.6.1-community-general"
+      ],
+      "observedVersions": [
+        { "subject": "AWX execution-environment base image reference", "path": "execution-environment.yml", "version": "24.6.1" },
+        { "subject": "documented local build tag", "path": "README.md", "version": "24.6.1-community-general" }
+      ],
+      "pending": [
+        "Choose destination registry/repository and build immutable manifest digest(s) with provenance, SBOM, signature, platform coverage, retention, and rollback evidence.",
+        "Resolve the base-image digest and transitive dependency pinning policy."
+      ],
+      "unattested": [
+        "Availability or immutability of quay.io/calan/awx/ee:24.6.1-community-general.",
+        "Built image digest, registry receipt, and rollback reference."
+      ]
+    },
+    {
+      "id": "templjs",
+      "defaultSha": "64da887f6f26eb18d57d7416e06d3f4a1efbac16",
+      "sourceDeclaredCommands": [
+        "pnpm install --frozen-lockfile",
+        "pnpm build",
+        "pnpm run ci:lint",
+        "pnpm format:check",
+        "pnpm run ci:type-check",
+        "pnpm run ci:frontmatter",
+        "pnpm run ci:docs-api",
+        "pnpm run ci:test",
+        "pnpm run ci:build",
+        "pnpm run preflight:strict",
+        "pnpm --filter \"$pkg\" publish --access public --tag \"$NPM_DIST_TAG\" --no-git-checks",
+        "npm view \"$pkg@$version\" version"
+      ],
+      "observedVersions": [
+        { "subject": "@templjs/core", "path": "src/packages/core/package.json", "version": "0.1.0" },
+        { "subject": "@templjs/cli", "path": "src/packages/cli/package.json", "version": "0.1.0" },
+        { "subject": "@templjs/context-graph", "path": "src/packages/context-graph/package.json", "version": "0.1.0" },
+        { "subject": "@templjs/volar", "path": "src/packages/volar/package.json", "version": "0.1.0" },
+        { "subject": "@templjs/language-core", "path": "src/packages/language-core/package.json", "version": "0.1.0" },
+        { "subject": "@templjs/language-server", "path": "src/packages/language-server/package.json", "version": "0.1.0" },
+        { "subject": "@templjs/language-service", "path": "src/packages/language-service/package.json", "version": "0.1.0" },
+        { "subject": "@templjs/semantify", "path": "src/packages/semantify/package.json", "version": "0.1.0" },
+        { "subject": "templjs.vscode-templjs", "path": "src/extensions/vscode/package.json", "version": "0.1.0" }
+      ],
+      "pending": [
+        "Choose target owner/environment and a rollback policy for npm and VS Code Marketplace artifacts.",
+        "Resolve whether the staging default SHA or a main-reachable stable-release SHA is frozen, and resolve the four-package stable-version guard versus eight discovered packages."
+      ],
+      "unattested": [
+        "npm trusted-publisher enrollment, VS Code Marketplace authorization, required secrets, publication receipts, and rollback commands."
+      ]
+    },
+    {
+      "id": "templjs-template",
+      "defaultSha": "7d14b72c18925e73ab95a495542d07da45e4fe3a",
+      "sourceDeclaredCommands": [
+        "pnpm install --frozen-lockfile"
+      ],
+      "observedVersions": [
+        { "subject": "project-monorepo", "path": "package.json", "version": "private 0.0.0" }
+      ],
+      "pending": [
+        "Queue a read-only history import only; prohibit active workspace, image, and release-artifact handling."
+      ],
+      "unattested": [
+        "Implemented package or extension, image definition, publication receipt, and rollback capability."
+      ]
+    },
+    {
+      "id": "templjs-temple",
+      "defaultSha": "9fdaed9a03599720473ebae802b2579d5233acac",
+      "sourceDeclaredCommands": [
+        "pytest"
+      ],
+      "observedVersions": [
+        { "subject": "temple", "path": "setup.py", "version": "0.0.1" },
+        { "subject": "temple", "path": "temple/pyproject.toml", "version": "0.1.0" },
+        { "subject": "temple-linter", "path": "temple-linter/pyproject.toml", "version": "0.1.0" },
+        { "subject": "vscode-temple-linter", "path": "vscode-temple-linter/package.json", "version": "0.0.10" }
+      ],
+      "pending": [
+        "Queue a read-only history import only; prohibit active workspace, image, and release-artifact handling."
+      ],
+      "unattested": [
+        "Package, image, or VS Code artifact availability; publication receipt; and rollback capability."
+      ]
+    }
+  ]
+}

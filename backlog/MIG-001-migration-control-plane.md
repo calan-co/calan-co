@@ -43,6 +43,19 @@ Parity evidence: <required after import>
 Staging receipt: <required before staging-released>
 ```
 
+## Phase-0 work items
+
+All records below remain queued in [`migration/ledger.yaml`](../migration/ledger.yaml). Their authoritative default SHAs, source commands, observed versions, and explicitly unattested facts are in [`migration/artifact-baseline.json`](../migration/artifact-baseline.json).
+
+- [MIG-001.1: doc-vader](MIG-001.1-doc-vader.md)
+- [MIG-001.2: linkity](MIG-001.2-linkity.md)
+- [MIG-001.3: pi-extensions](MIG-001.3-pi-extensions.md)
+- [MIG-001.4: babysitter-dv](MIG-001.4-babysitter-dv.md)
+- [MIG-001.5: awx-ee-proxmox](MIG-001.5-awx-ee-proxmox.md)
+- [MIG-001.6: templjs](MIG-001.6-templjs.md)
+- [MIG-001.7: templjs-template](MIG-001.7-templjs-template.md)
+- [MIG-001.8: templjs-temple](MIG-001.8-templjs-temple.md)
+
 ## Exit criteria
 
 A child work item may enter `imported` only when its source is allowlisted in the

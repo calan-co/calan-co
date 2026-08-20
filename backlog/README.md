@@ -19,7 +19,9 @@ Every migration work item records:
 - **Target path:** the approved repository-relative destination, or `unassigned`
   while the import is not approved.
 - **Evidence:** source inventory record, source-freeze evidence, test command and
-  result, artifact-catalog linkage, adapter evidence, and later-state receipts.
+  result, artifact-catalog linkage, adapter evidence, and later-state receipts. A
+  queued read-only history import instead records its exclusion from active
+  workspace, normal CI, image, and release-artifact handling.
 - **Rollback:** the pre-import rollback target and the responsible owner.
 
 Use [MIG-001](MIG-001-migration-control-plane.md) as the initial migration epic

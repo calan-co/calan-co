@@ -11,7 +11,8 @@
   "scripts": {
     "test:control-plane": "node --test test/validators/*.test.mjs",
     "validate:catalog": "node scripts/validate-release-artifacts.mjs",
+    "validate:baseline": "node scripts/validate-artifact-baseline.mjs",
     "validate:ledger": "node scripts/validate-migration-ledger.mjs",
-    "validate": "pnpm run validate:catalog && pnpm run validate:ledger && pnpm run test:control-plane"
+    "validate": "pnpm run validate:catalog && pnpm run validate:baseline && pnpm run validate:ledger && pnpm run test:control-plane"
   }
 }

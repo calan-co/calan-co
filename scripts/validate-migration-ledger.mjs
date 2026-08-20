@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { posix, resolve } from 'node:path';
 
 const ledgerPath = resolve(process.cwd(), process.argv[2] ?? 'migration/ledger.yaml');
 const inventoryPath = resolve(process.cwd(), process.argv[3] ?? 'migration/inventory.yaml');
@@ -23,6 +23,8 @@ const phaseZeroStates = new Set([
 ]);
 const inventorySchema = '../schema/migration-inventory.schema.json';
 const githubRepositoryUrl = /^https:\/\/github\.com\/[^/?#]+\/[^/?#]+$/;
+const gitCommitSha = /^[0-9a-f]{40}$/;
+const inventoryStatuses = new Set(['eligible-for-import', 'blocked', 'excluded']);
 const catalogRequiredFields = [
   'id',
   'path',
@@ -54,6 +56,14 @@ function requireString(record, field, location) {
   if (typeof record[field] !== 'string' || record[field].trim() === '') {
     fail(`${location}.${field} must be a non-empty string`);
   }
+}
+
+function isNormalizedRepositoryRelativePosixPath(path) {
+  return path !== '.' &&
+    !path.includes('\\') &&
+    !posix.isAbsolute(path) &&
+    posix.normalize(path) === path &&
+    path.split('/').every((segment) => segment !== '' && segment !== '.' && segment !== '..');
 }
 
 function requireDate(record, field, location) {
@@ -95,16 +105,33 @@ function validateInventory(inventory) {
 
   const ids = new Set();
   const sources = new Set();
+  const recordsById = new Map();
   for (const [index, source] of inventory.sources.entries()) {
     const location = `inventory.sources[${index}]`;
     if (!source || typeof source !== 'object' || Array.isArray(source)) {
       fail(`${location} must be an object`);
     }
-    rejectUnknownFields(source, new Set(['id', 'source']), location);
-    requireString(source, 'id', location);
-    requireString(source, 'source', location);
+    rejectUnknownFields(source, new Set([
+      'id', 'source', 'defaultBranch', 'defaultSha', 'status', 'targetPath', 'exclusions',
+    ]), location);
+    for (const field of ['id', 'source', 'defaultBranch', 'defaultSha', 'status', 'targetPath']) {
+      requireString(source, field, location);
+    }
     if (!githubRepositoryUrl.test(source.source)) {
       fail(`${location}.source must be a complete GitHub HTTPS repository URL`);
+    }
+    if (!gitCommitSha.test(source.defaultSha)) {
+      fail(`${location}.defaultSha must be a lowercase 40-character Git commit SHA`);
+    }
+    if (!inventoryStatuses.has(source.status)) {
+      fail(`${location}.status must be one of: ${[...inventoryStatuses].join(', ')}`);
+    }
+    if (!isNormalizedRepositoryRelativePosixPath(source.targetPath)) {
+      fail(`${location}.targetPath must be a normalized repo-relative POSIX path without traversal`);
+    }
+    if (!Array.isArray(source.exclusions) || source.exclusions.some((exclusion) =>
+      typeof exclusion !== 'string' || exclusion.trim() === '')) {
+      fail(`${location}.exclusions must be an array of non-empty strings`);
     }
     if (ids.has(source.id)) {
       fail(`duplicate inventory source id: ${source.id}`);
@@ -114,8 +141,9 @@ function validateInventory(inventory) {
     }
     ids.add(source.id);
     sources.add(source.source);
+    recordsById.set(source.id, source);
   }
-  return sources;
+  return { recordsById, sources };
 }
 
 function validateCatalog(catalog) {
@@ -145,7 +173,8 @@ function validateCatalog(catalog) {
   return ids;
 }
 
-const inventorySources = validateInventory(readJsonCompatibleYaml(inventoryPath, 'inventory'));
+const { recordsById: inventoryRecordsById, sources: inventorySources } =
+  validateInventory(readJsonCompatibleYaml(inventoryPath, 'inventory'));
 const catalogArtifactIds = validateCatalog(readJsonCompatibleYaml(catalogPath, 'artifact catalog'));
 const ledger = readJsonCompatibleYaml(ledgerPath, 'ledger');
 
@@ -178,6 +207,16 @@ for (const [index, record] of ledger.migrations.entries()) {
   if (!inventorySources.has(record.source)) {
     fail(`${location}.source must be in the migration inventory allowlist`);
   }
+  const inventoryRecord = inventoryRecordsById.get(record.id);
+  if (!inventoryRecord) {
+    fail(`${location}.id must match an authoritative inventory record`);
+  }
+  if (record.source !== inventoryRecord.source) {
+    fail(`${location}.source must match inventory record for id: ${record.id}`);
+  }
+  if (record.targetPath !== inventoryRecord.targetPath) {
+    fail(`${location}.targetPath must match inventory record for id: ${record.id}`);
+  }
   if (!Array.isArray(record.artifacts) || record.artifacts.length === 0 ||
       record.artifacts.some((artifact) => typeof artifact !== 'string' || artifact.trim() === '')) {
     fail(`${location}.artifacts must be a non-empty array of strings`);
@@ -193,6 +232,17 @@ for (const [index, record] of ledger.migrations.entries()) {
   }
   ids.add(record.id);
   sourceUrls.add(record.source);
+
+  if (record.state === 'queued') {
+    for (const field of [
+      'sourceFreezeDate', 'testCommand', 'adapterEvidence', 'parityEvidence',
+      'stagingReceipt', 'rollbackTarget', 'archiveEvidence',
+    ]) {
+      if (field in record) {
+        fail(`${location}.${field} must not be recorded while state is queued`);
+      }
+    }
+  }
 
   if (phaseZeroStates.has(record.state)) {
     requireDate(record, 'sourceFreezeDate', location);
