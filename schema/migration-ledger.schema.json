@@ -67,6 +67,27 @@
               "required": ["state"]
             },
             "then": { "required": ["archiveEvidence"] }
+          },
+          {
+            "if": {
+              "properties": {
+                "state": { "const": "queued" }
+              },
+              "required": ["state"]
+            },
+            "then": {
+              "not": {
+                "anyOf": [
+                  { "required": ["sourceFreezeDate"] },
+                  { "required": ["testCommand"] },
+                  { "required": ["adapterEvidence"] },
+                  { "required": ["parityEvidence"] },
+                  { "required": ["stagingReceipt"] },
+                  { "required": ["rollbackTarget"] },
+                  { "required": ["archiveEvidence"] }
+                ]
+              }
+            }
           }
         ]
       }

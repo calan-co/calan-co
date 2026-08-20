@@ -48,6 +48,11 @@ const allowedInventory = {
   sources: [{
     id: 'example-source',
     source: 'https://github.com/calan-co/example-source',
+    defaultBranch: 'main',
+    defaultSha: '0123456789abcdef0123456789abcdef01234567',
+    status: 'eligible-for-import',
+    targetPath: 'packages/example',
+    exclusions: [],
   }],
 };
 
@@ -92,6 +97,7 @@ test('CODEOWNERS assigns the temporary owner to every required migration domain'
     '/packages/doc-vader/**',
     '/packages/linkity/**',
     '/products/templjs/**',
+    '/products/pi-extensions/**',
     '/extensions/pi/**',
     '/blueprints/babysitter-dv/**',
     '/images/awx-ee-proxmox/**',
@@ -163,6 +169,53 @@ test('release artifact validator rejects legacy paths', () => {
   assert.match(result.stderr, /must not be under legacy/i);
 });
 
+test('artifact baseline validator accepts the checked-in inventory-aligned baseline', () => {
+  const result = spawnSync(process.execPath, [
+    join(repositoryRoot, 'scripts', 'validate-artifact-baseline.mjs'),
+  ], { cwd: repositoryRoot, encoding: 'utf8' });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /8 source\(s\)/);
+});
+
+test('Phase-0 baseline records all authoritative sources without claiming later migration evidence', () => {
+  const inventory = JSON.parse(readFileSync(join(repositoryRoot, 'migration', 'inventory.yaml'), 'utf8'));
+  const ledger = JSON.parse(readFileSync(join(repositoryRoot, 'migration', 'ledger.yaml'), 'utf8'));
+  const artifactBaseline = JSON.parse(readFileSync(join(repositoryRoot, 'migration', 'artifact-baseline.json'), 'utf8'));
+  const catalog = JSON.parse(readFileSync(join(repositoryRoot, 'release-artifacts.yaml'), 'utf8'));
+  const expectedSources = new Map([
+    ['doc-vader', 'a99b753f87b614c39d9ca09b9132c292cb27daf1'],
+    ['linkity', '4eacae036f935f987bbe4de18cca36034684c989'],
+    ['pi-extensions', '842f0264043c9b51509d0496c538a5845a0ab8c8'],
+    ['babysitter-dv', '458c9f66f4f3a4472c131244a8932ecd0ca4d31d'],
+    ['awx-ee-proxmox', '579aa7dbc2c721be6542afae531abd2075718ef2'],
+    ['templjs', '64da887f6f26eb18d57d7416e06d3f4a1efbac16'],
+    ['templjs-template', '7d14b72c18925e73ab95a495542d07da45e4fe3a'],
+    ['templjs-temple', '9fdaed9a03599720473ebae802b2579d5233acac'],
+  ]);
+
+  assert.equal(inventory.sources.length, expectedSources.size);
+  for (const source of inventory.sources) {
+    assert.equal(source.defaultSha, expectedSources.get(source.id), source.id);
+    assert.match(source.defaultBranch, /^\S+$/);
+    assert.match(source.targetPath, /^(?:packages|products|extensions|blueprints|images|legacy)\//);
+    assert.ok(Array.isArray(source.exclusions));
+  }
+  assert.deepEqual(new Set(ledger.migrations.map(({ source }) => source)),
+    new Set(inventory.sources.map(({ source }) => source)));
+  for (const migration of ledger.migrations) {
+    assert.equal(migration.state, 'queued');
+    for (const unavailableLaterStateField of [
+      'sourceFreezeDate', 'testCommand', 'adapterEvidence', 'parityEvidence',
+      'stagingReceipt', 'rollbackTarget', 'archiveEvidence',
+    ]) {
+      assert.ok(!(unavailableLaterStateField in migration), `${migration.id}.${unavailableLaterStateField}`);
+    }
+  }
+  assert.equal(catalog.artifacts.length, 0);
+  assert.deepEqual(new Set(artifactBaseline.sources.map(({ id }) => id)), new Set(expectedSources.keys()));
+});
+
 test('migration ledger validator accepts the empty bootstrap ledger', () => {
   const result = validateLedger({
     schemaVersion: 1,
@@ -189,11 +242,37 @@ test('migration ledger validator rejects incomplete inventory repository URLs', 
     migrations: [],
   }, {
     ...allowedInventory,
-    sources: [{ id: 'example-source', source: 'https://github.com/calan-co' }],
+    sources: [{ ...allowedInventory.sources[0], source: 'https://github.com/calan-co' }],
   });
 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /complete GitHub HTTPS repository URL/);
+});
+
+test('migration ledger validator rejects inventory records without an authoritative SHA', () => {
+  const result = validateLedger({
+    schemaVersion: 1,
+    migrations: [],
+  }, {
+    ...allowedInventory,
+    sources: [{ ...allowedInventory.sources[0], defaultSha: 'not-a-sha' }],
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /defaultSha.*40-character Git commit SHA/);
+});
+
+test('migration ledger validator rejects non-normalized inventory target paths', () => {
+  const result = validateLedger({
+    schemaVersion: 1,
+    migrations: [],
+  }, {
+    ...allowedInventory,
+    sources: [{ ...allowedInventory.sources[0], targetPath: '../packages/example' }],
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /targetPath.*normalized repo-relative POSIX path/);
 });
 
 test('migration ledger validator rejects incomplete artifact catalog records', () => {
@@ -248,6 +327,16 @@ test('migration ledger validator rejects artifacts missing from the catalog', ()
 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /artifact catalog/i);
+});
+
+test('migration ledger validator rejects later-state evidence on queued records', () => {
+  const result = validateLedger({
+    schemaVersion: 1,
+    migrations: [importedRecord({ state: 'queued' })],
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /must not be recorded while state is queued/);
 });
 
 test('migration ledger validator requires staging evidence before cut-over', () => {

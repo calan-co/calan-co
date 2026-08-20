@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/calan-co/calan-co/schema/migration-artifact-baseline.schema.json",
+  "title": "Calan & Co authoritative migration artifact baseline",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schemaVersion", "sources"],
+  "properties": {
+    "$schema": { "const": "../schema/migration-artifact-baseline.schema.json" },
+    "schemaVersion": { "const": 1 },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "defaultSha", "verifiedSourceCommands", "observedVersions", "pending", "unattested"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "defaultSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+          "verifiedSourceCommands": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "observedVersions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["subject", "path", "version"],
+              "properties": {
+                "subject": { "type": "string", "minLength": 1 },
+                "path": { "type": "string", "minLength": 1 },
+                "version": { "type": "string", "minLength": 1 }
+              }
+            }
+          },
+          "pending": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "unattested": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+        }
+      }
+    }
+  }
+}

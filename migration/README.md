@@ -1,10 +1,10 @@
 # Migration ledger
 
-`ledger.yaml` begins empty because this bootstrap does not inspect, import, or alter a source repository. Add a record only after the Phase-0 source inventory and artifact baseline are captured from authoritative evidence. A record's exact source URL must appear in the authoritative [`inventory.yaml`](inventory.yaml) allowlist; forks, `calan-co/.github`, and `calan-co/cicd-shared-pipeline` are excluded by omission.
+`inventory.yaml` records each approved original repository's canonical URL, observed default branch and immutable default SHA, target path, current import disposition, and explicit exclusions. [`artifact-baseline.json`](artifact-baseline.json) holds only observed source commands, version facts, and pending or unattested facts tied to those pins. A ledger record's exact source URL must appear in the authoritative inventory allowlist; forks, `calan-co/.github`, and `calan-co/cicd-shared-pipeline` remain excluded by omission.
 
 ## State and evidence gates
 
-- `queued`: source, owner, target path, and artifact list are known.
+- `queued`: source, owner, target path, and artifact list are known. It must not claim source freeze, adapter, test, parity, staging, rollback, or archive evidence.
 - `imported`: history has been imported on its approved migration branch, with source freeze date, rollback target, source-preserving test command, artifact-catalog linkage, and compatibility-adapter evidence recorded.
 - `parity-verified`: `parityEvidence` is recorded.
 - `staging-released`: parity evidence and `stagingReceipt` are recorded.
