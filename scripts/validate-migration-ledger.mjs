@@ -25,7 +25,7 @@ const phaseZeroStates = new Set([
 const inventorySchema = '../schema/migration-inventory.schema.json';
 const githubRepositoryUrl = /^https:\/\/github\.com\/[^/?#]+\/[^/?#]+$/;
 const gitCommitSha = /^[0-9a-f]{40}$/;
-const inventoryStatuses = new Set(['eligible-for-import', 'blocked', 'excluded']);
+const inventoryStatuses = new Set(['eligible-for-import', 'history-imported', 'blocked', 'excluded']);
 const catalogRequiredFields = [
   'id',
   'path',

@@ -234,7 +234,7 @@ test('Phase-0 baseline records all authoritative sources without claiming later 
     assert.match(source.defaultBranch, /^\S+$/);
     assert.ok(Array.isArray(source.exclusions));
     assert.equal(source.status, ['templjs-template', 'templjs-temple'].includes(source.id)
-      ? 'eligible-for-import'
+      ? 'history-imported'
       : source.status);
   }
   for (const migration of ledger.migrations) {
@@ -273,6 +273,38 @@ test('Phase-0 baseline records all authoritative sources without claiming later 
   }
   assert.equal(catalog.artifacts.length, 0);
   assert.deepEqual(new Set(artifactBaseline.sources.map(({ id }) => id)), new Set(expectedSources.keys()));
+});
+
+test('completed history imports have consistent inventory, baseline, ledger, and backlog lifecycle records', () => {
+  const inventory = JSON.parse(readFileSync(join(repositoryRoot, 'migration', 'inventory.yaml'), 'utf8'));
+  const baseline = JSON.parse(readFileSync(join(repositoryRoot, 'migration', 'artifact-baseline.json'), 'utf8'));
+  const ledger = JSON.parse(readFileSync(join(repositoryRoot, 'migration', 'ledger.yaml'), 'utf8'));
+  const historyImports = [
+    ['templjs-template', '7d14b72c18925e73ab95a495542d07da45e4fe3a', 'legacy/template', 'MIG-001.7-templjs-template.md'],
+    ['templjs-temple', '9fdaed9a03599720473ebae802b2579d5233acac', 'legacy/temple', 'MIG-001.8-templjs-temple.md'],
+  ];
+
+  for (const [id, defaultSha, targetPath, backlogFile] of historyImports) {
+    const inventoryRecord = inventory.sources.find((source) => source.id === id);
+    const baselineRecord = baseline.sources.find((source) => source.id === id);
+    const ledgerRecord = ledger.migrations.find((migration) => migration.id === id);
+    const backlog = readFileSync(join(repositoryRoot, 'backlog', backlogFile), 'utf8');
+
+    assert.equal(inventoryRecord.status, 'history-imported', `${id}.inventory.status`);
+    assert.equal(inventoryRecord.targetPath, targetPath, `${id}.inventory.targetPath`);
+    assert.equal(inventoryRecord.defaultSha, defaultSha, `${id}.inventory.defaultSha`);
+    assert.equal(baselineRecord.defaultSha, inventoryRecord.defaultSha, `${id}.baseline.defaultSha`);
+    assert.deepEqual(baselineRecord.pending, [
+      'History import completed as a read-only history import; active workspace, image, and release-artifact handling remain prohibited.',
+    ], `${id}.baseline.pending`);
+    assert.doesNotMatch(baselineRecord.pending.join('\n'), /\b(?:eligible|queued|queue)\b/i, `${id}.baseline.pending`);
+    assert.equal(ledgerRecord.state, inventoryRecord.status, `${id}.ledger.state`);
+    assert.equal(ledgerRecord.targetPath, inventoryRecord.targetPath, `${id}.ledger.targetPath`);
+    assert.match(backlog, /^- \*\*Lifecycle:\*\* history-imported$/m, `${id}.backlog.lifecycle`);
+    assert.ok(backlog.includes(`**Source inventory ID:** \`${id}\``), `${id}.backlog.inventory`);
+    assert.ok(backlog.includes(`**Target path:** \`${targetPath}\``), `${id}.backlog.targetPath`);
+    assert.ok(backlog.includes(`**Baseline evidence:** \`migration/artifact-baseline.json\` \`${id}\` at \`${defaultSha}\``), `${id}.backlog.baseline`);
+  }
 });
 
 test('migration ledger validator accepts a legacy history-only import without catalog artifacts', () => {

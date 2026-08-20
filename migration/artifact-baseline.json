@@ -159,7 +159,7 @@
         { "subject": "project-monorepo", "path": "package.json", "version": "private 0.0.0" }
       ],
       "pending": [
-        "Queue a read-only history import only; prohibit active workspace, image, and release-artifact handling."
+        "History import completed as a read-only history import; active workspace, image, and release-artifact handling remain prohibited."
       ],
       "unattested": [
         "Implemented package or extension, image definition, publication receipt, and rollback capability."
@@ -178,7 +178,7 @@
         { "subject": "vscode-temple-linter", "path": "vscode-temple-linter/package.json", "version": "0.0.10" }
       ],
       "pending": [
-        "Queue a read-only history import only; prohibit active workspace, image, and release-artifact handling."
+        "History import completed as a read-only history import; active workspace, image, and release-artifact handling remain prohibited."
       ],
       "unattested": [
         "Package, image, or VS Code artifact availability; publication receipt; and rollback capability."
