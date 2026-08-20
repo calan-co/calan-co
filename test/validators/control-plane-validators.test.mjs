@@ -86,6 +86,24 @@ test('control-plane workspace discovery excludes legacy paths', () => {
   assert.doesNotMatch(workspace, /^\s*-\s*["']legacy(?:\/\*\*)?["']\s*$/m);
 });
 
+test('CODEOWNERS assigns the temporary owner to every required migration domain', () => {
+  const codeowners = readFileSync(join(repositoryRoot, '.github', 'CODEOWNERS'), 'utf8');
+  const requiredPatterns = [
+    '/packages/doc-vader/**',
+    '/packages/linkity/**',
+    '/products/templjs/**',
+    '/extensions/pi/**',
+    '/blueprints/babysitter-dv/**',
+    '/images/awx-ee-proxmox/**',
+    '/legacy/**',
+  ];
+
+  for (const pattern of requiredPatterns) {
+    const escapedPattern = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    assert.match(codeowners, new RegExp(`^${escapedPattern}\\s+@chris-cald\\s*$`, 'm'));
+  }
+});
+
 test('release artifact validator accepts the empty bootstrap catalog', () => {
   const result = validate('validate-release-artifacts.mjs', {
     schemaVersion: 1,
