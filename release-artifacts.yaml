@@ -1,0 +1,5 @@
+{
+  "$schema": "./schema/release-artifacts.schema.json",
+  "schemaVersion": 1,
+  "artifacts": []
+}

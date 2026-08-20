@@ -1,0 +1,17 @@
+{
+  "name": "@calan-co/control-plane",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Non-publishing migration control plane for calan-co/calan-co.",
+  "packageManager": "pnpm@11.9.0",
+  "engines": {
+    "node": "24.x",
+    "pnpm": "11.9.0"
+  },
+  "scripts": {
+    "test:control-plane": "node --test test/validators/*.test.mjs",
+    "validate:catalog": "node scripts/validate-release-artifacts.mjs",
+    "validate:ledger": "node scripts/validate-migration-ledger.mjs",
+    "validate": "pnpm run validate:catalog && pnpm run validate:ledger && pnpm run test:control-plane"
+  }
+}

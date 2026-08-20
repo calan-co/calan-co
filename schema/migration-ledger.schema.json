@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/calan-co/calan-co/schema/migration-ledger.schema.json",
+  "title": "Calan & Co migration ledger",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "migrations"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schemaVersion": { "const": 1 },
+    "migrations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "source", "targetPath", "owner", "artifacts", "state"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "source": { "type": "string", "format": "uri" },
+          "targetPath": { "type": "string", "minLength": 1 },
+          "owner": { "type": "string", "minLength": 1 },
+          "artifacts": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+          "state": { "enum": ["queued", "imported", "parity-verified", "staging-released", "cut-over", "archived", "blocked"] },
+          "sourceFreezeDate": { "type": "string", "format": "date" },
+          "parityEvidence": { "type": "string", "minLength": 1 },
+          "stagingReceipt": { "type": "string", "minLength": 1 },
+          "rollbackTarget": { "type": "string", "minLength": 1 },
+          "archiveEvidence": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

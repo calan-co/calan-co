@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json.schemastore.org/nx",
+  "workspaceLayout": {
+    "appsDir": "products",
+    "libsDir": "packages"
+  },
+  "namedInputs": {
+    "default": ["{projectRoot}/**/*", "sharedGlobals"],
+    "sharedGlobals": ["{workspaceRoot}/package.json", "{workspaceRoot}/pnpm-workspace.yaml", "{workspaceRoot}/nx.json", "{workspaceRoot}/release-artifacts.yaml", "{workspaceRoot}/migration/ledger.yaml"]
+  },
+  "targetDefaults": {
+    "build": { "cache": true },
+    "test": { "cache": true },
+    "lint": { "cache": true }
+  }
+}

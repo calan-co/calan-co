@@ -1,0 +1,7 @@
+# Active workspace discovery only. Imported legacy snapshots stay excluded.
+packages:
+  - "packages/*"
+  - "products/*"
+  - "extensions/*"
+  - "blueprints/*"
+  - "!legacy/**"

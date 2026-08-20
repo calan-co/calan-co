@@ -1,0 +1,30 @@
+name: Control-plane validation
+
+on:
+  pull_request:
+    paths:
+      - 'release-artifacts.yaml'
+      - 'migration/ledger.yaml'
+      - 'schema/**'
+      - 'scripts/**'
+      - 'test/validators/**'
+      - 'package.json'
+      - '.github/workflows/control-plane-validation.yml'
+
+# This workflow is intentionally PR-only and non-publishing. It has no environment,
+# no registry credentials, and no production secrets; imported projects are not installed.
+permissions:
+  contents: read
+
+jobs:
+  validate-control-plane:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Validate catalog and ledger
+        run: node scripts/validate-release-artifacts.mjs && node scripts/validate-migration-ledger.mjs
+      - name: Run validator tests
+        run: node --test test/validators/*.test.mjs
