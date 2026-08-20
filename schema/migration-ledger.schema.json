@@ -20,8 +20,9 @@
           "targetPath": { "type": "string", "minLength": 1 },
           "owner": { "type": "string", "minLength": 1 },
           "artifacts": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
-          "state": { "enum": ["queued", "imported", "parity-verified", "staging-released", "cut-over", "archived", "blocked"] },
+          "state": { "enum": ["queued", "history-imported", "imported", "parity-verified", "staging-released", "cut-over", "archived", "blocked"] },
           "sourceFreezeDate": { "type": "string", "format": "date" },
+          "historyImportEvidence": { "type": "string", "minLength": 1, "pattern": "\\S" },
           "testCommand": { "type": "string", "minLength": 1, "pattern": "\\S" },
           "adapterEvidence": { "type": "string", "minLength": 1, "pattern": "\\S" },
           "parityEvidence": { "type": "string", "minLength": 1, "pattern": "\\S" },
@@ -30,6 +31,20 @@
           "archiveEvidence": { "type": "string", "minLength": 1, "pattern": "\\S" }
         },
         "allOf": [
+          {
+            "if": {
+              "properties": {
+                "state": { "const": "history-imported" }
+              },
+              "required": ["state"]
+            },
+            "then": {
+              "properties": {
+                "targetPath": { "pattern": "^legacy/" }
+              },
+              "required": ["sourceFreezeDate", "rollbackTarget", "historyImportEvidence"]
+            }
+          },
           {
             "if": {
               "properties": {
@@ -79,7 +94,8 @@
               "not": {
                 "anyOf": [
                   { "required": ["sourceFreezeDate"] },
-                  { "required": ["testCommand"] },
+                  { "required": ["historyImportEvidence"] },
+                  { "required": ["testCommand"] }
                   { "required": ["adapterEvidence"] },
                   { "required": ["parityEvidence"] },
                   { "required": ["stagingReceipt"] },

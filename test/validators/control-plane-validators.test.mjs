@@ -84,6 +84,21 @@ function importedRecord(overrides = {}) {
   };
 }
 
+function historyImportedRecord(overrides = {}) {
+  return {
+    id: 'example-source',
+    source: 'https://github.com/calan-co/example-source',
+    targetPath: 'legacy/example',
+    owner: 'migration-owner',
+    artifacts: ['example-history'],
+    state: 'history-imported',
+    sourceFreezeDate: '2026-08-20',
+    rollbackTarget: '28ba1be',
+    historyImportEvidence: 'legacy/example HEAD matches inventory defaultSha 0123456789abcdef0123456789abcdef01234567',
+    ...overrides,
+  };
+}
+
 test('control-plane workspace discovery excludes legacy paths', () => {
   const workspace = readFileSync(join(repositoryRoot, 'pnpm-workspace.yaml'), 'utf8');
 
@@ -244,6 +259,40 @@ test('Phase-0 baseline records all authoritative sources without claiming later 
   }
   assert.equal(catalog.artifacts.length, 0);
   assert.deepEqual(new Set(artifactBaseline.sources.map(({ id }) => id)), new Set(expectedSources.keys()));
+});
+
+test('migration ledger validator accepts a legacy history-only import without catalog artifacts', () => {
+  const result = validateLedger({
+    schemaVersion: 1,
+    migrations: [historyImportedRecord()],
+  }, {
+    ...allowedInventory,
+    sources: [{ ...allowedInventory.sources[0], targetPath: 'legacy/example' }],
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('migration ledger validator requires history-only evidence and rejects active targets', () => {
+  const legacyInventory = {
+    ...allowedInventory,
+    sources: [{ ...allowedInventory.sources[0], targetPath: 'legacy/example' }],
+  };
+  for (const field of ['sourceFreezeDate', 'rollbackTarget', 'historyImportEvidence']) {
+    const record = historyImportedRecord();
+    delete record[field];
+    const result = validateLedger({ schemaVersion: 1, migrations: [record] }, legacyInventory);
+
+    assert.notEqual(result.status, 0, field);
+    assert.match(result.stderr, new RegExp(field));
+  }
+
+  const activeTarget = validateLedger({
+    schemaVersion: 1,
+    migrations: [historyImportedRecord({ targetPath: 'packages/example' })],
+  });
+  assert.notEqual(activeTarget.status, 0);
+  assert.match(activeTarget.stderr, /legacy/i);
 });
 
 test('migration ledger validator accepts the empty bootstrap ledger', () => {
