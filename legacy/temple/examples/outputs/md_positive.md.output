@@ -1,0 +1,31 @@
+ 
+# User Profile
+
+
+<header>
+  <h2>Profile Summary</h2>
+</header>
+
+
+
+## Alice
+
+- Age: 30
+- Active: Yes
+- Skills:
+  
+  - python
+  - lark
+- Jobs:
+  
+  - Engineer at Acme (current)
+  
+
+
+<footer>
+	-- footer --
+	<p>Rendered by Temple DSL</p>
+</footer>
+
+
+

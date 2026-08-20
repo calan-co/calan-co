@@ -1,0 +1,8 @@
+default:
+  README.md: "⭐ You are here"
+  src/: "Extension source code"
+  src/extension.ts: "LanguageClient bootstrap and LSP wiring"
+  package.json: "Extension manifest and VS Code contributions"
+  language-configuration.json: "Editor behavior for templated files"
+  .eslintrc.cjs: "ESLint configuration"
+  tsconfig.json: "TypeScript compiler configuration"

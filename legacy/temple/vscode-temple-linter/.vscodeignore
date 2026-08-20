@@ -1,0 +1,6 @@
+dist/server/**
+src/**
+tsconfig.json
+.eslintrc.cjs
+.structure-notes.yaml
+test_sample.json.tmpl

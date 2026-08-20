@@ -1,0 +1,10 @@
+---
+extends: default
+
+# Per-folder yamllint config for GitHub workflow files.
+# This file starts from yamllint's built-in `default` profile and applies
+# workflow-specific overrides.
+
+rules:
+  line-length: disable
+  truthy: disable

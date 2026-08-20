@@ -1,0 +1,12 @@
+{
+  "pythonVersion": "3.14",
+  "pythonPlatform": "Darwin",
+  "typeCheckingMode": "standard",
+  "include": ["src", "tests"],
+  "extraPaths": [
+    "${workspaceFolder}/src"
+  ],
+  "venvPath": ".",
+  "venv": ".venv"
+}
+

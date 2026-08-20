@@ -1,0 +1,37 @@
+<html>
+  <head><title>User</title></head>
+  <body>
+    
+<header>
+  <h2>Profile Summary</h2>
+</header>
+
+
+    <div id="profile">
+      <h1>Alice</h1>
+      <p>Age: 30</p>
+      <p>Active: Yes</p>
+      <ul>
+        
+        <li>python</li>
+        
+        <li>lark</li>
+        
+      </ul>
+      <p>Jobs:</p>
+      <ul>
+        
+        <li>Engineer at Acme (current)</li>
+        
+      </ul>
+    </div>
+    
+<footer>
+	-- footer --
+	<p>Rendered by Temple DSL</p>
+</footer>
+
+
+  </body>
+</html>
+

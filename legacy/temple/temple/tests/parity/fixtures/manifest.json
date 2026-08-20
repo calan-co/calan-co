@@ -1,0 +1,54 @@
+{
+  "cases": [
+    {
+      "name": "undefined_variable",
+      "template": "undefined_variable.tmpl",
+      "context": {
+        "user": {
+          "name": "Ada"
+        }
+      },
+      "expected_codes": ["undefined_variable"]
+    },
+    {
+      "name": "missing_property",
+      "template": "missing_property.tmpl",
+      "context": {
+        "user": {
+          "name": "Ada"
+        }
+      },
+      "expected_codes": ["missing_property"]
+    },
+    {
+      "name": "filter_argument_undefined",
+      "template": "filter_argument_undefined.tmpl",
+      "context": {
+        "users": [
+          {
+            "name": "Ada"
+          },
+          {
+            "name": "Grace"
+          }
+        ]
+      },
+      "expected_codes": ["undefined_variable"]
+    },
+    {
+      "name": "valid_pipeline",
+      "template": "valid_pipeline.tmpl",
+      "context": {
+        "users": [
+          {
+            "name": "Ada"
+          },
+          {
+            "name": "Grace"
+          }
+        ]
+      },
+      "expected_codes": []
+    }
+  ]
+}

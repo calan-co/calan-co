@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="{{ site.description }}">
+    <meta name="keywords" content="{% for keyword in site.keywords %}{{ keyword }}{% if not loop.last %}, {% end %}{% end %}">
+    <meta name="author" content="{{ site.author }}">
+    <title>{{ page.title }} | {{ site.name }}</title>
+    
+    <!-- Open Graph / Social Media -->
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="{{ site.url }}{{ page.url }}">
+    <meta property="og:title" content="{{ page.title }}">
+    <meta property="og:description" content="{{ page.description }}">
+    {% if page.image %}
+    <meta property="og:image" content="{{ site.url }}{{ page.image }}">
+    {% end %}
+    
+    <!-- Stylesheets -->
+    {% for stylesheet in site.stylesheets %}
+    <link rel="stylesheet" href="{{ stylesheet.url }}"{% if stylesheet.integrity %} integrity="{{ stylesheet.integrity }}" crossorigin="anonymous"{% end %}>
+    {% end %}
+    
+    {% if page.custom_css %}
+    <style>
+        {{ page.custom_css }}
+    </style>
+    {% end %}
+</head>
+<body class="{{ page.body_class }}" data-theme="{{ site.theme }}">
+    
+    <!-- Header -->
+    <header class="site-header">
+        <nav class="navbar">
+            <div class="container">
+                <div class="navbar-brand">
+                    {% if site.logo %}
+                    <img src="{{ site.logo }}" alt="{{ site.name }}" class="logo">
+                    {% end %}
+                    <a href="/" class="site-title">{{ site.name }}</a>
+                </div>
+                
+                <div class="navbar-menu">
+                    <ul class="nav-links">
+                        {% for item in navigation.main %}
+                        <li class="nav-item{% if item.active %} active{% end %}">
+                            <a href="{{ item.url }}"{% if item.external %} target="_blank" rel="noopener"{% end %}>
+                                {% if item.icon %}<i class="{{ item.icon }}"></i>{% end %}
+                                {{ item.label }}
+                            </a>
+                            {% if item.dropdown %}
+                            <ul class="dropdown-menu">
+                                {% for subitem in item.dropdown %}
+                                <li><a href="{{ subitem.url }}">{{ subitem.label }}</a></li>
+                                {% end %}
+                            </ul>
+                            {% end %}
+                        </li>
+                        {% end %}
+                    </ul>
+                    
+                    <div class="navbar-actions">
+                        {% if user.authenticated %}
+                        <div class="user-menu">
+                            <button class="user-avatar" aria-label="User menu">
+                                {% if user.avatar %}
+                                <img src="{{ user.avatar }}" alt="{{ user.name }}">
+                                {% else %}
+                                <span>{{ user.initials }}</span>
+                                {% end %}
+                            </button>
+                            <div class="user-dropdown">
+                                <div class="user-info">
+                                    <strong>{{ user.name }}</strong>
+                                    <span>{{ user.email }}</span>
+                                </div>
+                                {% for action in user.menu_items %}
+                                <a href="{{ action.url }}" class="dropdown-item">
+                                    {% if action.icon %}<i class="{{ action.icon }}"></i>{% end %}
+                                    {{ action.label }}
+                                </a>
+                                {% end %}
+                                <a href="/logout" class="dropdown-item logout">Logout</a>
+                            </div>
+                        </div>
+                        {% else %}
+                        <a href="/login" class="btn btn-outline">Login</a>
+                        <a href="/signup" class="btn btn-primary">Sign Up</a>
+                        {% end %}
+                    </div>
+                </div>
+            </div>
+        </nav>
+        
+        {% if page.breadcrumbs %}
+        <div class="breadcrumbs">
+            <div class="container">
+                <ol>
+                    {% for crumb in page.breadcrumbs %}
+                    <li{% if loop.last %} class="active"{% end %}>
+                        {% if not loop.last %}
+                        <a href="{{ crumb.url }}">{{ crumb.label }}</a>
+                        {% else %}
+                        {{ crumb.label }}
+                        {% end %}
+                    </li>
+                    {% end %}
+                </ol>
+            </div>
+        </div>
+        {% end %}
+    </header>
+    
+    <!-- Main Content -->
+    <main class="main-content">
+        {% if page.hero %}
+        <section class="hero" style="background-image: url('{{ page.hero.background }}');">
+            <div class="container">
+                <h1 class="hero-title">{{ page.hero.title }}</h1>
+                {% if page.hero.subtitle %}
+                <p class="hero-subtitle">{{ page.hero.subtitle }}</p>
+                {% end %}
+                {% if page.hero.cta %}
+                <div class="hero-actions">
+                    {% for cta in page.hero.cta %}
+                    <a href="{{ cta.url }}" class="btn btn-{{ cta.style }}">{{ cta.text }}</a>
+                    {% end %}
+                </div>
+                {% end %}
+            </div>
+        </section>
+        {% end %}
+        
+        <div class="container">
+            <div class="content-layout">
+                {% if page.sidebar %}
+                <aside class="sidebar">
+                    {% for widget in page.sidebar.widgets %}
+                    <div class="widget widget-{{ widget.type }}">
+                        <h3 class="widget-title">{{ widget.title }}</h3>
+                        <div class="widget-content">
+                            {% if widget.type == "menu" %}
+                            <ul class="sidebar-menu">
+                                {% for item in widget.items %}
+                                <li{% if item.active %} class="active"{% end %}>
+                                    <a href="{{ item.url }}">{{ item.label }}</a>
+                                    {% if item.badge %}
+                                    <span class="badge badge-{{ item.badge.type }}">{{ item.badge.text }}</span>
+                                    {% end %}
+                                </li>
+                                {% end %}
+                            </ul>
+                            {% else if widget.type == "stats" %}
+                            <div class="stats-grid">
+                                {% for stat in widget.items %}
+                                <div class="stat-item">
+                                    <div class="stat-value">{{ stat.value }}</div>
+                                    <div class="stat-label">{{ stat.label }}</div>
+                                    {% if stat.change %}
+                                    <div class="stat-change stat-{{ stat.change_type }}">
+                                        {{ stat.change }}
+                                    </div>
+                                    {% end %}
+                                </div>
+                                {% end %}
+                            </div>
+                            {% else if widget.type == "html" %}
+                            {{ widget.html }}
+                            {% end %}
+                        </div>
+                    </div>
+                    {% end %}
+                </aside>
+                {% end %}
+                
+                <div class="main-column">
+                    {% if page.alerts %}
+                    {% for alert in page.alerts %}
+                    <div class="alert alert-{{ alert.type }}" role="alert">
+                        {% if alert.icon %}<i class="{{ alert.icon }}"></i>{% end %}
+                        <div class="alert-content">
+                            {% if alert.title %}<strong>{{ alert.title }}</strong>{% end %}
+                            {{ alert.message }}
+                        </div>
+                        {% if alert.dismissible %}
+                        <button class="alert-close" aria-label="Close">&times;</button>
+                        {% end %}
+                    </div>
+                    {% end %}
+                    {% end %}
+                    
+                    <article class="content">
+                        <header class="content-header">
+                            <h1>{{ page.title }}</h1>
+                            {% if page.subtitle %}
+                            <p class="subtitle">{{ page.subtitle }}</p>
+                            {% end %}
+                            
+                            <div class="content-meta">
+                                {% if page.author %}
+                                <div class="meta-item author">
+                                    {% if page.author.avatar %}
+                                    <img src="{{ page.author.avatar }}" alt="{{ page.author.name }}" class="author-avatar">
+                                    {% end %}
+                                    <span>By <a href="{{ page.author.url }}">{{ page.author.name }}</a></span>
+                                </div>
+                                {% end %}
+                                {% if page.date %}
+                                <div class="meta-item date">
+                                    <i class="icon-calendar"></i>
+                                    <time datetime="{{ page.date }}">{{ page.date_formatted }}</time>
+                                </div>
+                                {% end %}
+                                {% if page.reading_time %}
+                                <div class="meta-item reading-time">
+                                    <i class="icon-clock"></i>
+                                    <span>{{ page.reading_time }} min read</span>
+                                </div>
+                                {% end %}
+                                {% if page.tags %}
+                                <div class="meta-item tags">
+                                    {% for tag in page.tags %}
+                                    <a href="/tags/{{ tag.slug }}" class="tag">{{ tag.name }}</a>
+                                    {% end %}
+                                </div>
+                                {% end %}
+                            </div>
+                        </header>
+                        
+                        <div class="content-body">
+                            {{ page.content }}
+                            
+                            {% if page.sections %}
+                            {% for section in page.sections %}
+                            <section id="{{ section.id }}" class="content-section">
+                                <h2>{{ section.title }}</h2>
+                                {{ section.content }}
+                                
+                                {% if section.items %}
+                                <div class="items-grid grid-{{ section.layout }}">
+                                    {% for item in section.items %}
+                                    <div class="item-card">
+                                        {% if item.image %}
+                                        <div class="item-image">
+                                            <img src="{{ item.image }}" alt="{{ item.title }}" loading="lazy">
+                                            {% if item.badge %}
+                                            <span class="item-badge badge-{{ item.badge.type }}">{{ item.badge.text }}</span>
+                                            {% end %}
+                                        </div>
+                                        {% end %}
+                                        
+                                        <div class="item-content">
+                                            <h3 class="item-title">
+                                                {% if item.url %}
+                                                <a href="{{ item.url }}">{{ item.title }}</a>
+                                                {% else %}
+                                                {{ item.title }}
+                                                {% end %}
+                                            </h3>
+                                            
+                                            {% if item.subtitle %}
+                                            <p class="item-subtitle">{{ item.subtitle }}</p>
+                                            {% end %}
+                                            
+                                            <p class="item-description">{{ item.description }}</p>
+                                            
+                                            {% if item.metadata %}
+                                            <div class="item-metadata">
+                                                {% for meta in item.metadata %}
+                                                <span class="meta-{{ meta.type }}">
+                                                    {% if meta.icon %}<i class="{{ meta.icon }}"></i>{% end %}
+                                                    {{ meta.value }}
+                                                </span>
+                                                {% end %}
+                                            </div>
+                                            {% end %}
+                                            
+                                            {% if item.actions %}
+                                            <div class="item-actions">
+                                                {% for action in item.actions %}
+                                                <a href="{{ action.url }}" class="btn btn-{{ action.style }} btn-sm">
+                                                    {{ action.label }}
+                                                </a>
+                                                {% end %}
+                                            </div>
+                                            {% end %}
+                                        </div>
+                                    </div>
+                                    {% end %}
+                                </div>
+                                {% end %}
+                                
+                                {% if section.code_blocks %}
+                                {% for code in section.code_blocks %}
+                                <div class="code-block">
+                                    {% if code.title %}
+                                    <div class="code-header">
+                                        <span class="code-title">{{ code.title }}</span>
+                                        {% if code.language %}
+                                        <span class="code-language">{{ code.language }}</span>
+                                        {% end %}
+                                        <button class="code-copy" data-code="{{ code.id }}">Copy</button>
+                                    </div>
+                                    {% end %}
+                                    <pre><code class="language-{{ code.language }}">{{ code.content }}</code></pre>
+                                </div>
+                                {% end %}
+                                {% end %}
+                            </section>
+                            {% end %}
+                            {% end %}
+                        </div>
+                        
+                        {% if page.comments_enabled %}
+                        <section class="comments">
+                            <h2>Comments ({{ page.comments_count }})</h2>
+                            
+                            {% if user.authenticated %}
+                            <form class="comment-form" method="post" action="/api/comments">
+                                <textarea name="comment" placeholder="Add a comment..." required></textarea>
+                                <button type="submit" class="btn btn-primary">Post Comment</button>
+                            </form>
+                            {% else %}
+                            <p><a href="/login">Login</a> to leave a comment.</p>
+                            {% end %}
+                            
+                            <div class="comments-list">
+                                {% for comment in page.comments %}
+                                <div class="comment" id="comment-{{ comment.id }}">
+                                    <div class="comment-avatar">
+                                        {% if comment.author.avatar %}
+                                        <img src="{{ comment.author.avatar }}" alt="{{ comment.author.name }}">
+                                        {% else %}
+                                        <span>{{ comment.author.initials }}</span>
+                                        {% end %}
+                                    </div>
+                                    <div class="comment-content">
+                                        <div class="comment-header">
+                                            <strong>{{ comment.author.name }}</strong>
+                                            <time datetime="{{ comment.created_at }}">{{ comment.created_at_formatted }}</time>
+                                        </div>
+                                        <div class="comment-body">
+                                            {{ comment.text }}
+                                        </div>
+                                        <div class="comment-actions">
+                                            <button class="comment-action" data-action="like">
+                                                <i class="icon-heart"></i> {{ comment.likes }}
+                                            </button>
+                                            <button class="comment-action" data-action="reply">
+                                                <i class="icon-reply"></i> Reply
+                                            </button>
+                                            {% if user.id == comment.author.id %}
+                                            <button class="comment-action" data-action="delete">
+                                                <i class="icon-trash"></i> Delete
+                                            </button>
+                                            {% end %}
+                                        </div>
+                                        
+                                        {% if comment.replies %}
+                                        <div class="comment-replies">
+                                            {% for reply in comment.replies %}
+                                            <div class="comment comment-reply">
+                                                <div class="comment-avatar">
+                                                    {% if reply.author.avatar %}
+                                                    <img src="{{ reply.author.avatar }}" alt="{{ reply.author.name }}">
+                                                    {% else %}
+                                                    <span>{{ reply.author.initials }}</span>
+                                                    {% end %}
+                                                </div>
+                                                <div class="comment-content">
+                                                    <div class="comment-header">
+                                                        <strong>{{ reply.author.name }}</strong>
+                                                        <time datetime="{{ reply.created_at }}">{{ reply.created_at_formatted }}</time>
+                                                    </div>
+                                                    <div class="comment-body">{{ reply.text }}</div>
+                                                </div>
+                                            </div>
+                                            {% end %}
+                                        </div>
+                                        {% end %}
+                                    </div>
+                                </div>
+                                {% end %}
+                            </div>
+                            
+                            {% if page.has_more_comments %}
+                            <button class="btn btn-outline load-more" data-page="{{ page.next_comments_page }}">
+                                Load More Comments
+                            </button>
+                            {% end %}
+                        </section>
+                        {% end %}
+                        
+                        {% if page.related_content %}
+                        <section class="related-content">
+                            <h2>Related {{ page.related_content.type }}</h2>
+                            <div class="related-grid">
+                                {% for item in page.related_content.items %}
+                                <article class="related-item">
+                                    {% if item.image %}
+                                    <a href="{{ item.url }}" class="related-image">
+                                        <img src="{{ item.image }}" alt="{{ item.title }}" loading="lazy">
+                                    </a>
+                                    {% end %}
+                                    <div class="related-content">
+                                        <h3><a href="{{ item.url }}">{{ item.title }}</a></h3>
+                                        <p>{{ item.excerpt }}</p>
+                                        <div class="related-meta">
+                                            <time datetime="{{ item.date }}">{{ item.date_formatted }}</time>
+                                        </div>
+                                    </div>
+                                </article>
+                                {% end %}
+                            </div>
+                        </section>
+                        {% end %}
+                    </article>
+                </div>
+            </div>
+        </div>
+    </main>
+    
+    <!-- Footer -->
+    <footer class="site-footer">
+        <div class="container">
+            <div class="footer-columns">
+                {% for column in footer.columns %}
+                <div class="footer-column">
+                    <h4>{{ column.title }}</h4>
+                    <ul>
+                        {% for link in column.links %}
+                        <li>
+                            <a href="{{ link.url }}"{% if link.external %} target="_blank" rel="noopener"{% end %}>
+                                {{ link.label }}
+                            </a>
+                        </li>
+                        {% end %}
+                    </ul>
+                </div>
+                {% end %}
+                
+                {% if footer.social %}
+                <div class="footer-column">
+                    <h4>Follow Us</h4>
+                    <div class="social-links">
+                        {% for social in footer.social %}
+                        <a href="{{ social.url }}" class="social-link" aria-label="{{ social.platform }}" target="_blank" rel="noopener">
+                            <i class="{{ social.icon }}"></i>
+                        </a>
+                        {% end %}
+                    </div>
+                </div>
+                {% end %}
+            </div>
+            
+            <div class="footer-bottom">
+                <p class="copyright">{{ footer.copyright }}</p>
+                {% if footer.legal_links %}
+                <div class="legal-links">
+                    {% for link in footer.legal_links %}
+                    <a href="{{ link.url }}">{{ link.label }}</a>
+                    {% end %}
+                </div>
+                {% end %}
+            </div>
+        </div>
+    </footer>
+    
+    <!-- Scripts -->
+    {% for script in site.scripts %}
+    <script src="{{ script.url }}"{% if script.defer %} defer{% end %}{% if script.async %} async{% end %}{% if script.integrity %} integrity="{{ script.integrity }}" crossorigin="anonymous"{% end %}></script>
+    {% end %}
+    
+    {% if page.custom_js %}
+    <script>
+        {{ page.custom_js }}
+    </script>
+    {% end %}
+    
+    <!-- Analytics -->
+    {% if site.analytics %}
+    <script>
+        // Analytics tracking code
+        (function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+        new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+        j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+        'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
+        })(window,document,'script','dataLayer','{{ site.analytics.gtm_id }}');
+    </script>
+    {% end %}
+</body>
+</html>
