@@ -48,6 +48,25 @@
           {
             "if": {
               "properties": {
+                "state": { "const": "history-imported" }
+              },
+              "required": ["state"]
+            },
+            "then": {
+              "not": {
+                "anyOf": [
+                  { "required": ["testCommand"] },
+                  { "required": ["adapterEvidence"] },
+                  { "required": ["parityEvidence"] },
+                  { "required": ["stagingReceipt"] },
+                  { "required": ["archiveEvidence"] }
+                ]
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
                 "state": { "enum": ["imported", "parity-verified", "staging-released", "cut-over", "archived"] }
               },
               "required": ["state"]
@@ -95,7 +114,7 @@
                 "anyOf": [
                   { "required": ["sourceFreezeDate"] },
                   { "required": ["historyImportEvidence"] },
-                  { "required": ["testCommand"] }
+                  { "required": ["testCommand"] },
                   { "required": ["adapterEvidence"] },
                   { "required": ["parityEvidence"] },
                   { "required": ["stagingReceipt"] },

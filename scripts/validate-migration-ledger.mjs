@@ -252,6 +252,13 @@ for (const [index, record] of ledger.migrations.entries()) {
     requireDate(record, 'sourceFreezeDate', location);
     requireString(record, 'rollbackTarget', location);
     requireString(record, 'historyImportEvidence', location);
+    for (const field of [
+      'testCommand', 'adapterEvidence', 'parityEvidence', 'stagingReceipt', 'archiveEvidence',
+    ]) {
+      if (field in record) {
+        fail(`${location}.${field} must not be recorded while state is history-imported`);
+      }
+    }
   }
 
   if (phaseZeroStates.has(record.state)) {

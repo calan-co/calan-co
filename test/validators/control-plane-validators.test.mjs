@@ -126,7 +126,7 @@ test('CODEOWNERS assigns the temporary owner to every required migration domain'
   }
 });
 
-test('migration documentation queues history-only imports without active release handling', () => {
+test('migration documentation records imported history-only subtrees without active release handling', () => {
   const migrationGuide = readFileSync(join(repositoryRoot, 'migration', 'README.md'), 'utf8');
   const piWorkItem = readFileSync(join(repositoryRoot, 'backlog', 'MIG-001.3-pi-extensions.md'), 'utf8');
   const historyWorkItems = [
@@ -137,7 +137,7 @@ test('migration documentation queues history-only imports without active release
   assert.match(migrationGuide, /not evidence that a command was executed or succeeded/);
   assert.match(piWorkItem, /`extensions\/pi`/);
   for (const workItem of historyWorkItems) {
-    assert.match(workItem, /Queue the planned read-only history import/);
+    assert.match(workItem, /Imported as a read-only history subtree/);
     assert.match(workItem, /Prohibit active workspace, normal CI, image, and release-artifact handling/);
   }
 });
@@ -248,10 +248,24 @@ test('Phase-0 baseline records all authoritative sources without claiming later 
   }
   assert.deepEqual(new Set(ledger.migrations.map(({ source }) => source)),
     new Set(inventory.sources.map(({ source }) => source)));
+  const historyOnlyIds = new Set(['templjs-template', 'templjs-temple']);
   for (const migration of ledger.migrations) {
+    if (historyOnlyIds.has(migration.id)) {
+      assert.equal(migration.state, 'history-imported');
+      for (const requiredHistoryField of ['sourceFreezeDate', 'rollbackTarget', 'historyImportEvidence']) {
+        assert.match(migration[requiredHistoryField], /\S/, `${migration.id}.${requiredHistoryField}`);
+      }
+      for (const activeImportField of [
+        'testCommand', 'adapterEvidence', 'parityEvidence', 'stagingReceipt', 'archiveEvidence',
+      ]) {
+        assert.ok(!(activeImportField in migration), `${migration.id}.${activeImportField}`);
+      }
+      continue;
+    }
+
     assert.equal(migration.state, 'queued');
     for (const unavailableLaterStateField of [
-      'sourceFreezeDate', 'testCommand', 'adapterEvidence', 'parityEvidence',
+      'sourceFreezeDate', 'historyImportEvidence', 'testCommand', 'adapterEvidence', 'parityEvidence',
       'stagingReceipt', 'rollbackTarget', 'archiveEvidence',
     ]) {
       assert.ok(!(unavailableLaterStateField in migration), `${migration.id}.${unavailableLaterStateField}`);
@@ -293,6 +307,13 @@ test('migration ledger validator requires history-only evidence and rejects acti
   });
   assert.notEqual(activeTarget.status, 0);
   assert.match(activeTarget.stderr, /legacy/i);
+
+  const activeEvidence = validateLedger({
+    schemaVersion: 1,
+    migrations: [historyImportedRecord({ testCommand: 'pnpm test' })],
+  }, legacyInventory);
+  assert.notEqual(activeEvidence.status, 0);
+  assert.match(activeEvidence.stderr, /testCommand.*history-imported/i);
 });
 
 test('migration ledger validator accepts the empty bootstrap ledger', () => {
