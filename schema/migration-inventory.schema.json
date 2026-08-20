@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/calan-co/calan-co/schema/migration-inventory.schema.json",
+  "title": "Calan & Co approved migration source inventory",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schemaVersion", "sources"],
+  "properties": {
+    "$schema": { "const": "../schema/migration-inventory.schema.json" },
+    "schemaVersion": { "const": 1 },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "source"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "source": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^https://github\\.com/[^/?#]+/[^/?#]+$"
+          }
+        }
+      }
+    }
+  }
+}

@@ -16,11 +16,11 @@ The pull-request workflow runs the same catalog, ledger, and validator-test chec
 
 ## Catalog and ledger changes
 
-`release-artifacts.yaml` and `migration/ledger.yaml` use JSON-compatible YAML so their zero-dependency validators can run before any workspace import. Update their adjacent JSON Schemas and focused validator tests when changing a contract.
+`release-artifacts.yaml`, `migration/inventory.yaml`, and `migration/ledger.yaml` use JSON-compatible YAML so their zero-dependency validators can run before any workspace import. Update their adjacent JSON Schemas and focused validator tests when changing a contract. Imported ledger records must use an exact source URL from the inventory allowlist and artifact IDs from the release catalog.
 
 A catalog record is added only after its artifact has a verified owner, independent version source, adapter, target, environment, dry-run command, publish command, receipt command, and rollback command. Uniform branch/release policy never means a shared artifact version or publication target.
 
-Ledger records track an import through `queued`, `imported`, `parity-verified`, `staging-released`, `cut-over`, and `archived` (or `blocked`). Evidence and rollback fields are mandatory before cut-over and archival.
+Ledger records track an import through `queued`, `imported`, `parity-verified`, `staging-released`, `cut-over`, and `archived` (or `blocked`). Source freeze, rollback, test-command, artifact-catalog, and adapter evidence are mandatory before `imported`; later states add parity, staging, and archive evidence.
 
 ## Legacy and source boundaries
 

@@ -1,0 +1,25 @@
+# Temporary bootstrap ownership: replace @chris-cald with the responsible GitHub
+# teams before enabling broader contributors or import work. Do not remove these
+# path-specific entries until team ownership is configured and required by main.
+
+# Repository governance and contributor policy
+/README.md @chris-cald
+/CONTRIBUTING.md @chris-cald
+/SECURITY.md @chris-cald
+/docs/ @chris-cald
+/.github/ @chris-cald
+
+# Migration and release control plane
+/migration/ @chris-cald
+/release-artifacts.yaml @chris-cald
+/schema/ @chris-cald
+/scripts/ @chris-cald
+/test/validators/ @chris-cald
+
+# Workspace and root validation policy
+/package.json @chris-cald
+/pnpm-lock.yaml @chris-cald
+/pnpm-workspace.yaml @chris-cald
+/nx.json @chris-cald
+/.node-version @chris-cald
+/backlog/ @chris-cald

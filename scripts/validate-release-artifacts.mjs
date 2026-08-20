@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { posix, resolve } from 'node:path';
 
 const catalogPath = resolve(process.cwd(), process.argv[2] ?? 'release-artifacts.yaml');
 
@@ -15,6 +15,14 @@ function rejectUnknownFields(record, allowedFields, location) {
       fail(`${location}.${field} is not allowed by the schema`);
     }
   }
+}
+
+function isNormalizedRepositoryRelativePosixPath(path) {
+  return path !== '.' &&
+    !path.includes('\\') &&
+    !posix.isAbsolute(path) &&
+    posix.normalize(path) === path &&
+    path.split('/').every((segment) => segment !== '' && segment !== '.' && segment !== '..');
 }
 
 let catalog;
@@ -62,7 +70,10 @@ for (const [index, artifact] of catalog.artifacts.entries()) {
       fail(`${location}.${field} must be a non-empty string`);
     }
   }
-  if (artifact.path.startsWith('legacy/')) {
+  if (!isNormalizedRepositoryRelativePosixPath(artifact.path)) {
+    fail(`${location}.path must be a normalized repo-relative POSIX path without traversal`);
+  }
+  if (artifact.path === 'legacy' || artifact.path.startsWith('legacy/')) {
     fail(`${location}.path must not be under legacy/`);
   }
   if (ids.has(artifact.id)) {

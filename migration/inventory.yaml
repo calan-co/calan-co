@@ -1,0 +1,26 @@
+{
+  "$schema": "../schema/migration-inventory.schema.json",
+  "schemaVersion": 1,
+  "sources": [
+    {
+      "id": "doc-vader",
+      "source": "https://github.com/calan-co/doc-vader"
+    },
+    {
+      "id": "linkity",
+      "source": "https://github.com/calan-co/linkity"
+    },
+    {
+      "id": "pi-extensions",
+      "source": "https://github.com/calan-co/pi-extensions"
+    },
+    {
+      "id": "babysitter-dv",
+      "source": "https://github.com/calan-co/babysitter-dv"
+    },
+    {
+      "id": "awx-ee-proxmox",
+      "source": "https://github.com/calan-co/awx-ee-proxmox"
+    }
+  ]
+}

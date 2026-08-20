@@ -22,11 +22,53 @@
           "artifacts": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
           "state": { "enum": ["queued", "imported", "parity-verified", "staging-released", "cut-over", "archived", "blocked"] },
           "sourceFreezeDate": { "type": "string", "format": "date" },
-          "parityEvidence": { "type": "string", "minLength": 1 },
-          "stagingReceipt": { "type": "string", "minLength": 1 },
-          "rollbackTarget": { "type": "string", "minLength": 1 },
-          "archiveEvidence": { "type": "string", "minLength": 1 }
-        }
+          "testCommand": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "adapterEvidence": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "parityEvidence": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "stagingReceipt": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "rollbackTarget": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "archiveEvidence": { "type": "string", "minLength": 1, "pattern": "\\S" }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "state": { "enum": ["imported", "parity-verified", "staging-released", "cut-over", "archived"] }
+              },
+              "required": ["state"]
+            },
+            "then": {
+              "required": ["sourceFreezeDate", "rollbackTarget", "testCommand", "adapterEvidence"]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "state": { "enum": ["parity-verified", "staging-released", "cut-over", "archived"] }
+              },
+              "required": ["state"]
+            },
+            "then": { "required": ["parityEvidence"] }
+          },
+          {
+            "if": {
+              "properties": {
+                "state": { "enum": ["staging-released", "cut-over", "archived"] }
+              },
+              "required": ["state"]
+            },
+            "then": { "required": ["stagingReceipt"] }
+          },
+          {
+            "if": {
+              "properties": {
+                "state": { "const": "archived" }
+              },
+              "required": ["state"]
+            },
+            "then": { "required": ["archiveEvidence"] }
+          }
+        ]
       }
     }
   }
