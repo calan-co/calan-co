@@ -1,0 +1,96 @@
+---
+repos:
+  - repo: local
+    hooks:
+      - id: lint-shell
+        name: "lint: shell (bash -n)"
+        entry: bash -n
+        language: system
+        pass_filenames: true
+        types: [shell]
+        stages: [pre-push]
+
+      - id: lint-yaml
+        name: "lint: yaml (yamllint)"
+        entry: scripts/pre-commit/lint-yaml.sh
+        language: system
+        pass_filenames: true
+        types: [yaml]
+        stages: [pre-commit]
+
+      - id: validate-readme-structure
+        name: "docs: confirm markdown structure blocks match current state (sync_readme_structure.py)"
+        entry: python3 scripts/docs/sync_readme_structure.py --check
+        language: system
+        pass_filenames: false
+        files: (\.md$|\.structure-notes\.ya?ml$)
+        stages: [pre-commit, pre-push]
+
+      - id: lint-python
+        name: "lint: python (ruff)"
+        entry: scripts/pre-commit/lint-python.sh
+        language: system
+        pass_filenames: true
+        types: [python]
+        stages: [pre-commit]
+
+      - id: validate-generated-defaults
+        name: "validate: generated defaults are in sync"
+        entry: scripts/pre-commit/validate-generated-defaults.sh
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: lint-js
+        name: "lint: js/ts (ESLint)"
+        entry: bash -c "cd vscode-temple-linter && npx eslint"
+        language: system
+        pass_filenames: false
+        types: [javascript]
+        files: ^vscode-temple-linter/src/.*\.ts$
+        stages: [pre-commit]
+
+      - id: validate-vscode-package
+        name: "validate: vscode extension package"
+        entry: scripts/pre-commit/validate-vscode-package.sh
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: test-temple-parity
+        name: "test: temple parity (native vs jinja2)"
+        entry: scripts/pre-commit/test-temple-parity.sh
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: secure-secrets-scan
+        name: "secure: secrets scan (detect-secrets)"
+        entry: scripts/pre-commit/secure-find-secrets.sh
+        language: system
+        pass_filenames: true
+        stages: [pre-commit]
+
+      - id: test-python-affected
+        name: "test: python (pytest)"
+        entry: scripts/pre-commit/test-python.sh
+        language: system
+        pass_filenames: true
+        types: [python]
+        stages: [pre-commit]
+
+      - id: validate-benchmarks
+        name: "validate: benchmarks quick"
+        entry: scripts/pre-commit/validate-benchmarks.sh
+        language: system
+        pass_filenames: false
+        types: [python]
+        stages: [pre-push]
+
+      - id: build-docs
+        name: "build: docs (sphinx)"
+        entry: scripts/pre-commit/build-docs.sh
+        language: system
+        pass_filenames: false
+        types: [python, yaml, markdown]
+        stages: [pre-push]

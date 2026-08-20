@@ -1,0 +1,30 @@
+# Top-level CI requirements (minimal list for pip-compile)
+# Note: leave versions unpinned here; pip-compile will produce a pinned working set.
+
+# Core tooling
+-e ./temple
+detect-secrets
+PyYAML
+requests
+python-jose
+PyJWT[crypto]
+cryptography
+python-dotenv
+PyGithub
+ruff
+yamllint
+
+# Testing
+pytest
+pytest-mock
+pytest-benchmark
+
+# Bench & parser
+asv
+lark
+
+# Docs
+sphinx
+sphinx-rtd-theme
+sphinx-autodoc-typehints
+pygls

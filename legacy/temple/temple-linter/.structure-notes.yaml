@@ -1,0 +1,15 @@
+scopes:
+  "file:temple-linter/README.md#tests":
+    fixtures/: "Template fixtures for base-format and linting scenarios"
+    test_base_format_linter.py: "Base format validation coverage"
+    test_diagnostic_converter.py: "Diagnostic mapping and reporting coverage"
+    test_integration.py: "End-to-end linting pipeline coverage"
+    test_lsp_features.py: "Completion/hover/definition/references/rename tests"
+    test_e2e_performance.py: "E2E and performance guardrails"
+  "file:temple-linter/README.md#project":
+    README.md: "⭐ You are here"
+    src/: "Python package sources"
+    src/temple_linter/: "Linter and LSP implementation"
+    tests/: "Test suites and fixtures"
+    docs/: "Sphinx docs and developer guides"
+    pyproject.toml: "Package metadata and tooling configuration"

@@ -1,0 +1,10 @@
+default:
+  README.md: "⭐ You are here"
+  run_example.py: "Script to render templates"
+  sample_data.json: "Input data for all examples"
+  templates/: "📝 All template files"
+  templates/positive/: "✅ Working examples"
+  templates/negative/: "❌ Validation error examples"
+  templates/includes/: "🔄 Template composition"
+  templates/bench/: "⚡ Performance benchmarking"
+  outputs/: "📋 Expected rendering results"

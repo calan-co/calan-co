@@ -1,0 +1,12 @@
+{
+  "name": ": user.name :",
+  "jobs": [
+    "< for job in user.jobs >",
+    {
+      "title": ": job.title :",
+      "company": ": job.company :"
+    },
+    "< if not loop.last >,< end >",
+    "< end >"
+  ]
+}

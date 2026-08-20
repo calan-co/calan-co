@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="{{ site.language }}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ page.title }} - {{ site.name }}</title>
+    <meta name="description" content="{{ page.description }}">
+</head>
+<body>
+    <header>
+        <h1>{{ site.name }}</h1>
+        <nav>
+            <ul>
+            {% for item in navigation %}
+                <li><a href="{{ item.url }}">{{ item.label }}</a></li>
+            {% end %}
+            </ul>
+        </nav>
+    </header>
+    
+    <main>
+        <article>
+            <h2>{{ page.title }}</h2>
+            <p class="meta">Published on {{ page.date }} by {{ page.author }}</p>
+            
+            {% if page.featured %}
+            <div class="featured-badge">Featured Post</div>
+            {% end %}
+            
+            <div class="content">
+                {{ page.content }}
+            </div>
+            
+            {% if page.tags %}
+            <div class="tags">
+                {% for tag in page.tags %}
+                <span class="tag">{{ tag }}</span>
+                {% end %}
+            </div>
+            {% end %}
+        </article>
+    </main>
+    
+    <footer>
+        <p>&copy; {{ site.year }} {{ site.name }}. All rights reserved.</p>
+    </footer>
+</body>
+</html>

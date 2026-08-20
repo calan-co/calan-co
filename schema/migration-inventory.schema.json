@@ -23,7 +23,7 @@
           },
           "defaultBranch": { "type": "string", "minLength": 1, "pattern": "\\S" },
           "defaultSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-          "status": { "enum": ["eligible-for-import", "blocked", "excluded"] },
+          "status": { "enum": ["eligible-for-import", "history-imported", "blocked", "excluded"] },
           "targetPath": {
             "type": "string",
             "minLength": 1,

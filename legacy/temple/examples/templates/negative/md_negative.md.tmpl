@@ -1,0 +1,17 @@
+ 
+# User Profile
+
+{% include 'header.html' %}
+
+- Age: {{ user.age }}
+- Active: {% if user.active %}Yes{% else %}No{% end %}
+- Skills:
+  {% for s in user.skills %}
+  - {{ s }}{% end %}
+- Jobs:
+  {% for job in user.jobs %}
+  - {{ job.title }} at {{ job.company }}
+  {% end %}
+
+{% include 'footer.html' %}
+

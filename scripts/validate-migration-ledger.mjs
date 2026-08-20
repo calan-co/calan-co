@@ -7,6 +7,7 @@ const inventoryPath = resolve(process.cwd(), process.argv[3] ?? 'migration/inven
 const catalogPath = resolve(process.cwd(), process.argv[4] ?? 'release-artifacts.yaml');
 const states = new Set([
   'queued',
+  'history-imported',
   'imported',
   'parity-verified',
   'staging-released',
@@ -24,7 +25,7 @@ const phaseZeroStates = new Set([
 const inventorySchema = '../schema/migration-inventory.schema.json';
 const githubRepositoryUrl = /^https:\/\/github\.com\/[^/?#]+\/[^/?#]+$/;
 const gitCommitSha = /^[0-9a-f]{40}$/;
-const inventoryStatuses = new Set(['eligible-for-import', 'blocked', 'excluded']);
+const inventoryStatuses = new Set(['eligible-for-import', 'history-imported', 'blocked', 'excluded']);
 const catalogRequiredFields = [
   'id',
   'path',
@@ -198,8 +199,8 @@ for (const [index, record] of ledger.migrations.entries()) {
   }
   rejectUnknownFields(record, new Set([
     'id', 'source', 'targetPath', 'owner', 'artifacts', 'state', 'sourceFreezeDate',
-    'testCommand', 'adapterEvidence', 'parityEvidence', 'stagingReceipt', 'rollbackTarget',
-    'archiveEvidence',
+    'historyImportEvidence', 'testCommand', 'adapterEvidence', 'parityEvidence', 'stagingReceipt',
+    'rollbackTarget', 'archiveEvidence',
   ]), location);
   for (const field of ['id', 'source', 'targetPath', 'owner', 'state']) {
     requireString(record, field, location);
@@ -235,11 +236,27 @@ for (const [index, record] of ledger.migrations.entries()) {
 
   if (record.state === 'queued') {
     for (const field of [
-      'sourceFreezeDate', 'testCommand', 'adapterEvidence', 'parityEvidence',
-      'stagingReceipt', 'rollbackTarget', 'archiveEvidence',
+      'sourceFreezeDate', 'historyImportEvidence', 'testCommand', 'adapterEvidence',
+      'parityEvidence', 'stagingReceipt', 'rollbackTarget', 'archiveEvidence',
     ]) {
       if (field in record) {
         fail(`${location}.${field} must not be recorded while state is queued`);
+      }
+    }
+  }
+
+  if (record.state === 'history-imported') {
+    if (!record.targetPath.startsWith('legacy/')) {
+      fail(`${location}.targetPath must be under legacy for a history-only import`);
+    }
+    requireDate(record, 'sourceFreezeDate', location);
+    requireString(record, 'rollbackTarget', location);
+    requireString(record, 'historyImportEvidence', location);
+    for (const field of [
+      'testCommand', 'adapterEvidence', 'parityEvidence', 'stagingReceipt', 'archiveEvidence',
+    ]) {
+      if (field in record) {
+        fail(`${location}.${field} must not be recorded while state is history-imported`);
       }
     }
   }

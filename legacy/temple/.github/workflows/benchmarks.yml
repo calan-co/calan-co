@@ -1,0 +1,99 @@
+---
+name: Benchmarks and Publish
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 5 * * 1'
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      python-version: '3.11'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Temple Python Environment Setup
+        uses: ./.github/actions/setup-python
+        with:
+          python-version: '3.11'
+          extras: "[bench]"
+
+  perf-regression:
+    needs: setup
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    env:
+      CI_VENV_PATH: ${{ github.workspace }}/.cache/ci-venv
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Bootstrap CI environment
+        run: ./scripts/ci/ensure_ci_venv.sh
+      - name: Benchmark Smoke Test
+        run: ./scripts/pre-commit/validate-benchmarks.sh
+
+  benchmarks-and-publish:
+    needs: setup
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      CI_VENV_PATH: ${{ github.workspace }}/.cache/ci-venv
+      RUNNER_INFO_FILE: runner_info.txt
+      ASV_MACHINE_JSON: $HOME/.asv-machine.json
+      ASV_MACHINE_CONFIG: asv/machines/ci_machine.json
+      TEMPLE_BENCHMARKS_ROOT_PATH: temple/asv/results
+      TEMPLE_HTML_PATH: $TEMPLE_BENCHMARKS_ROOT_PATH/html
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 20
+      - name: Bootstrap CI environment
+        run: ./scripts/ci/ensure_ci_venv.sh
+      - name: Collect runner info
+        run: ./scripts/pre-commit/collect-runner-info.sh "$RUNNER_INFO_FILE"
+      - name: Upload runner info
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-info
+          path: "$RUNNER_INFO_FILE"
+      - name: Configure deterministic ASV machine identity
+        run: .github/scripts/configure_asv_machine.sh "$ASV_MACHINE_CONFIG" "$ASV_MACHINE_JSON" "$TEMPLE_BENCHMARKS_ROOT_PATH"
+      - name: Run ASV benchmarks
+        working-directory: temple
+        run: |
+             "$CI_VENV_PATH/bin/python" -m asv update
+             "$CI_VENV_PATH/bin/python" -m asv run --quick HEAD~4..HEAD
+             "$CI_VENV_PATH/bin/python" -m asv run --quick HEAD
+      - name: Build ASV HTML report
+        working-directory: temple
+        run: |
+          "$CI_VENV_PATH/bin/python" -m asv publish
+      - name: Upload ASV results artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: asv_results
+          path: "$TEMPLE_BENCHMARKS_ROOT_PATH"
+      - name: Upload HTML for Pages deployment
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: "$TEMPLE_HTML_PATH"
+
+  deploy-pages:
+    needs: benchmarks-and-publish
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

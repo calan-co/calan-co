@@ -1,0 +1,6 @@
+---
+extends: default
+
+rules:
+  # Project prefers longer lines for readability in some workflows/docs
+  line-length: disable

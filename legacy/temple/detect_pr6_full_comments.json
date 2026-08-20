@@ -1,0 +1,676 @@
+{
+  "pr": "6",
+  "meta": {
+    "comments": [],
+    "reviews": [
+      {
+        "id": "PRR_kwDOQ22AFM7dvS4Q",
+        "author": {
+          "login": "github-advanced-security"
+        },
+        "authorAssociation": "NONE",
+        "body": "",
+        "submittedAt": "2026-01-29T02:19:51Z",
+        "includesCreatedEdit": false,
+        "reactionGroups": [],
+        "state": "COMMENTED",
+        "commit": {
+          "oid": "ec000e5a9d23f083c9e3730c0318d5d890952f8f"
+        }
+      },
+      {
+        "id": "PRR_kwDOQ22AFM7dvbYa",
+        "author": {
+          "login": "copilot-pull-request-reviewer"
+        },
+        "authorAssociation": "NONE",
+        "body": "## Pull request overview\n\nThis PR introduces a comprehensive CI infrastructure overhaul with multiple unrelated components bundled together. The main changes include:\n\n**Changes:**\n- Addition of type stub files (.pyi) for the entire temple module hierarchy\n- Implementation of auto-resolve PR review threads workflow using GitHub App authentication\n- Consolidation of CI requirements and venv management\n- ASV benchmark fixes (typed AST Block usage, config path resolution)\n- Pre-commit hooks reorganization with new linting scripts\n- Secrets scanning infrastructure with detect-secrets baseline\n\n### Reviewed changes\n\nCopilot reviewed 85 out of 86 changed files in this pull request and generated 5 comments.\n\n<details>\n<summary>Show a summary per file</summary>\n\n| File | Description |\r\n| ---- | ----------- |\r\n| typings/temple/*.pyi | New type stub files for temple modules (typed_ast, diagnostics, compiler, etc.) |\r\n| scripts/ci/auto_resolve_reviews.py | New script for auto-resolving PR review threads based on commit coverage |\r\n| scripts/ci/github_app_helpers.py | Helper functions for GitHub App JWT and installation token generation |\r\n| scripts/ci/ensure_ci_venv.sh | Unified CI venv creation and management |\r\n| scripts/ci/requirements.txt | Consolidated CI requirements with pinned versions |\r\n| scripts/pre-commit/*.sh | Reorganized pre-commit hooks (lint-python, lint-yaml, test-python, etc.) |\r\n| .github/workflows/auto_resolve_reviews.yml | New workflow for auto-resolving review threads |\r\n| .github/workflows/*.yml | Updates to existing workflows (caching, venv management) |\r\n| temple/src/temple/typed_ast.py | Added source_range property to Node class |\r\n| temple/asv/benchmarks/*.py | Fallback example path loading and import updates |\r\n| tests/test_auto_resolve_*.py | Comprehensive tests for auto-resolve functionality |\r\n| .secrets.baseline | Detect-secrets baseline configuration |\r\n| .yamllint | YAML linting configuration |\r\n| .pre-commit-config.yaml | Reorganized pre-commit configuration |\n</details>\n\n\n\n\n",
+        "submittedAt": "2026-01-29T02:30:06Z",
+        "includesCreatedEdit": false,
+        "reactionGroups": [],
+        "state": "COMMENTED",
+        "commit": {
+          "oid": "ec000e5a9d23f083c9e3730c0318d5d890952f8f"
+        }
+      },
+      {
+        "id": "PRR_kwDOQ22AFM7dvk-4",
+        "author": {
+          "login": "copilot-pull-request-reviewer"
+        },
+        "authorAssociation": "NONE",
+        "body": "## Pull request overview\n\nCopilot reviewed 85 out of 86 changed files in this pull request and generated 2 comments.\n\n\n<details>\n<summary>Comments suppressed due to low confidence (4)</summary>\n\n**.github/workflows/tests.yml:45**\n* The workflow references `scripts/ci/tests.sh` which is being deleted in this PR (shown in the diff as removed). The workflow step attempts to run this script with `--with-deps` flag, but the script no longer exists. This will cause the Tests workflow to fail.\n```\n      - name: Run tests via shared script\n        run: |\n          chmod +x ./scripts/ci/tests.sh\n          ./scripts/ci/tests.sh --with-deps\n```\n**.github/workflows/docs.yml:43**\n* The workflow references `scripts/ci/docs_build.sh` which is being deleted in this PR (shown in the diff as removed). The workflow step attempts to run this script with `--with-deps` flag, but the script no longer exists. This will cause the Docs workflow to fail.\n```\n      - name: Build docs via shared script\n        run: |\n          chmod +x ./scripts/ci/docs_build.sh\n          ./scripts/ci/docs_build.sh --with-deps\n```\n**.github/workflows/benchmarks.yml:43**\n* The workflow references `scripts/ci/benchmarks_quick.sh` which is being deleted in this PR (shown in the diff as removed). The workflow step attempts to run this script with `--with-deps` flag, but the script no longer exists. This will cause the Benchmarks workflow to fail.\n```\n      - name: Run quick benchmark gate (pytest-based)\n        run: |\n          chmod +x ./scripts/ci/benchmarks_quick.sh\n          ./scripts/ci/benchmarks_quick.sh --with-deps\n```\n**.github/workflows/benchmarks.yml:76**\n* The workflow step attempts to run `scripts/ci/benchmarks_quick.sh --install-deps-only`, but this script is being deleted in the PR. This will cause the Benchmarks workflow to fail when trying to install dependencies.\n```\n      - name: Install ASV and temple package (via shared script)\n        run: |\n          chmod +x ./scripts/ci/benchmarks_quick.sh\n          ./scripts/ci/benchmarks_quick.sh --install-deps-only\n```\n</details>\n\n",
+        "submittedAt": "2026-01-29T02:40:14Z",
+        "includesCreatedEdit": false,
+        "reactionGroups": [],
+        "state": "COMMENTED",
+        "commit": {
+          "oid": "c94b47e8a70cf2baaf69fdc45e9261751381438a"
+        }
+      }
+    ]
+  },
+  "review_comments": [
+    {
+      "url": "https://api.github.com/repos/squirrel289/temple/pulls/comments/2739459973",
+      "pull_request_review_id": 3720162832,
+      "id": 2739459973,
+      "node_id": "PRRC_kwDOQ22AFM6jSNeF",
+      "diff_hunk": "@@ -0,0 +1,195 @@\n+#!/usr/bin/env python3\n+\"\"\"Compare detect-secrets scan JSON with baseline and emit status.\n+\n+Defaults preserve existing behaviour (read `detect_secrets_curr.json`, write\n+`detect_secrets_status.txt` and `secrets-report.json`).\n+\n+Added CLI options:\n+  --curr PATH       : path to current scan JSON (use '-' to read from stdin)\n+  --base PATH       : path to baseline (default: .secrets.baseline)\n+  --status-out PATH : path to write status (default: detect_secrets_status.txt)\n+  --no-write        : do not write files; print single-word status to stdout\n+\"\"\"\n+\n+from __future__ import annotations\n+\n+import argparse\n+import json\n+import sys\n+from pathlib import Path\n+from typing import Any, Dict\n+\n+\n+ROOT = Path(__file__).resolve().parents[2]\n+\n+\n+def load_json_path(path: Path) -> Dict[str, Any]:\n+    try:\n+        return json.loads(path.read_text())\n+    except Exception:\n+        return {}\n+\n+\n+def load_json_file_like(f) -> Dict[str, Any]:\n+    try:\n+        return json.load(f)\n+    except Exception:\n+        return {}\n+\n+\n+def build_hashes(b: Dict[str, Any]):\n+    res = {}\n+    for fn, findings in b.get(\"results\", {}).items():\n+        res[fn] = set(\n+            [f.get(\"hashed_secret\") for f in findings if \"hashed_secret\" in f]\n+        )\n+    return res\n+\n+\n+def should_ignore(fn: str, f: Dict[str, Any], ignore_patterns) -> bool:\n+    for pat in ignore_patterns:\n+        if pat in fn or pat in (f.get(\"type\", \"\") or \"\"):\n+            return True\n+    return False\n+\n+\n+def compare(curr: Dict[str, Any], base: Dict[str, Any], ignore_patterns):\n+    base_hashes = build_hashes(base)\n+    new = []\n+    for fn, findings in curr.get(\"results\", {}).items():\n+        if fn not in base_hashes:\n+            filtered = [\n+                f for f in findings if not should_ignore(fn, f, ignore_patterns)\n+            ]\n+            if filtered:\n+                new.append({\"file\": fn, \"count\": len(filtered)})\n+        else:\n+            seen = base_hashes[fn]\n+            for f in findings:\n+                if should_ignore(fn, f, ignore_patterns):\n+                    continue\n+                if f.get(\"hashed_secret\") not in seen:\n+                    new.append(\n+                        {\n+                            \"file\": fn,\n+                            \"type\": f.get(\"type\"),\n+                            \"line\": f.get(\"line_number\"),\n+                        }\n+                    )\n+    return new\n+\n+\n+def main(argv=None) -> int:\n+    p = argparse.ArgumentParser(\n+        description=\"Compare detect-secrets scan JSON with baseline\"\n+    )\n+    p.add_argument(\"--curr\", type=str, default=str(ROOT / \"detect_secrets_curr.json\"))\n+    p.add_argument(\"--base\", type=str, default=str(ROOT / \".secrets.baseline\"))\n+    p.add_argument(\n+        \"--status-out\", type=str, default=str(ROOT / \"detect_secrets_status.txt\")\n+    )\n+    p.add_argument(\n+        \"--no-write\",\n+        action=\"store_true\",\n+        help=\"Do not write files; print status to stdout\",\n+    )\n+    p.add_argument(\n+        \"--scan\",\n+        action=\"store_true\",\n+        help=\"Run detect-secrets scan in-process (avoids shelling out)\",\n+    )\n+    p.add_argument(\n+        \"--scan-args\",\n+        nargs=\"*\",\n+        help=\"Extra arguments to pass to detect-secrets scan (when using --scan)\",\n+    )\n+    args = p.parse_args(argv)\n+\n+    ignore_patterns = []\n+    ignore_file = ROOT / \".detect-secrets-ignore\"\n+    if ignore_file.exists():\n+        for line in ignore_file.read_text().splitlines():\n+            line = line.strip()\n+            if line and not line.startswith(\"#\"):\n+                ignore_patterns.append(line)\n+\n+    base_path = Path(args.base)\n+    if not base_path.exists():\n+        if args.no_write:\n+            print(\"no_baseline\")\n+            return 0\n+        else:\n+            print(\"No .secrets.baseline found\")\n+            Path(args.status_out).write_text(\"no_baseline\")\n+            return 0\n+\n+    # If requested, run detect-secrets scan in-process and capture JSON output\n+    curr = {}\n+    if args.scan:\n+        try:\n+            import runpy\n+            import io\n+            import contextlib\n+\n+            scan_args = [\"detect_secrets\", \"scan\"]\n+            if args.scan_args:\n+                scan_args.extend(args.scan_args)\n+\n+            # Run the detect-secrets module as __main__ in-process, capturing stdout\n+            buf = io.StringIO()\n+            old_argv = sys.argv\n+            try:\n+                sys.argv = scan_args\n+                with contextlib.redirect_stdout(buf):\n+                    runpy.run_module(\"detect_secrets\", run_name=\"__main__\")\n+            finally:\n+                sys.argv = old_argv\n+\n+            out = buf.getvalue()\n+            try:\n+                curr = json.loads(out)\n+            except Exception:\n+                curr = {}\n+        except Exception:\n+            # Fall back to reading provided --curr input (file or stdin)\n+            curr = {}\n+            if args.curr == \"-\":\n+                curr = load_json_file_like(sys.stdin)\n+            else:\n+                curr_path = Path(args.curr)\n+                curr = load_json_path(curr_path) if curr_path.exists() else {}\n+    else:\n+        if args.curr == \"-\":\n+            curr = load_json_file_like(sys.stdin)\n+        else:\n+            curr_path = Path(args.curr)\n+            curr = load_json_path(curr_path) if curr_path.exists() else {}\n+\n+    base = load_json_path(base_path)\n+\n+    new = compare(curr, base, ignore_patterns)\n+\n+    if args.no_write:\n+        if new:\n+            print(\"new\")\n+            print(json.dumps(new))\n+        else:\n+            print(\"ok\")\n+        return 0\n+\n+    status_path = Path(args.status_out)\n+    if new:\n+        print(\"New secrets found:\")\n+        print(new)\n+        json.dump(new, open(ROOT / \"secrets-report.json\", \"w\"))",
+      "path": "scripts/ci/detect_secrets_compare.py",
+      "commit_id": "ec000e5a9d23f083c9e3730c0318d5d890952f8f",
+      "original_commit_id": "ec000e5a9d23f083c9e3730c0318d5d890952f8f",
+      "user": {
+        "login": "github-advanced-security[bot]",
+        "id": 62310815,
+        "node_id": "MDM6Qm90NjIzMTA4MTU=",
+        "avatar_url": "https://avatars.githubusercontent.com/in/57789?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/github-advanced-security%5Bbot%5D",
+        "html_url": "https://github.com/apps/github-advanced-security",
+        "followers_url": "https://api.github.com/users/github-advanced-security%5Bbot%5D/followers",
+        "following_url": "https://api.github.com/users/github-advanced-security%5Bbot%5D/following{/other_user}",
+        "gists_url": "https://api.github.com/users/github-advanced-security%5Bbot%5D/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/github-advanced-security%5Bbot%5D/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/github-advanced-security%5Bbot%5D/subscriptions",
+        "organizations_url": "https://api.github.com/users/github-advanced-security%5Bbot%5D/orgs",
+        "repos_url": "https://api.github.com/users/github-advanced-security%5Bbot%5D/repos",
+        "events_url": "https://api.github.com/users/github-advanced-security%5Bbot%5D/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/github-advanced-security%5Bbot%5D/received_events",
+        "type": "Bot",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "body": "## File is not always closed\n\nFile is opened but is not closed.\n\n[Show more details](https://github.com/squirrel289/temple/security/code-scanning/17)",
+      "created_at": "2026-01-29T02:19:51Z",
+      "updated_at": "2026-01-29T02:19:51Z",
+      "html_url": "https://github.com/squirrel289/temple/pull/6#discussion_r2739459973",
+      "pull_request_url": "https://api.github.com/repos/squirrel289/temple/pulls/6",
+      "_links": {
+        "self": {
+          "href": "https://api.github.com/repos/squirrel289/temple/pulls/comments/2739459973"
+        },
+        "html": {
+          "href": "https://github.com/squirrel289/temple/pull/6#discussion_r2739459973"
+        },
+        "pull_request": {
+          "href": "https://api.github.com/repos/squirrel289/temple/pulls/6"
+        }
+      },
+      "reactions": {
+        "url": "https://api.github.com/repos/squirrel289/temple/pulls/comments/2739459973/reactions",
+        "total_count": 0,
+        "+1": 0,
+        "-1": 0,
+        "laugh": 0,
+        "hooray": 0,
+        "confused": 0,
+        "heart": 0,
+        "rocket": 0,
+        "eyes": 0
+      },
+      "start_line": null,
+      "original_start_line": null,
+      "start_side": null,
+      "line": null,
+      "original_line": 184,
+      "side": "RIGHT",
+      "author_association": "NONE",
+      "original_position": 184,
+      "position": 1,
+      "subject_type": "line"
+    },
+    {
+      "url": "https://api.github.com/repos/squirrel289/temple/pulls/comments/2739459981",
+      "pull_request_review_id": 3720162832,
+      "id": 2739459981,
+      "node_id": "PRRC_kwDOQ22AFM6jSNeN",
+      "diff_hunk": "@@ -0,0 +1,83 @@\n+import os\n+from pathlib import Path\n+import importlib\n+import importlib.util\n+\n+\n+def _repo_root_from_module(mod):\n+    bench_dir = os.path.dirname(os.path.abspath(mod.__file__))\n+    asv_dir = os.path.dirname(bench_dir)\n+    temple_dir = os.path.dirname(asv_dir)\n+    repo_root = os.path.dirname(temple_dir)\n+    return repo_root\n+\n+\n+def _ensure_parent(path: Path):\n+    path.parent.mkdir(parents=True, exist_ok=True)\n+\n+\n+def _write(path: Path, data: str):\n+    _ensure_parent(path)\n+    path.write_text(data, encoding=\"utf-8\")\n+\n+\n+def _cleanup(path: Path):\n+    try:\n+        if path.exists():\n+            path.unlink()\n+    except Exception:",
+      "path": "tests/test_bench_loader_smoke.py",
+      "commit_id": "c94b47e8a70cf2baaf69fdc45e9261751381438a",
+      "original_commit_id": "ec000e5a9d23f083c9e3730c0318d5d890952f8f",
+      "user": {
+        "login": "github-advanced-security[bot]",
+        "id": 62310815,
+        "node_id": "MDM6Qm90NjIzMTA4MTU=",
+        "avatar_url": "https://avatars.githubusercontent.com/in/57789?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/github-advanced-security%5Bbot%5D",
+        "html_url": "https://github.com/apps/github-advanced-security",
+        "followers_url": "https://api.github.com/users/github-advanced-security%5Bbot%5D/followers",
+        "following_url": "https://api.github.com/users/github-advanced-security%5Bbot%5D/following{/other_user}",
+        "gists_url": "https://api.github.com/users/github-advanced-security%5Bbot%5D/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/github-advanced-security%5Bbot%5D/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/github-advanced-security%5Bbot%5D/subscriptions",
+        "organizations_url": "https://api.github.com/users/github-advanced-security%5Bbot%5D/orgs",
+        "repos_url": "https://api.github.com/users/github-advanced-security%5Bbot%5D/repos",
+        "events_url": "https://api.github.com/users/github-advanced-security%5Bbot%5D/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/github-advanced-security%5Bbot%5D/received_events",
+        "type": "Bot",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "body": "## Empty except\n\n'except' clause does nothing but pass and there is no explanatory comment.\n\n[Show more details](https://github.com/squirrel289/temple/security/code-scanning/16)",
+      "created_at": "2026-01-29T02:19:51Z",
+      "updated_at": "2026-01-29T02:19:51Z",
+      "html_url": "https://github.com/squirrel289/temple/pull/6#discussion_r2739459981",
+      "pull_request_url": "https://api.github.com/repos/squirrel289/temple/pulls/6",
+      "_links": {
+        "self": {
+          "href": "https://api.github.com/repos/squirrel289/temple/pulls/comments/2739459981"
+        },
+        "html": {
+          "href": "https://github.com/squirrel289/temple/pull/6#discussion_r2739459981"
+        },
+        "pull_request": {
+          "href": "https://api.github.com/repos/squirrel289/temple/pulls/6"
+        }
+      },
+      "reactions": {
+        "url": "https://api.github.com/repos/squirrel289/temple/pulls/comments/2739459981/reactions",
+        "total_count": 0,
+        "+1": 0,
+        "-1": 0,
+        "laugh": 0,
+        "hooray": 0,
+        "confused": 0,
+        "heart": 0,
+        "rocket": 0,
+        "eyes": 0
+      },
+      "start_line": null,
+      "original_start_line": null,
+      "start_side": null,
+      "line": 28,
+      "original_line": 28,
+      "side": "RIGHT",
+      "author_association": "NONE",
+      "original_position": 28,
+      "position": 28,
+      "subject_type": "line"
+    },
+    {
+      "url": "https://api.github.com/repos/squirrel289/temple/pulls/comments/2739496193",
+      "pull_request_review_id": 3720197658,
+      "id": 2739496193,
+      "node_id": "PRRC_kwDOQ22AFM6jSWUB",
+      "diff_hunk": "@@ -0,0 +1,57 @@\n+\"\"\"\n+This type stub file was generated by pyright.\n+\"\"\"\n+\n+from typing import Any, Dict\n+from temple.compiler.serializers.base import ASTNode, SerializationContext, Serializer\n+\n+\"\"\"\n+temple.compiler.serializers.json_serializer\n+JSON output serializer for typed DSL.\n+\n+Produces valid JSON respecting schema types, with proper handling of:\n+- Numbers (int vs float)\n+- Strings (escaping, unicode)\n+- Arrays and objects\n+- Null values\n+\"\"\"\n+class JSONSerializer(Serializer):\n+    \"\"\"Serializer for JSON output format.\"\"\"\n+    def serialize(self, ast: ASTNode, data: Dict[str, Any]) -> str:\n+        \"\"\"\n+        Serialize AST with input data to JSON string.\n+\n+        Args:\n+            ast: Type-checked AST to serialize\n+            data: Input data (variables)\n+\n+        Returns:\n+            Valid JSON string\n+\n+        Raises:\n+            SerializationError: If output is not valid JSON-serializable\n+        \"\"\"\n+        ...\n+    \n+    def evaluate(self, node: ASTNode, context: SerializationContext) -> Any:\n+        \"\"\"\n+        Evaluate AST node to Python value suitable for JSON encoding.\n+\n+        Args:\n+            node: AST node\n+                    return node.text\n+\n+        Returns:\n+                    value = context.get_variable(node.expr)\n+\n+        Raises:\n+            SerializationError: If evaluation fails\n+        \"\"\"",
+      "path": "typings/temple/compiler/serializers/json_serializer.pyi",
+      "commit_id": "c94b47e8a70cf2baaf69fdc45e9261751381438a",
+      "original_commit_id": "ec000e5a9d23f083c9e3730c0318d5d890952f8f",
+      "user": {
+        "login": "Copilot",
+        "id": 175728472,
+        "node_id": "BOT_kgDOCnlnWA",
+        "avatar_url": "https://avatars.githubusercontent.com/in/946600?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/Copilot",
+        "html_url": "https://github.com/apps/copilot-pull-request-reviewer",
+        "followers_url": "https://api.github.com/users/Copilot/followers",
+        "following_url": "https://api.github.com/users/Copilot/following{/other_user}",
+        "gists_url": "https://api.github.com/users/Copilot/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/Copilot/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/Copilot/subscriptions",
+        "organizations_url": "https://api.github.com/users/Copilot/orgs",
+        "repos_url": "https://api.github.com/users/Copilot/repos",
+        "events_url": "https://api.github.com/users/Copilot/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/Copilot/received_events",
+        "type": "Bot",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "body": "Malformed docstring: The docstring for the evaluate method contains what appears to be code fragments mixed into the Args/Returns sections. Lines 42 and 45 contain code (`return node.text` and `value = context.get_variable(node.expr)`) instead of proper documentation text. This appears to be a copy-paste error that should be corrected to proper documentation describing the parameters and return value.",
+      "created_at": "2026-01-29T02:30:04Z",
+      "updated_at": "2026-01-29T02:30:06Z",
+      "html_url": "https://github.com/squirrel289/temple/pull/6#discussion_r2739496193",
+      "pull_request_url": "https://api.github.com/repos/squirrel289/temple/pulls/6",
+      "_links": {
+        "self": {
+          "href": "https://api.github.com/repos/squirrel289/temple/pulls/comments/2739496193"
+        },
+        "html": {
+          "href": "https://github.com/squirrel289/temple/pull/6#discussion_r2739496193"
+        },
+        "pull_request": {
+          "href": "https://api.github.com/repos/squirrel289/temple/pulls/6"
+        }
+      },
+      "reactions": {
+        "url": "https://api.github.com/repos/squirrel289/temple/pulls/comments/2739496193/reactions",
+        "total_count": 0,
+        "+1": 0,
+        "-1": 0,
+        "laugh": 0,
+        "hooray": 0,
+        "confused": 0,
+        "heart": 0,
+        "rocket": 0,
+        "eyes": 0
+      },
+      "start_line": 36,
+      "original_start_line": 36,
+      "start_side": "RIGHT",
+      "line": 49,
+      "original_line": 49,
+      "side": "RIGHT",
+      "author_association": "NONE",
+      "original_position": 49,
+      "position": 49,
+      "subject_type": "line"
+    },
+    {
+      "url": "https://api.github.com/repos/squirrel289/temple/pulls/comments/2739496215",
+      "pull_request_review_id": 3720197658,
+      "id": 2739496215,
+      "node_id": "PRRC_kwDOQ22AFM6jSWUX",
+      "diff_hunk": "@@ -0,0 +1,27 @@\n+\"\"\"\n+This type stub file was generated by pyright.\n+\"\"\"\n+\n+from typing import Any, Dict, List, Tuple\n+from .typed_ast import Block\n+\n+class RenderResult:\n+    def __init__(self, ir: Any, mapping: List[Tuple[str, Tuple[int, int]]]) -> None:",
+      "path": "typings/temple/typed_renderer.pyi",
+      "commit_id": "c94b47e8a70cf2baaf69fdc45e9261751381438a",
+      "original_commit_id": "ec000e5a9d23f083c9e3730c0318d5d890952f8f",
+      "user": {
+        "login": "Copilot",
+        "id": 175728472,
+        "node_id": "BOT_kgDOCnlnWA",
+        "avatar_url": "https://avatars.githubusercontent.com/in/946600?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/Copilot",
+        "html_url": "https://github.com/apps/copilot-pull-request-reviewer",
+        "followers_url": "https://api.github.com/users/Copilot/followers",
+        "following_url": "https://api.github.com/users/Copilot/following{/other_user}",
+        "gists_url": "https://api.github.com/users/Copilot/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/Copilot/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/Copilot/subscriptions",
+        "organizations_url": "https://api.github.com/users/Copilot/orgs",
+        "repos_url": "https://api.github.com/users/Copilot/repos",
+        "events_url": "https://api.github.com/users/Copilot/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/Copilot/received_events",
+        "type": "Bot",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "body": "Type inconsistency between typed_renderer.pyi and typed_ast.pyi: The mapping parameter type differs between these two files. In typed_renderer.pyi line 9, RenderResult's mapping parameter is typed as `List[Tuple[str, Tuple[int, int]]]`, but in typed_ast.pyi line 20 (and throughout the file), the mapping parameter is typed as `Optional[List[Tuple[str, Position]]]`. These should be consistent - either both should use `Tuple[int, int]` or both should use `Position`.",
+      "created_at": "2026-01-29T02:30:05Z",
+      "updated_at": "2026-01-29T02:30:06Z",
+      "html_url": "https://github.com/squirrel289/temple/pull/6#discussion_r2739496215",
+      "pull_request_url": "https://api.github.com/repos/squirrel289/temple/pulls/6",
+      "_links": {
+        "self": {
+          "href": "https://api.github.com/repos/squirrel289/temple/pulls/comments/2739496215"
+        },
+        "html": {
+          "href": "https://github.com/squirrel289/temple/pull/6#discussion_r2739496215"
+        },
+        "pull_request": {
+          "href": "https://api.github.com/repos/squirrel289/temple/pulls/6"
+        }
+      },
+      "reactions": {
+        "url": "https://api.github.com/repos/squirrel289/temple/pulls/comments/2739496215/reactions",
+        "total_count": 0,
+        "+1": 0,
+        "-1": 0,
+        "laugh": 0,
+        "hooray": 0,
+        "confused": 0,
+        "heart": 0,
+        "rocket": 0,
+        "eyes": 0
+      },
+      "start_line": null,
+      "original_start_line": null,
+      "start_side": null,
+      "line": 9,
+      "original_line": 9,
+      "side": "RIGHT",
+      "author_association": "NONE",
+      "original_position": 9,
+      "position": 9,
+      "subject_type": "line"
+    },
+    {
+      "url": "https://api.github.com/repos/squirrel289/temple/pulls/comments/2739496231",
+      "pull_request_review_id": 3720197658,
+      "id": 2739496231,
+      "node_id": "PRRC_kwDOQ22AFM6jSWUn",
+      "diff_hunk": "@@ -0,0 +1,34 @@\n+echo",
+      "path": "scripts/ci/create_secrets_baseline.sh",
+      "commit_id": "c94b47e8a70cf2baaf69fdc45e9261751381438a",
+      "original_commit_id": "ec000e5a9d23f083c9e3730c0318d5d890952f8f",
+      "user": {
+        "login": "Copilot",
+        "id": 175728472,
+        "node_id": "BOT_kgDOCnlnWA",
+        "avatar_url": "https://avatars.githubusercontent.com/in/946600?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/Copilot",
+        "html_url": "https://github.com/apps/copilot-pull-request-reviewer",
+        "followers_url": "https://api.github.com/users/Copilot/followers",
+        "following_url": "https://api.github.com/users/Copilot/following{/other_user}",
+        "gists_url": "https://api.github.com/users/Copilot/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/Copilot/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/Copilot/subscriptions",
+        "organizations_url": "https://api.github.com/users/Copilot/orgs",
+        "repos_url": "https://api.github.com/users/Copilot/repos",
+        "events_url": "https://api.github.com/users/Copilot/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/Copilot/received_events",
+        "type": "Bot",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "body": "Incorrect shebang placement: The shebang line `#!/usr/bin/env bash` must be on line 1, not line 2. Line 1 currently contains just `echo` which should be removed. The shebang must be the very first line for the shell to correctly interpret the script.\n```suggestion\n\n```",
+      "created_at": "2026-01-29T02:30:05Z",
+      "updated_at": "2026-01-29T02:30:06Z",
+      "html_url": "https://github.com/squirrel289/temple/pull/6#discussion_r2739496231",
+      "pull_request_url": "https://api.github.com/repos/squirrel289/temple/pulls/6",
+      "_links": {
+        "self": {
+          "href": "https://api.github.com/repos/squirrel289/temple/pulls/comments/2739496231"
+        },
+        "html": {
+          "href": "https://github.com/squirrel289/temple/pull/6#discussion_r2739496231"
+        },
+        "pull_request": {
+          "href": "https://api.github.com/repos/squirrel289/temple/pulls/6"
+        }
+      },
+      "reactions": {
+        "url": "https://api.github.com/repos/squirrel289/temple/pulls/comments/2739496231/reactions",
+        "total_count": 0,
+        "+1": 0,
+        "-1": 0,
+        "laugh": 0,
+        "hooray": 0,
+        "confused": 0,
+        "heart": 0,
+        "rocket": 0,
+        "eyes": 0
+      },
+      "start_line": null,
+      "original_start_line": null,
+      "start_side": null,
+      "line": 1,
+      "original_line": 1,
+      "side": "RIGHT",
+      "author_association": "NONE",
+      "original_position": 1,
+      "position": 1,
+      "subject_type": "line"
+    },
+    {
+      "url": "https://api.github.com/repos/squirrel289/temple/pulls/comments/2739496263",
+      "pull_request_review_id": 3720197658,
+      "id": 2739496263,
+      "node_id": "PRRC_kwDOQ22AFM6jSWVH",
+      "diff_hunk": "@@ -0,0 +1,83 @@\n+import os\n+from pathlib import Path\n+import importlib\n+import importlib.util\n+\n+\n+def _repo_root_from_module(mod):\n+    bench_dir = os.path.dirname(os.path.abspath(mod.__file__))\n+    asv_dir = os.path.dirname(bench_dir)\n+    temple_dir = os.path.dirname(asv_dir)\n+    repo_root = os.path.dirname(temple_dir)\n+    return repo_root\n+\n+\n+def _ensure_parent(path: Path):\n+    path.parent.mkdir(parents=True, exist_ok=True)\n+\n+\n+def _write(path: Path, data: str):\n+    _ensure_parent(path)\n+    path.write_text(data, encoding=\"utf-8\")\n+\n+\n+def _cleanup(path: Path):\n+    try:\n+        if path.exists():\n+            path.unlink()\n+    except Exception:",
+      "path": "tests/test_bench_loader_smoke.py",
+      "commit_id": "c94b47e8a70cf2baaf69fdc45e9261751381438a",
+      "original_commit_id": "ec000e5a9d23f083c9e3730c0318d5d890952f8f",
+      "user": {
+        "login": "Copilot",
+        "id": 175728472,
+        "node_id": "BOT_kgDOCnlnWA",
+        "avatar_url": "https://avatars.githubusercontent.com/in/946600?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/Copilot",
+        "html_url": "https://github.com/apps/copilot-pull-request-reviewer",
+        "followers_url": "https://api.github.com/users/Copilot/followers",
+        "following_url": "https://api.github.com/users/Copilot/following{/other_user}",
+        "gists_url": "https://api.github.com/users/Copilot/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/Copilot/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/Copilot/subscriptions",
+        "organizations_url": "https://api.github.com/users/Copilot/orgs",
+        "repos_url": "https://api.github.com/users/Copilot/repos",
+        "events_url": "https://api.github.com/users/Copilot/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/Copilot/received_events",
+        "type": "Bot",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "body": "'except' clause does nothing but pass and there is no explanatory comment.",
+      "created_at": "2026-01-29T02:30:05Z",
+      "updated_at": "2026-01-29T02:30:06Z",
+      "html_url": "https://github.com/squirrel289/temple/pull/6#discussion_r2739496263",
+      "pull_request_url": "https://api.github.com/repos/squirrel289/temple/pulls/6",
+      "_links": {
+        "self": {
+          "href": "https://api.github.com/repos/squirrel289/temple/pulls/comments/2739496263"
+        },
+        "html": {
+          "href": "https://github.com/squirrel289/temple/pull/6#discussion_r2739496263"
+        },
+        "pull_request": {
+          "href": "https://api.github.com/repos/squirrel289/temple/pulls/6"
+        }
+      },
+      "reactions": {
+        "url": "https://api.github.com/repos/squirrel289/temple/pulls/comments/2739496263/reactions",
+        "total_count": 0,
+        "+1": 0,
+        "-1": 0,
+        "laugh": 0,
+        "hooray": 0,
+        "confused": 0,
+        "heart": 0,
+        "rocket": 0,
+        "eyes": 0
+      },
+      "start_line": null,
+      "original_start_line": null,
+      "start_side": null,
+      "line": 28,
+      "original_line": 28,
+      "side": "RIGHT",
+      "author_association": "NONE",
+      "original_position": 28,
+      "position": 28,
+      "subject_type": "line"
+    },
+    {
+      "url": "https://api.github.com/repos/squirrel289/temple/pulls/comments/2739496274",
+      "pull_request_review_id": 3720197658,
+      "id": 2739496274,
+      "node_id": "PRRC_kwDOQ22AFM6jSWVS",
+      "diff_hunk": "@@ -0,0 +1,195 @@\n+#!/usr/bin/env python3\n+\"\"\"Compare detect-secrets scan JSON with baseline and emit status.\n+\n+Defaults preserve existing behaviour (read `detect_secrets_curr.json`, write\n+`detect_secrets_status.txt` and `secrets-report.json`).\n+\n+Added CLI options:\n+  --curr PATH       : path to current scan JSON (use '-' to read from stdin)\n+  --base PATH       : path to baseline (default: .secrets.baseline)\n+  --status-out PATH : path to write status (default: detect_secrets_status.txt)\n+  --no-write        : do not write files; print single-word status to stdout\n+\"\"\"\n+\n+from __future__ import annotations\n+\n+import argparse\n+import json\n+import sys\n+from pathlib import Path\n+from typing import Any, Dict\n+\n+\n+ROOT = Path(__file__).resolve().parents[2]\n+\n+\n+def load_json_path(path: Path) -> Dict[str, Any]:\n+    try:\n+        return json.loads(path.read_text())\n+    except Exception:\n+        return {}\n+\n+\n+def load_json_file_like(f) -> Dict[str, Any]:\n+    try:\n+        return json.load(f)\n+    except Exception:\n+        return {}\n+\n+\n+def build_hashes(b: Dict[str, Any]):\n+    res = {}\n+    for fn, findings in b.get(\"results\", {}).items():\n+        res[fn] = set(\n+            [f.get(\"hashed_secret\") for f in findings if \"hashed_secret\" in f]\n+        )\n+    return res\n+\n+\n+def should_ignore(fn: str, f: Dict[str, Any], ignore_patterns) -> bool:\n+    for pat in ignore_patterns:\n+        if pat in fn or pat in (f.get(\"type\", \"\") or \"\"):\n+            return True\n+    return False\n+\n+\n+def compare(curr: Dict[str, Any], base: Dict[str, Any], ignore_patterns):\n+    base_hashes = build_hashes(base)\n+    new = []\n+    for fn, findings in curr.get(\"results\", {}).items():\n+        if fn not in base_hashes:\n+            filtered = [\n+                f for f in findings if not should_ignore(fn, f, ignore_patterns)\n+            ]\n+            if filtered:\n+                new.append({\"file\": fn, \"count\": len(filtered)})\n+        else:\n+            seen = base_hashes[fn]\n+            for f in findings:\n+                if should_ignore(fn, f, ignore_patterns):\n+                    continue\n+                if f.get(\"hashed_secret\") not in seen:\n+                    new.append(\n+                        {\n+                            \"file\": fn,\n+                            \"type\": f.get(\"type\"),\n+                            \"line\": f.get(\"line_number\"),\n+                        }\n+                    )\n+    return new\n+\n+\n+def main(argv=None) -> int:\n+    p = argparse.ArgumentParser(\n+        description=\"Compare detect-secrets scan JSON with baseline\"\n+    )\n+    p.add_argument(\"--curr\", type=str, default=str(ROOT / \"detect_secrets_curr.json\"))\n+    p.add_argument(\"--base\", type=str, default=str(ROOT / \".secrets.baseline\"))\n+    p.add_argument(\n+        \"--status-out\", type=str, default=str(ROOT / \"detect_secrets_status.txt\")\n+    )\n+    p.add_argument(\n+        \"--no-write\",\n+        action=\"store_true\",\n+        help=\"Do not write files; print status to stdout\",\n+    )\n+    p.add_argument(\n+        \"--scan\",\n+        action=\"store_true\",\n+        help=\"Run detect-secrets scan in-process (avoids shelling out)\",\n+    )\n+    p.add_argument(\n+        \"--scan-args\",\n+        nargs=\"*\",\n+        help=\"Extra arguments to pass to detect-secrets scan (when using --scan)\",\n+    )\n+    args = p.parse_args(argv)\n+\n+    ignore_patterns = []\n+    ignore_file = ROOT / \".detect-secrets-ignore\"\n+    if ignore_file.exists():\n+        for line in ignore_file.read_text().splitlines():\n+            line = line.strip()\n+            if line and not line.startswith(\"#\"):\n+                ignore_patterns.append(line)\n+\n+    base_path = Path(args.base)\n+    if not base_path.exists():\n+        if args.no_write:\n+            print(\"no_baseline\")\n+            return 0\n+        else:\n+            print(\"No .secrets.baseline found\")\n+            Path(args.status_out).write_text(\"no_baseline\")\n+            return 0\n+\n+    # If requested, run detect-secrets scan in-process and capture JSON output\n+    curr = {}\n+    if args.scan:\n+        try:\n+            import runpy\n+            import io\n+            import contextlib\n+\n+            scan_args = [\"detect_secrets\", \"scan\"]\n+            if args.scan_args:\n+                scan_args.extend(args.scan_args)\n+\n+            # Run the detect-secrets module as __main__ in-process, capturing stdout\n+            buf = io.StringIO()\n+            old_argv = sys.argv\n+            try:\n+                sys.argv = scan_args\n+                with contextlib.redirect_stdout(buf):\n+                    runpy.run_module(\"detect_secrets\", run_name=\"__main__\")\n+            finally:\n+                sys.argv = old_argv\n+\n+            out = buf.getvalue()\n+            try:\n+                curr = json.loads(out)\n+            except Exception:\n+                curr = {}\n+        except Exception:\n+            # Fall back to reading provided --curr input (file or stdin)\n+            curr = {}\n+            if args.curr == \"-\":\n+                curr = load_json_file_like(sys.stdin)\n+            else:\n+                curr_path = Path(args.curr)\n+                curr = load_json_path(curr_path) if curr_path.exists() else {}\n+    else:\n+        if args.curr == \"-\":\n+            curr = load_json_file_like(sys.stdin)\n+        else:\n+            curr_path = Path(args.curr)\n+            curr = load_json_path(curr_path) if curr_path.exists() else {}\n+\n+    base = load_json_path(base_path)\n+\n+    new = compare(curr, base, ignore_patterns)\n+\n+    if args.no_write:\n+        if new:\n+            print(\"new\")\n+            print(json.dumps(new))\n+        else:\n+            print(\"ok\")\n+        return 0\n+\n+    status_path = Path(args.status_out)\n+    if new:\n+        print(\"New secrets found:\")\n+        print(new)\n+        json.dump(new, open(ROOT / \"secrets-report.json\", \"w\"))",
+      "path": "scripts/ci/detect_secrets_compare.py",
+      "commit_id": "ec000e5a9d23f083c9e3730c0318d5d890952f8f",
+      "original_commit_id": "ec000e5a9d23f083c9e3730c0318d5d890952f8f",
+      "user": {
+        "login": "Copilot",
+        "id": 175728472,
+        "node_id": "BOT_kgDOCnlnWA",
+        "avatar_url": "https://avatars.githubusercontent.com/in/946600?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/Copilot",
+        "html_url": "https://github.com/apps/copilot-pull-request-reviewer",
+        "followers_url": "https://api.github.com/users/Copilot/followers",
+        "following_url": "https://api.github.com/users/Copilot/following{/other_user}",
+        "gists_url": "https://api.github.com/users/Copilot/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/Copilot/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/Copilot/subscriptions",
+        "organizations_url": "https://api.github.com/users/Copilot/orgs",
+        "repos_url": "https://api.github.com/users/Copilot/repos",
+        "events_url": "https://api.github.com/users/Copilot/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/Copilot/received_events",
+        "type": "Bot",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "body": "File is opened but is not closed.\n```suggestion\n        (ROOT / \"secrets-report.json\").write_text(json.dumps(new))\n```",
+      "created_at": "2026-01-29T02:30:05Z",
+      "updated_at": "2026-01-29T02:30:06Z",
+      "html_url": "https://github.com/squirrel289/temple/pull/6#discussion_r2739496274",
+      "pull_request_url": "https://api.github.com/repos/squirrel289/temple/pulls/6",
+      "_links": {
+        "self": {
+          "href": "https://api.github.com/repos/squirrel289/temple/pulls/comments/2739496274"
+        },
+        "html": {
+          "href": "https://github.com/squirrel289/temple/pull/6#discussion_r2739496274"
+        },
+        "pull_request": {
+          "href": "https://api.github.com/repos/squirrel289/temple/pulls/6"
+        }
+      },
+      "reactions": {
+        "url": "https://api.github.com/repos/squirrel289/temple/pulls/comments/2739496274/reactions",
+        "total_count": 0,
+        "+1": 0,
+        "-1": 0,
+        "laugh": 0,
+        "hooray": 0,
+        "confused": 0,
+        "heart": 0,
+        "rocket": 0,
+        "eyes": 0
+      },
+      "start_line": null,
+      "original_start_line": null,
+      "start_side": null,
+      "line": null,
+      "original_line": 184,
+      "side": "RIGHT",
+      "author_association": "NONE",
+      "original_position": 184,
+      "position": 1,
+      "subject_type": "line"
+    },
+    {
+      "url": "https://api.github.com/repos/squirrel289/temple/pulls/comments/2739533921",
+      "pull_request_review_id": 3720236984,
+      "id": 2739533921,
+      "node_id": "PRRC_kwDOQ22AFM6jSfhh",
+      "diff_hunk": "@@ -1,26 +1,63 @@\n+---\n repos:\n-- repo: local\n-  hooks:\n-    - id: ruff-check\n-      name: ruff check\n-      entry: .ci-venv/bin/ruff check\n-      language: system\n-      types: [python]\n-    - id: pytest-affected\n-      name: pytest affected\n-      entry: scripts/pre-commit/run-tests.sh\n-      language: system\n-      files: ''\n-      pass_filenames: true\n-      types: [python]\n-    - id: prepush-checks\n-      name: pre-push checks\n-      entry: scripts/pre-commit/run-pre-push.sh\n-      language: system\n-      stages: [pre-push]\n-    - id: eslint-extension\n-      name: eslint (vscode-temple-linter)\n-      entry: npm --prefix vscode-temple-linter run lint -- --max-warnings=0\n-      language: system\n-      pass_filenames: false\n-      files: ^vscode-temple-linter/src/.*\\.ts$\n+  - repo: local\n+    hooks:\n+      - id: lint-shell\n+        name: \"lint: shell (bash -n)\"\n+        entry: scripts/pre-commit/lint-shell.sh\n+        language: system\n+        pass_filenames: false\n+        stages: [pre-push]\n+\n+      - id: lint-yaml\n+        name: \"lint: yaml (yamllint)\"\n+        entry: scripts/pre-commit/lint-yaml.sh\n+        language: system\n+        pass_filenames: false\n+\n+      - id: lint-python\n+        name: \"lint: python\"\n+        entry: scripts/pre-commit/lint-python.sh\n+        language: system\n+        types: [python]\n+\n+      - id: lint-js\n+        name: \"lint: js/ts (ESLint)\"\n+        entry: scripts/pre-commit/lint-js.sh\n+        language: system\n+        pass_filenames: false\n+        files: ^vscode-temple-linter/src/.*\\.ts$\n+\n+      - id: secure-secrets-scan\n+        name: \"secure: secrets scan\"\n+        # Wrapper runs scan + compare (ensures compare logic identical to CI).\n+        entry: scripts/pre-commit/secure-find-secrets.sh\n+        language: system\n+        pass_filenames: false\n+\n+      - id: test-python-affected\n+        name: \"test: python affected\"\n+        entry: scripts/pre-commit/test-python.sh\n+        language: system\n+        pass_filenames: true\n+        types: [python]\n+\n+      - id: validate-benchmarks\n+        name: \"validate: benchmarks quick\"\n+        entry: scripts/pre-commit/validate-benchmarks.sh\n+        language: system\n+        pass_filenames: false\n+        stages: [pre-push]\n+\n+      - id: build-docs\n+        name: \"build: docs (pre-push)\"\n+        entry: scripts/pre-commit/build-docs.sh\n+        language: system\n+        pass_filenames: false\n+        stages: [pre-push]\n+\n+  - repo: https://github.com/Yelp/detect-secrets\n+    rev: v1.5.0\n+    hooks:\n+      - id: detect-secrets\n+        args: [--baseline, .secrets.baseline]",
+      "path": ".pre-commit-config.yaml",
+      "commit_id": "c94b47e8a70cf2baaf69fdc45e9261751381438a",
+      "original_commit_id": "c94b47e8a70cf2baaf69fdc45e9261751381438a",
+      "user": {
+        "login": "Copilot",
+        "id": 175728472,
+        "node_id": "BOT_kgDOCnlnWA",
+        "avatar_url": "https://avatars.githubusercontent.com/in/946600?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/Copilot",
+        "html_url": "https://github.com/apps/copilot-pull-request-reviewer",
+        "followers_url": "https://api.github.com/users/Copilot/followers",
+        "following_url": "https://api.github.com/users/Copilot/following{/other_user}",
+        "gists_url": "https://api.github.com/users/Copilot/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/Copilot/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/Copilot/subscriptions",
+        "organizations_url": "https://api.github.com/users/Copilot/orgs",
+        "repos_url": "https://api.github.com/users/Copilot/repos",
+        "events_url": "https://api.github.com/users/Copilot/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/Copilot/received_events",
+        "type": "Bot",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "body": "The pre-commit configuration includes both a custom `secure-secrets-scan` hook (lines 31-36) and the official `detect-secrets` hook from the Yelp repository (lines 59-63). This creates potential for duplicate secret scanning on each commit. The custom hook already wraps detect-secrets functionality with repository-specific logic. Consider removing the redundant official hook to avoid duplicate scanning and potential conflicts in behavior.\n```suggestion\n\n```",
+      "created_at": "2026-01-29T02:40:13Z",
+      "updated_at": "2026-01-29T02:40:14Z",
+      "html_url": "https://github.com/squirrel289/temple/pull/6#discussion_r2739533921",
+      "pull_request_url": "https://api.github.com/repos/squirrel289/temple/pulls/6",
+      "_links": {
+        "self": {
+          "href": "https://api.github.com/repos/squirrel289/temple/pulls/comments/2739533921"
+        },
+        "html": {
+          "href": "https://github.com/squirrel289/temple/pull/6#discussion_r2739533921"
+        },
+        "pull_request": {
+          "href": "https://api.github.com/repos/squirrel289/temple/pulls/6"
+        }
+      },
+      "reactions": {
+        "url": "https://api.github.com/repos/squirrel289/temple/pulls/comments/2739533921/reactions",
+        "total_count": 0,
+        "+1": 0,
+        "-1": 0,
+        "laugh": 0,
+        "hooray": 0,
+        "confused": 0,
+        "heart": 0,
+        "rocket": 0,
+        "eyes": 0
+      },
+      "start_line": 58,
+      "original_start_line": 58,
+      "start_side": "RIGHT",
+      "line": 63,
+      "original_line": 63,
+      "side": "RIGHT",
+      "author_association": "NONE",
+      "original_position": 88,
+      "position": 88,
+      "subject_type": "line"
+    },
+    {
+      "url": "https://api.github.com/repos/squirrel289/temple/pulls/comments/2739533952",
+      "pull_request_review_id": 3720236984,
+      "id": 2739533952,
+      "node_id": "PRRC_kwDOQ22AFM6jSfiA",
+      "diff_hunk": "@@ -0,0 +1,57 @@\n+\"\"\"\n+This type stub file was generated by pyright.\n+\"\"\"\n+\n+from typing import Any, Dict\n+from temple.compiler.serializers.base import ASTNode, SerializationContext, Serializer\n+\n+\"\"\"\n+temple.compiler.serializers.json_serializer\n+JSON output serializer for typed DSL.\n+\n+Produces valid JSON respecting schema types, with proper handling of:\n+- Numbers (int vs float)\n+- Strings (escaping, unicode)\n+- Arrays and objects\n+- Null values\n+\"\"\"\n+class JSONSerializer(Serializer):\n+    \"\"\"Serializer for JSON output format.\"\"\"\n+    def serialize(self, ast: ASTNode, data: Dict[str, Any]) -> str:\n+        \"\"\"\n+        Serialize AST with input data to JSON string.\n+\n+        Args:\n+            ast: Type-checked AST to serialize\n+            data: Input data (variables)\n+\n+        Returns:\n+            Valid JSON string\n+\n+        Raises:\n+            SerializationError: If output is not valid JSON-serializable\n+        \"\"\"\n+        ...\n+    \n+    def evaluate(self, node: ASTNode, context: SerializationContext) -> Any:\n+        \"\"\"\n+        Evaluate AST node to Python value suitable for JSON encoding.\n+\n+        Args:\n+            node: AST node\n+                    return node.text\n+\n+        Returns:\n+                    value = context.get_variable(node.expr)\n+\n+        Raises:\n+            SerializationError: If evaluation fails\n+        \"\"\"",
+      "path": "typings/temple/compiler/serializers/json_serializer.pyi",
+      "commit_id": "c94b47e8a70cf2baaf69fdc45e9261751381438a",
+      "original_commit_id": "c94b47e8a70cf2baaf69fdc45e9261751381438a",
+      "user": {
+        "login": "Copilot",
+        "id": 175728472,
+        "node_id": "BOT_kgDOCnlnWA",
+        "avatar_url": "https://avatars.githubusercontent.com/in/946600?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/Copilot",
+        "html_url": "https://github.com/apps/copilot-pull-request-reviewer",
+        "followers_url": "https://api.github.com/users/Copilot/followers",
+        "following_url": "https://api.github.com/users/Copilot/following{/other_user}",
+        "gists_url": "https://api.github.com/users/Copilot/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/Copilot/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/Copilot/subscriptions",
+        "organizations_url": "https://api.github.com/users/Copilot/orgs",
+        "repos_url": "https://api.github.com/users/Copilot/repos",
+        "events_url": "https://api.github.com/users/Copilot/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/Copilot/received_events",
+        "type": "Bot",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "body": "The docstring for the `evaluate` method contains malformed content. Lines 42 and 45 appear to be code fragments (`return node.text` and `value = context.get_variable(node.expr)`) rather than proper documentation text. These should be replaced with appropriate descriptions of the return value and error conditions.",
+      "created_at": "2026-01-29T02:40:14Z",
+      "updated_at": "2026-01-29T02:40:14Z",
+      "html_url": "https://github.com/squirrel289/temple/pull/6#discussion_r2739533952",
+      "pull_request_url": "https://api.github.com/repos/squirrel289/temple/pulls/6",
+      "_links": {
+        "self": {
+          "href": "https://api.github.com/repos/squirrel289/temple/pulls/comments/2739533952"
+        },
+        "html": {
+          "href": "https://github.com/squirrel289/temple/pull/6#discussion_r2739533952"
+        },
+        "pull_request": {
+          "href": "https://api.github.com/repos/squirrel289/temple/pulls/6"
+        }
+      },
+      "reactions": {
+        "url": "https://api.github.com/repos/squirrel289/temple/pulls/comments/2739533952/reactions",
+        "total_count": 0,
+        "+1": 0,
+        "-1": 0,
+        "laugh": 0,
+        "hooray": 0,
+        "confused": 0,
+        "heart": 0,
+        "rocket": 0,
+        "eyes": 0
+      },
+      "start_line": 36,
+      "original_start_line": 36,
+      "start_side": "RIGHT",
+      "line": 49,
+      "original_line": 49,
+      "side": "RIGHT",
+      "author_association": "NONE",
+      "original_position": 49,
+      "position": 49,
+      "subject_type": "line"
+    }
+  ]
+}

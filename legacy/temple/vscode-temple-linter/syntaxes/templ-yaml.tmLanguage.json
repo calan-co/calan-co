@@ -1,0 +1,136 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Temple Templated YAML",
+  "scopeName": "source.templ-yaml",
+  "patterns": [
+    {
+      "include": "source.yaml"
+    },
+    {
+      "include": "#templeComment"
+    },
+    {
+      "include": "#templeStatement"
+    },
+    {
+      "include": "#templeExpression"
+    }
+  ],
+  "repository": {
+    "templeComment": {
+      "name": "comment.block.temple",
+      "begin": "\\{#",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.comment.begin.temple"
+        }
+      },
+      "end": "#\\}",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.comment.end.temple"
+        }
+      }
+    },
+    "templeStatement": {
+      "name": "meta.statement.temple",
+      "begin": "\\{%",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.section.embedded.begin.temple"
+        }
+      },
+      "end": "%\\}",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.embedded.end.temple"
+        }
+      },
+      "patterns": [
+        {
+          "match": "\\b(if|elif|else|for|in|include|set|end|not|and|or)\\b",
+          "name": "keyword.control.temple"
+        },
+        {
+          "include": "#number"
+        },
+        {
+          "include": "#string"
+        },
+        {
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b",
+          "name": "variable.other.temple"
+        },
+        {
+          "match": "[\\[\\]\\(\\)\\.,:|]",
+          "name": "punctuation.separator.temple"
+        }
+      ]
+    },
+    "templeExpression": {
+      "name": "meta.expression.temple",
+      "begin": "\\{\\{",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.section.embedded.begin.temple"
+        }
+      },
+      "end": "\\}\\}",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.embedded.end.temple"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#number"
+        },
+        {
+          "include": "#string"
+        },
+        {
+          "match": "\\b(true|false|null)\\b",
+          "name": "constant.language.temple"
+        },
+        {
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b",
+          "name": "variable.other.temple"
+        },
+        {
+          "match": "[\\[\\]\\(\\)\\.,:|]",
+          "name": "punctuation.separator.temple"
+        }
+      ]
+    },
+    "number": {
+      "match": "\\b-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?\\b",
+      "name": "constant.numeric.temple"
+    },
+    "string": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.temple",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "match": "\\\\.",
+              "name": "constant.character.escape.temple"
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.single.temple",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            {
+              "match": "\\\\.",
+              "name": "constant.character.escape.temple"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

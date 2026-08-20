@@ -73,10 +73,10 @@
       "source": "https://github.com/templjs/template",
       "defaultBranch": "main",
       "defaultSha": "7d14b72c18925e73ab95a495542d07da45e4fe3a",
-      "status": "eligible-for-import",
+      "status": "history-imported",
       "targetPath": "legacy/template",
       "exclusions": [
-        "Queued read-only history import only; prohibit active workspace, image, and release-artifact handling."
+        "History import completed as a read-only history import; active workspace, image, and release-artifact handling remain prohibited."
       ]
     },
     {
@@ -84,10 +84,10 @@
       "source": "https://github.com/templjs/temple",
       "defaultBranch": "main",
       "defaultSha": "9fdaed9a03599720473ebae802b2579d5233acac",
-      "status": "eligible-for-import",
+      "status": "history-imported",
       "targetPath": "legacy/temple",
       "exclusions": [
-        "Queued read-only history import only; prohibit active workspace, image, and release-artifact handling."
+        "History import completed as a read-only history import; active workspace, image, and release-artifact handling remain prohibited."
       ]
     }
   ]

@@ -1,0 +1,45 @@
+---
+name: Docs
+
+on:
+  # Run on pushes to main and trusted branch patterns
+  push:
+    branches: [main, 'docs/**']
+  # Run on pull request events (opened/synchronize/reopened) for PRs from any branch
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  docs-linter:
+    runs-on: ubuntu-latest
+    env:
+      CI_VENV_PATH: ${{ github.workspace }}/.cache/ci-venv
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Temple Linter Python Environment Setup
+        uses: ./.github/actions/setup-python
+        with:
+          python-version: '3.11'
+          working-directory: temple-linter
+          extras: "[docs]"
+      - name: Bootstrap CI environment
+        run: ./scripts/ci/ensure_ci_venv.sh
+      - name: Build docs
+        run: ./scripts/pre-commit/build-docs.sh
+      - name: Lint docs
+        run: ./scripts/pre-commit/lint-docs.sh
+  docs-core:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Temple Core Python Environment Setup
+        uses: ./.github/actions/setup-python
+        with:
+          python-version: '3.11'
+          working-directory: temple
+          extras: "[docs]"
+      - name: Validate core docs exist
+        working-directory: temple/docs
+        run: echo '✓ Core documentation files present:' && ls -1 *.md || echo 'No markdown docs found'

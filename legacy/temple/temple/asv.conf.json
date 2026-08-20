@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "project": "temple",
+  "repo": "..",
+  "branches": ["main"],
+  "environment_type": "virtualenv",
+  "matrix": {},
+  "benchmark_dir": "asv/benchmarks",
+  "results_dir": "asv/results",
+  "html_dir": "asv/results/html",
+  "build_command": [],
+  "install_command": [
+    "in-dir={env_dir} python -m pip install --upgrade pip setuptools wheel",
+    "in-dir={env_dir} python -m pip install {build_dir}"
+  ]
+}

@@ -1,0 +1,51 @@
+{
+  "folders": [
+    {
+      "path": ".",
+      "name": "temple (root)",
+    },
+    {
+      "path": "temple",
+      "name": "core",
+      "settings": {
+        "python.defaultInterpreterPath": "${workspaceFolder:core}/.venv/bin/python",
+        "python.analysis.extraPaths": ["${workspaceFolder:core}/src"],
+      },
+    },
+    {
+      "path": "temple-linter",
+      "name": "linter",
+      "settings": {
+        "python.defaultInterpreterPath": "${workspaceFolder:linter}/.venv/bin/python",
+      },
+    },
+    {
+      "path": "vscode-temple-linter",
+      "name": "vscode-extension",
+    },
+  ],
+  "settings": {
+    "python.testing.pytestEnabled": true,
+    "python.testing.unittestEnabled": false,
+    "editor.formatOnSave": true,
+    "files.exclude": {
+      "**/__pycache__": true,
+      "**/*.pyc": true,
+      "**/.pytest_cache": true,
+      "**/node_modules": true,
+      "**/dist": true,
+    },
+    "chat.tools.terminal.autoApprove": {
+      "pytest": true,
+    },
+  },
+  "extensions": {
+    "recommendations": [
+      "ms-python.python",
+      "ms-python.vscode-pylance",
+      "charliermarsh.ruff",
+      "bierner.github-markdown-preview",
+      "timonwong.shellcheck",
+    ],
+  },
+}

@@ -1,0 +1,344 @@
+{
+  "name": "vscode-temple-linter",
+  "displayName": "Temple Linter",
+  "description": "Lint and preprocess temple templated files for correct linting and diagnostics in VS Code.",
+  "version": "0.0.10",
+  "publisher": "squirrel289",
+  "license": "MIT",
+  "engines": {
+    "vscode": ">=1.70.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onLanguage:templ-any",
+    "onLanguage:templ-markdown",
+    "onLanguage:templ-json",
+    "onLanguage:templ-yaml",
+    "onLanguage:templ-html",
+    "onLanguage:templ-xml",
+    "onLanguage:templ-toml",
+    "onStartupFinished"
+  ],
+  "main": "./dist/src/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "templ-any",
+        "aliases": [
+          "Templated File"
+        ],
+        "extensions": [
+          ".tmpl",
+          ".template"
+        ],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "templ-markdown",
+        "aliases": [
+          "Templated Markdown"
+        ],
+        "extensions": [
+          ".md.tmpl",
+          ".markdown.tmpl",
+          ".md.template",
+          ".markdown.template"
+        ],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "templ-json",
+        "aliases": [
+          "Templated JSON"
+        ],
+        "extensions": [
+          ".json.tmpl",
+          ".json.template"
+        ],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "templ-yaml",
+        "aliases": [
+          "Templated YAML"
+        ],
+        "extensions": [
+          ".yaml.tmpl",
+          ".yml.tmpl",
+          ".yaml.template",
+          ".yml.template"
+        ],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "templ-html",
+        "aliases": [
+          "Templated HTML"
+        ],
+        "extensions": [
+          ".html.tmpl",
+          ".htm.tmpl",
+          ".html.template",
+          ".htm.template"
+        ],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "templ-xml",
+        "aliases": [
+          "Templated XML"
+        ],
+        "extensions": [
+          ".xml.tmpl",
+          ".xml.template"
+        ],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "templ-toml",
+        "aliases": [
+          "Templated TOML"
+        ],
+        "extensions": [
+          ".toml.tmpl",
+          ".toml.template"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "templ-any",
+        "scopeName": "source.templ-any",
+        "path": "./syntaxes/templ-any.tmLanguage.json"
+      },
+      {
+        "language": "templ-markdown",
+        "scopeName": "source.templ-markdown",
+        "path": "./syntaxes/templ-markdown.tmLanguage.json"
+      },
+      {
+        "language": "templ-json",
+        "scopeName": "source.templ-json",
+        "path": "./syntaxes/templ-json.tmLanguage.json"
+      },
+      {
+        "language": "templ-yaml",
+        "scopeName": "source.templ-yaml",
+        "path": "./syntaxes/templ-yaml.tmLanguage.json"
+      },
+      {
+        "language": "templ-html",
+        "scopeName": "source.templ-html",
+        "path": "./syntaxes/templ-html.tmLanguage.json"
+      },
+      {
+        "language": "templ-xml",
+        "scopeName": "source.templ-xml",
+        "path": "./syntaxes/templ-xml.tmLanguage.json"
+      },
+      {
+        "language": "templ-toml",
+        "scopeName": "source.templ-toml",
+        "path": "./syntaxes/templ-toml.tmLanguage.json"
+      },
+      {
+        "scopeName": "temple.injection",
+        "path": "./syntaxes/temple.injection.tmLanguage.json",
+        "injectTo": [
+          "text.html.markdown",
+          "source.json",
+          "source.yaml",
+          "text.html.basic",
+          "text.xml",
+          "source.toml"
+        ]
+      }
+    ],
+    "configuration": {
+      "title": "Temple Linter",
+      "properties": {
+        "temple.fileExtensions": {
+          "type": "array",
+          "default": [
+            ".tmpl",
+            ".template"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "File extensions to treat as temple template files (e.g., .tmpl, .template)"
+        },
+        "temple.semanticSchemaPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional JSON Schema path used for semantic validation and schema-aware language features."
+        },
+        "temple.semanticContext": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "default": null,
+          "description": "Optional context object used for semantic validation when schema is not provided."
+        },
+        "temple.pythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional explicit Python interpreter path for temple_linter. When empty, Temple Language Server auto-detects a valid interpreter."
+        },
+        "temple.serverRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Optional temple-linter project root path used as server cwd. Leave empty for automatic discovery."
+        },
+        "temple.baseLintDebounceSeconds": {
+          "type": "number",
+          "default": 0.8,
+          "minimum": 0,
+          "description": "Minimum interval between base-language lint requests while typing. Higher values improve responsiveness under heavy edits."
+        },
+        "temple.baseLintStrategyMode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "embedded",
+            "vscode"
+          ],
+          "default": "auto",
+          "description": "Select base-lint strategy mode. auto prefers embedded adapters when available, then falls back to VS Code bridge strategies."
+        },
+        "temple.embeddedBaseLintFormats": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Formats with embedded base-lint adapters available (e.g., [\"markdown\", \"json\"]). Used by strategy resolution in auto/embedded modes."
+        },
+        "temple.baseLintLogLevel": {
+          "type": "string",
+          "enum": [
+            "error",
+            "warn",
+            "info",
+            "debug",
+            "trace"
+          ],
+          "default": "warn",
+          "description": "Verbosity of Temple base-lint bridge logs in the output panel."
+        },
+        "temple.traceBaseLintDiagnostics": {
+          "type": "boolean",
+          "default": false,
+          "description": "Deprecated. Use temple.baseLintLogLevel=trace."
+        },
+        "temple.baseLintFocusMode": {
+          "type": "string",
+          "enum": [
+            "all",
+            "activeTemplate"
+          ],
+          "default": "all",
+          "description": "Controls when Temple requests base diagnostics: all templated files or only the active editor template."
+        },
+        "temple.baseLspBridgeMode": {
+          "type": "string",
+          "enum": [
+            "off",
+            "full"
+          ],
+          "default": "full",
+          "description": "Controls whether Temple proxies base-language LSP features through shadow documents."
+        },
+        "temple.baseLspParityBaseline": {
+          "type": "string",
+          "enum": [
+            "official-defaults"
+          ],
+          "default": "official-defaults",
+          "description": "Parity baseline for shadow base-LSP providers."
+        },
+        "temple.markdownBaseLintFocusMode": {
+          "type": "string",
+          "enum": [
+            "all",
+            "activeTemplate"
+          ],
+          "default": "all",
+          "description": "Deprecated. Use temple.baseLintFocusMode."
+        }
+      }
+    },
+    "configurationDefaults": {
+      "files.associations": {
+        "*.md.tmpl": "templ-markdown",
+        "*.markdown.tmpl": "templ-markdown",
+        "*.md.template": "templ-markdown",
+        "*.markdown.template": "templ-markdown",
+        "*.json.tmpl": "templ-json",
+        "*.json.template": "templ-json",
+        "*.yaml.tmpl": "templ-yaml",
+        "*.yml.tmpl": "templ-yaml",
+        "*.yaml.template": "templ-yaml",
+        "*.yml.template": "templ-yaml",
+        "*.html.tmpl": "templ-html",
+        "*.htm.tmpl": "templ-html",
+        "*.html.template": "templ-html",
+        "*.htm.template": "templ-html",
+        "*.xml.tmpl": "templ-xml",
+        "*.xml.template": "templ-xml",
+        "*.toml.tmpl": "templ-toml",
+        "*.toml.template": "templ-toml",
+        "*.tmpl": "templ-any",
+        "*.template": "templ-any"
+      },
+      "markdownlint.ignore": [
+        "**/.temple-base-lint/**",
+        "**/temple-base-lint/**",
+        "**/*.tmpl",
+        "**/*.template"
+      ]
+    }
+  },
+  "scripts": {
+    "generate:defaults": "node ./scripts/generate-defaults.js",
+    "check:defaults": "node ./scripts/generate-defaults.js --check",
+    "generate:syntaxes": "node ./scripts/generate-syntaxes.js",
+    "vscode:prepublish": "npm run compile",
+    "compile": "npm run generate:defaults && npm run generate:syntaxes && tsc -p .",
+    "watch": "tsc -watch -p .",
+    "lint": "eslint --ext .ts src",
+    "package:check": "vsce ls",
+    "test:integration": "node ./test/runTest.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/squirrel289/temple.git"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.3",
+    "@types/vscode": "^1.70.0",
+    "@typescript-eslint/eslint-plugin": "^6.21.0",
+    "@typescript-eslint/parser": "^6.21.0",
+    "@vscode/test-electron": "^2.4.1",
+    "eslint": "^8.57.1",
+    "typescript": "^4.8.0",
+    "vsce": "^2.10.0"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1",
+    "vscode-languageserver": "^8.0.0",
+    "vscode-languageserver-textdocument": "^1.0.1"
+  },
+  "files": [
+    "dist/src",
+    "language-configuration.json",
+    "syntaxes",
+    "node_modules",
+    "package.json",
+    "README.md"
+  ]
+}

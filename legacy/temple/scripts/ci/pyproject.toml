@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "temple-ci-env"
+version = "0.1.0"
+description = "CI environment for Temple monorepo (core, linter, docs, tests)"
+requires-python = ">=3.10"
+dependencies = [
+    "detect-secrets",
+    "PyYAML",
+    "python-jose",
+    "python-dotenv",
+    "PyGithub",
+    "ruff",
+    "yamllint",
+    "lark",
+]
+
+[project.optional-dependencies]
+token = [
+    "requests", 
+    "PyJWT[crypto]", 
+    "cryptography", 
+    "PyGithub"
+]
+security = [
+    "detect-secrets",
+    "PyYAML"
+]
+test = [
+    "pytest",
+    "pytest-mock",
+    "pytest-benchmark"
+]
+docs = [
+    "sphinx",
+    "sphinx-rtd-theme",
+    "sphinx-autodoc-typehints",
+    "pygls"
+]
+bench = [
+    "asv"
+]
+
+[tool.setuptools]
+# Explicitly disable auto-discovery; this project exists only to aggregate deps.
+py-modules = []

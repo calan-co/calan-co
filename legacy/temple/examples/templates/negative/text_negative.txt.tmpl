@@ -1,0 +1,6 @@
+
+Age: {{ user.age }}
+Active: {% if user.active %}Yes{% else %}No{% end %}
+Skills: {% for s in user.skills %}{{ s }}{% if not loop.last %}, {% end %}{% end %}
+Job: {% for job in user.jobs %}{{ job.title }} at {{ job.company }}{% if loop.last %} (current){% end %}{% end %}
+

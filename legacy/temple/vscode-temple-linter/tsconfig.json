@@ -1,0 +1,17 @@
+// TSC config for VS Code extension
+{
+  "compilerOptions": {
+    "module": "commonjs",
+    "target": "es2020",
+    "outDir": "dist",
+    "rootDir": ".",
+    "lib": ["es2020"],
+    "sourceMap": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["src", "server"],
+  "exclude": ["node_modules", ".vscode-test"]
+}

@@ -1,0 +1,21 @@
+{
+  "temple.fileExtensions": [
+    ".tmpl",
+    ".template"
+  ],
+  "python.defaultInterpreterPath": "${workspaceFolder}/.ci-venv/bin/python",
+  "python.testing.pytestEnabled": true,
+  "python.testing.pytestArgs": [
+    "tests"
+  ],
+  "eslint.workingDirectories": [
+    "vscode-temple-linter"
+  ],
+  "python-envs.pythonProjects": [
+    {
+      "path": "",
+      "envManager": "ms-python.python:venv",
+      "packageManager": "ms-python.python:pip"
+    }
+  ]
+}

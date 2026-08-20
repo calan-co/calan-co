@@ -1,0 +1,199 @@
+---
+name: Static Analysis
+
+on:
+  push:
+    branches: [main, 'feature/**', 'release/**', 'hotfix/**', 'dependabot/**', 'ci/**', 'bugfix/**', 'chore/**']
+  pull_request:
+    types: [opened, synchronize, reopened]
+  schedule:
+    - cron: '0 6 * * 1'
+
+jobs:
+  markdown-structure:
+    name: Markdown Structure Sync Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify markdown structure blocks are synchronized
+        run: python3 scripts/docs/sync_readme_structure.py --check --failure-threshold WARN
+
+  lint-yaml:
+    name: Lint YAML
+    runs-on: ubuntu-latest
+    env:
+      CI_VENV_PATH: ${{ github.workspace }}/.cache/ci-venv
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Bootstrap CI environment
+        run: ./scripts/ci/ensure_ci_venv.sh
+      - name: Lint YAML (yamllint)
+        run: ./scripts/pre-commit/lint-yaml.sh .github/workflows .github/actions .pre-commit-config.yaml .yamllint
+
+  lint-python:
+    name: Lint Python
+    runs-on: ubuntu-latest
+    env:
+      CI_VENV_PATH: ${{ github.workspace }}/.cache/ci-venv
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Bootstrap CI environment
+        run: ./scripts/ci/ensure_ci_venv.sh
+      - name: Lint Python (ruff)
+        run: ./scripts/pre-commit/lint-python.sh scripts/ci tests
+
+  lint-js:
+    name: Lint JavaScript/TypeScript
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Node.js Setup
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: '20'
+          working-directory: vscode-temple-linter
+          cache-dependency-path: vscode-temple-linter/package-lock.json
+      - name: Validate generated defaults are in sync
+        run: ./scripts/pre-commit/validate-generated-defaults.sh
+      - name: Lint JavaScript/TypeScript (ESLint)
+        run: ./scripts/pre-commit/lint-js.sh
+
+  vscode-extension-package-check:
+    name: Validate VS Code Extension Package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Node.js Setup
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: '20'
+          working-directory: vscode-temple-linter
+          cache-dependency-path: vscode-temple-linter/package-lock.json
+      - name: Validate VS Code extension package
+        run: ./scripts/pre-commit/validate-vscode-package.sh
+
+  lint-shell:
+    name: Lint Shell
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Lint Shell (shellcheck)
+        run: ./scripts/pre-commit/lint-shell.sh
+
+  codeql:
+    name: CodeQL Analysis (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, javascript-typescript]
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Python Setup
+        uses: ./.github/actions/setup-python
+        with:
+          python-version: '3.11'
+          extras: "[dev]"
+      - name: Node.js Setup
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: '20'
+          working-directory: vscode-temple-linter
+          cache-dependency-path: vscode-temple-linter/package-lock.json
+      - name: Initialize CodeQL (Python & JS/TS)
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended,security-and-quality
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
+
+  detect-secrets:
+    name: Detect secrets
+    runs-on: ubuntu-latest
+    env:
+      CI_VENV_PATH: ${{ github.workspace }}/.cache/ci-venv
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Secret Scanner
+        run: ./scripts/pre-commit/secure-find-secrets.sh
+      - name: Upload detect-secrets artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: detect-secrets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            current.baseline
+            detect_secrets_curr.json
+            detect_secrets_status.txt
+            secrets-report.json
+          if-no-files-found: ignore
+
+  propose-baseline:
+    name: Propose baseline update
+    needs: detect-secrets
+    runs-on: ubuntu-latest
+    if: >-
+      always() &&
+      needs.detect-secrets.result == 'failure' &&
+      (github.event_name == 'push' || github.event_name == 'schedule')
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      CI_VENV_PATH: ${{ github.workspace }}/.cache/ci-venv
+      DETECT_SECRETS_BOT_TOKEN: ${{ secrets.DETECT_SECRETS_BOT_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Bootstrap CI environment
+        run: ./scripts/ci/ensure_ci_venv.sh
+      - name: Regenerate .secrets.baseline
+        run: ./scripts/ci/create_secrets_baseline.sh
+      - name: Resolve automation token
+        id: auth
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${DETECT_SECRETS_BOT_TOKEN}" ]]; then
+            echo "token=${DETECT_SECRETS_BOT_TOKEN}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "token=${GH_TOKEN}" >> "${GITHUB_OUTPUT}"
+          fi
+      - name: Create baseline update PR
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ steps.auth.outputs.token }}
+          commit-message: "chore(secrets): update .secrets.baseline (automated)"
+          title: "chore(secrets): update .secrets.baseline (automated)"
+          body: |
+            Automated `.secrets.baseline` refresh triggered by a failing detect-secrets check.
+
+            Please review the baseline diff carefully before merge.
+          base: main
+          branch: chore/detect-secrets/baseline-update-${{ github.run_id }}
+          add-paths: .secrets.baseline

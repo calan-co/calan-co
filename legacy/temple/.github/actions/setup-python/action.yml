@@ -1,0 +1,40 @@
+---
+name: "Python Job Setup"
+description: "Reusable composite action for Python setup, uv install, dependency install, and script execution."
+inputs:
+  python-version:
+    description: "Python version to use"
+    required: true
+  working-directory:
+    description: "Working directory for Python environment"
+    required: false
+    default: "."
+  uv-install:
+    description: "Whether to install uv"
+    required: false
+    default: true
+  extras:
+    description: "Extras for pip install (e.g. [test])"
+    required: false
+    default: ""
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+    - name: Install uv
+      if: ${{ inputs.uv-install == 'true' }}
+      run: pip install uv
+      shell: bash
+    - name: Cache uv wheels
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/uv
+        key: ${{ runner.os }}-uv-${{ inputs.python-version }}-${{ hashFiles('**/pyproject.toml') }}
+        restore-keys: ${{ runner.os }}-uv-
+    - name: Install dependencies (uv)
+      working-directory: ${{ inputs.working-directory }}
+      run: uv pip install --system .${{ inputs.extras }}
+      shell: bash

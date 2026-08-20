@@ -1,0 +1,24 @@
+<html>
+  <head><title>User</title></head>
+  <body>
+    {% include 'header.html' %}
+    <div id="profile">
+      <h1><!-- name missing on purpose --></h1>
+      <p>Age: {{ user.age }}</p>
+      <p>Active: {% if user.active %}Yes{% else %}No{% end %}</p>
+      <ul>
+        {% for s in user.skills %}
+        <li>{{ s }}</li>
+        {% end %}
+      </ul>
+      <p>Jobs:</p>
+      <ul>
+        {% for job in user.jobs %}
+        <li>{{ job.title }} at {{ job.company }}</li>
+        {% end %}
+      </ul>
+    </div>
+    {% include 'footer.html' %}
+  </body>
+</html>
+

@@ -1,0 +1,6 @@
+---
+temple:
+  statement_start: "::"
+  statement_end: "::"
+  expression_start: "<<"
+  expression_end: ">>"

@@ -1,0 +1,59 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Temple: Lint Python",
+      "type": "shell",
+      "command": "./scripts/pre-commit/lint-python.sh scripts/ci tests temple/src temple-linter/src",
+      "problemMatcher": []
+    },
+    {
+      "label": "Temple: Lint YAML",
+      "type": "shell",
+      "command": "./scripts/pre-commit/lint-yaml.sh .github/workflows .github/actions .pre-commit-config.yaml .yamllint",
+      "problemMatcher": []
+    },
+    {
+      "label": "Temple: Lint Shell",
+      "type": "shell",
+      "command": "./scripts/pre-commit/lint-shell.sh",
+      "problemMatcher": []
+    },
+    {
+      "label": "Temple: Build Docs",
+      "type": "shell",
+      "command": "./scripts/pre-commit/build-docs.sh",
+      "problemMatcher": []
+    },
+    {
+      "label": "Temple: Linkcheck Docs",
+      "type": "shell",
+      "command": "./scripts/pre-commit/lint-docs.sh",
+      "problemMatcher": []
+    },
+    {
+      "label": "Temple: Core Tests",
+      "type": "shell",
+      "command": "cd temple && ../.ci-venv/bin/pytest tests -q",
+      "problemMatcher": []
+    },
+    {
+      "label": "Temple: Linter Tests",
+      "type": "shell",
+      "command": "cd temple-linter && ../.ci-venv/bin/pytest tests -q",
+      "problemMatcher": []
+    },
+    {
+      "label": "Temple: Extension Compile",
+      "type": "shell",
+      "command": "cd vscode-temple-linter && npm run compile",
+      "problemMatcher": []
+    },
+    {
+      "label": "Temple: Extension Lint",
+      "type": "shell",
+      "command": "cd vscode-temple-linter && npm run lint",
+      "problemMatcher": []
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+---
+name: review-resolution-bot
+description: Auto-resolve PR review threads when commits address them for the target repo.
+url: https://github.com/
+public: false
+default_permissions:
+  pull_requests: write
+  issues: write
+  checks: read
+  contents: read
+default_events: []
+
+# Notes:
+# - Use the repo owner URL as `url`. Callback/webhook URLs can be placeholders
+#   (https://example.com/...) if you don't implement webhooks or OAuth.
+# - Installation scope is set during the installation process in GitHub's UI, not in this manifest.
+#   Select only the specific target repository(ies) for least privilege when installing the App.

@@ -1,0 +1,8 @@
+{
+  "templateDelimiters": {
+    "statement": ["{%", "%}"],
+    "expression": ["{{", "}}"],
+    "comment": ["{#", "#}"]
+  },
+  "templeExtensions": [".tmpl", ".template"]
+}

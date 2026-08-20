@@ -1,0 +1,115 @@
+---
+name: Auto-resolve PR review threads
+on:
+  workflow_run:
+    # Respond after the current verification workflows complete on the PR head.
+    workflows: ["Tests", "Static Analysis"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to operate on'
+        required: false
+        type: number
+      head_sha:
+        description: 'Head commit SHA for PR'
+        required: false
+      base_ref:
+        description: 'Base ref for PR'
+        required: false
+      dry_run:
+        description: 'Override DRY_RUN (1 = dry-run, 0 = execute)'
+        required: false
+        default: '1'
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Python setup for auto-resolve
+        uses: ./.github/actions/setup-python
+        with:
+          python-version: '3.11'
+          working-directory: scripts/ci
+          extras: "[token]"
+      - name: Write App private key
+        env:
+          KEY: ${{ secrets.REVIEW_RESOLUTION_BOT_APP_KEY }}
+        run: |
+          # Write private key to a secure temp file and export its path for later steps
+          PRIVATE_KEY_PATH=$(mktemp)
+          printf "%s" "$KEY" > "$PRIVATE_KEY_PATH"
+          chmod 600 "$PRIVATE_KEY_PATH"
+          echo "PRIVATE_KEY_PATH=$PRIVATE_KEY_PATH" >> $GITHUB_ENV
+      - name: Get App installation id
+        env:
+          APP_ID: ${{ secrets.REVIEW_RESOLUTION_BOT_APP_ID }}
+        run: |
+          inst=$(python scripts/ci/github_app_helpers.py --app-id "$APP_ID" --private-key "$PRIVATE_KEY_PATH" --repo "${{ github.repository }}")
+          if [ -z "$inst" ]; then
+            echo "No installation found for repository; exiting" >&2
+            exit 1
+          fi
+          echo "INSTALLATION_ID=$inst" >> $GITHUB_ENV
+      - name: Create installation token
+        if: env.INSTALLATION_ID != ''
+        run: |
+          APP_ID="${{ secrets.REVIEW_RESOLUTION_BOT_APP_ID }}"
+          token=$(python scripts/ci/github_app_helpers.py --app-id "$APP_ID" --private-key "$PRIVATE_KEY_PATH" --installation ${{ env.INSTALLATION_ID }})
+          echo "::add-mask::$token"
+          echo "INSTALL_TOKEN=$token" >> $GITHUB_ENV
+      - name: Verify token available
+        run: |
+          if [ -z "${{ env.INSTALL_TOKEN }}" ] && [ -z "${{ secrets.GITHUB_PR_AUTORESOLVE_TOKEN }}" ]; then
+            echo "No authentication token available. Configure REVIEW_RESOLUTION_BOT_APP_KEY and REVIEW_RESOLUTION_BOT_APP_ID secrets."
+            exit 1
+          fi
+      - name: Populate PR context env vars
+        run: |
+          echo "REPOSITORY=${{ github.repository }}" >> $GITHUB_ENV
+          echo "PR_NUMBER=${{ github.event.inputs.pr_number || github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number }}" >> $GITHUB_ENV
+          echo "HEAD_SHA=${{ github.event.inputs.head_sha || github.event.pull_request.head.sha || github.event.workflow_run.head_sha }}" >> $GITHUB_ENV
+          echo "BASE_REF=${{ github.event.inputs.base_ref || github.event.pull_request.base.ref || github.event.workflow_run.pull_requests[0].base.ref }}" >> $GITHUB_ENV
+          echo "DRY_RUN=${{ github.event.inputs.dry_run || '1' }}" >> $GITHUB_ENV
+      - name: Resolve PR metadata when missing
+        if: env.PR_NUMBER != '' && (env.HEAD_SHA == '' || env.BASE_REF == '')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          repo="$REPOSITORY"
+          pr="$PR_NUMBER"
+          echo "Fetching PR metadata for $repo PR#$pr"
+          head_sha=$(gh api repos/$repo/pulls/$pr --jq .head.sha)
+          base_ref=$(gh api repos/$repo/pulls/$pr --jq .base.ref)
+          if [ -n "$head_sha" ]; then
+            echo "HEAD_SHA=$head_sha" >> $GITHUB_ENV
+          fi
+          if [ -n "$base_ref" ]; then
+            echo "BASE_REF=$base_ref" >> $GITHUB_ENV
+          fi
+      - name: Run auto-resolve
+        env:
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ env.PR_NUMBER || github.event.inputs.pr_number || github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number }}
+          HEAD_SHA: ${{ env.HEAD_SHA || github.event.inputs.head_sha || github.event.pull_request.head.sha || github.event.workflow_run.head_sha }}
+          BASE_REF: ${{ env.BASE_REF || github.event.inputs.base_ref || github.event.pull_request.base.ref || github.event.workflow_run.pull_requests[0].base.ref }}
+          GITHUB_PR_AUTORESOLVE_TOKEN: ${{ env.INSTALL_TOKEN || secrets.GITHUB_PR_AUTORESOLVE_TOKEN }}
+          DRY_RUN: ${{ env.DRY_RUN || github.event.inputs.dry_run || '1' }}
+        run: |
+          echo "Running auto-resolve with REPOSITORY=$REPOSITORY PR_NUMBER=$PR_NUMBER HEAD_SHA=$HEAD_SHA BASE_REF=$BASE_REF DRY_RUN=$DRY_RUN"
+          python scripts/ci/auto_resolve_reviews.py
+      - name: Cleanup private key
+        if: always()
+        run: |
+          # Best-effort cleanup of the temporary private key file
+          if [ -n "${PRIVATE_KEY_PATH:-}" ] && [ -f "${PRIVATE_KEY_PATH}" ]; then
+            shred -u "${PRIVATE_KEY_PATH}" 2>/dev/null || rm -f "${PRIVATE_KEY_PATH}" || true
+          fi

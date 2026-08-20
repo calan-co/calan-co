@@ -1,0 +1,24 @@
+version: '{{ docker.version }}'
+services:
+  {% for service in docker.services %}
+  {{ service.name }}:
+    image: {{ service.image }}:{{ service.tag }}
+    {% if service.ports %}
+    ports:
+      {% for port in service.ports %}
+      - "{{ port }}"
+      {% end %}
+    {% end %}
+    {% if service.environment %}
+    environment:
+      {% for key, value in service.environment.items() %}
+      {{ key }}: {{ value }}
+      {% end %}
+    {% end %}
+    {% if service.volumes %}
+    volumes:
+      {% for volume in service.volumes %}
+      - {{ volume }}
+      {% end %}
+    {% end %}
+  {% end %}

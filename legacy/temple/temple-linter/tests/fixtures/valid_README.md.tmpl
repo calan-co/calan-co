@@ -1,0 +1,54 @@
+# {{ project.name }}
+
+{{ project.description }}
+
+## Features
+
+{% for feature in project.features %}
+- **{{ feature.name }}**: {{ feature.description }}
+{% end %}
+
+## Installation
+
+```bash
+{{ project.install.command }}
+```
+
+{% if project.install.requirements %}
+### Requirements
+
+{% for req in project.install.requirements %}
+- {{ req }}
+{% end %}
+{% end %}
+
+## Usage
+
+```{{ project.usage.language }}
+{{ project.usage.example }}
+```
+
+## Configuration
+
+{% for option in project.config %}
+### `{{ option.name }}`
+
+{{ option.description }}
+
+- **Type**: {{ option.type }}
+- **Default**: `{{ option.default }}`
+{% if option.required %}
+- **Required**: Yes
+{% end %}
+
+{% end %}
+
+## License
+
+{{ project.license }}
+
+## Contributors
+
+{% for contributor in project.contributors %}
+- {{ contributor.name }} ([@{{ contributor.github }}](https://github.com/{{ contributor.github }}))
+{% end %}

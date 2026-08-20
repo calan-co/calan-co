@@ -1,0 +1,7 @@
+# Ruff configuration – keep checks enabled but avoid instructing editors to
+# auto-apply fixes. Formatting fixes should be run explicitly via `ruff format`.
+line-length = 88
+exclude = [".venv", "env", "__pycache__", "temple-linter/docs/_build"]
+
+[lint.per-file-ignores]
+"temple-linter/docs/**" = ["F401", "F403"]

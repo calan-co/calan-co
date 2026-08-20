@@ -1,0 +1,9 @@
+{
+  "machine": "temple-ci-gh-actions",
+  "os": "Ubuntu 24.04",
+  "arch": "x86_64",
+  "cpu": "GitHub Actions runner",
+  "num_cpu": "2",
+  "ram": "8000000",
+  "version": 1
+}

@@ -1,0 +1,79 @@
+---
+name: Tests
+
+on:
+  # Run on pushes to main and common feature/release branch patterns
+  push:
+    branches: [main, 'feature/**', 'release/**', 'hotfix/**', 'dependabot/**', 'ci/**', 'bugfix/**', 'chore/**']
+  # Run on pull request events (opened/synchronize/reopened) for PRs from any branch
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  root-python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Python Setup (root automation tests)
+        uses: ./.github/actions/setup-python
+        with:
+          python-version: '3.11'
+          working-directory: scripts/ci
+          extras: "[test]"
+      - name: Install local temple package
+        run: uv pip install --system ./temple[test]
+      - name: Run root test suite
+        run: python -m pytest tests -q
+
+  temple-tests:
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11"]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Python Setup (temple)
+        uses: ./.github/actions/setup-python
+        with:
+          python-version: ${{ matrix.python-version }}
+          working-directory: temple
+          extras: "[test]"
+      - name: Run temple tests
+        working-directory: temple
+        run: python -m pytest tests -q
+
+  temple-parity-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Python Setup (temple parity)
+        uses: ./.github/actions/setup-python
+        with:
+          python-version: '3.11'
+          working-directory: temple
+          extras: "[test]"
+      - name: Install parity dependencies
+        run: uv pip install --system "jinja2>=3.1"
+      - name: Run native-vs-adapter parity suite
+        run: python -m pytest temple/tests/parity/test_native_vs_jinja2_parity.py -q
+
+  temple-linter-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Python Setup (temple dependency)
+        uses: ./.github/actions/setup-python
+        with:
+          python-version: '3.11'
+          working-directory: temple
+          extras: "[test]"
+      - name: Install temple-linter test dependencies
+        run: uv pip install --system ./temple-linter[test]
+      - name: Run temple-linter tests
+        run: python -m pytest temple-linter/tests -q
+      - name: Enforce temple-linter E2E/performance thresholds
+        run: python -m pytest temple-linter/tests/test_e2e_performance.py -q
