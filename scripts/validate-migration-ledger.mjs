@@ -105,6 +105,7 @@ function validateInventory(inventory) {
 
   const ids = new Set();
   const sources = new Set();
+  const recordsById = new Map();
   for (const [index, source] of inventory.sources.entries()) {
     const location = `inventory.sources[${index}]`;
     if (!source || typeof source !== 'object' || Array.isArray(source)) {
@@ -140,8 +141,9 @@ function validateInventory(inventory) {
     }
     ids.add(source.id);
     sources.add(source.source);
+    recordsById.set(source.id, source);
   }
-  return sources;
+  return { recordsById, sources };
 }
 
 function validateCatalog(catalog) {
@@ -171,7 +173,8 @@ function validateCatalog(catalog) {
   return ids;
 }
 
-const inventorySources = validateInventory(readJsonCompatibleYaml(inventoryPath, 'inventory'));
+const { recordsById: inventoryRecordsById, sources: inventorySources } =
+  validateInventory(readJsonCompatibleYaml(inventoryPath, 'inventory'));
 const catalogArtifactIds = validateCatalog(readJsonCompatibleYaml(catalogPath, 'artifact catalog'));
 const ledger = readJsonCompatibleYaml(ledgerPath, 'ledger');
 
@@ -203,6 +206,16 @@ for (const [index, record] of ledger.migrations.entries()) {
   }
   if (!inventorySources.has(record.source)) {
     fail(`${location}.source must be in the migration inventory allowlist`);
+  }
+  const inventoryRecord = inventoryRecordsById.get(record.id);
+  if (!inventoryRecord) {
+    fail(`${location}.id must match an authoritative inventory record`);
+  }
+  if (record.source !== inventoryRecord.source) {
+    fail(`${location}.source must match inventory record for id: ${record.id}`);
+  }
+  if (record.targetPath !== inventoryRecord.targetPath) {
+    fail(`${location}.targetPath must match inventory record for id: ${record.id}`);
   }
   if (!Array.isArray(record.artifacts) || record.artifacts.length === 0 ||
       record.artifacts.some((artifact) => typeof artifact !== 'string' || artifact.trim() === '')) {

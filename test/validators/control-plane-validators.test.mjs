@@ -97,16 +97,33 @@ test('CODEOWNERS assigns the temporary owner to every required migration domain'
     '/packages/doc-vader/**',
     '/packages/linkity/**',
     '/products/templjs/**',
-    '/products/pi-extensions/**',
     '/extensions/pi/**',
     '/blueprints/babysitter-dv/**',
     '/images/awx-ee-proxmox/**',
     '/legacy/**',
   ];
 
+  assert.doesNotMatch(codeowners, /^\/products\/pi-extensions\/\*\*\s+@chris-cald\s*$/m);
+
   for (const pattern of requiredPatterns) {
     const escapedPattern = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     assert.match(codeowners, new RegExp(`^${escapedPattern}\\s+@chris-cald\\s*$`, 'm'));
+  }
+});
+
+test('migration documentation queues history-only imports without active release handling', () => {
+  const migrationGuide = readFileSync(join(repositoryRoot, 'migration', 'README.md'), 'utf8');
+  const piWorkItem = readFileSync(join(repositoryRoot, 'backlog', 'MIG-001.3-pi-extensions.md'), 'utf8');
+  const historyWorkItems = [
+    readFileSync(join(repositoryRoot, 'backlog', 'MIG-001.7-templjs-template.md'), 'utf8'),
+    readFileSync(join(repositoryRoot, 'backlog', 'MIG-001.8-templjs-temple.md'), 'utf8'),
+  ];
+
+  assert.match(migrationGuide, /not evidence that a command was executed or succeeded/);
+  assert.match(piWorkItem, /`extensions\/pi`/);
+  for (const workItem of historyWorkItems) {
+    assert.match(workItem, /Queue the planned read-only history import/);
+    assert.match(workItem, /Prohibit active workspace, normal CI, image, and release-artifact handling/);
   }
 });
 
@@ -184,22 +201,35 @@ test('Phase-0 baseline records all authoritative sources without claiming later 
   const artifactBaseline = JSON.parse(readFileSync(join(repositoryRoot, 'migration', 'artifact-baseline.json'), 'utf8'));
   const catalog = JSON.parse(readFileSync(join(repositoryRoot, 'release-artifacts.yaml'), 'utf8'));
   const expectedSources = new Map([
-    ['doc-vader', 'a99b753f87b614c39d9ca09b9132c292cb27daf1'],
-    ['linkity', '4eacae036f935f987bbe4de18cca36034684c989'],
-    ['pi-extensions', '842f0264043c9b51509d0496c538a5845a0ab8c8'],
-    ['babysitter-dv', '458c9f66f4f3a4472c131244a8932ecd0ca4d31d'],
-    ['awx-ee-proxmox', '579aa7dbc2c721be6542afae531abd2075718ef2'],
-    ['templjs', '64da887f6f26eb18d57d7416e06d3f4a1efbac16'],
-    ['templjs-template', '7d14b72c18925e73ab95a495542d07da45e4fe3a'],
-    ['templjs-temple', '9fdaed9a03599720473ebae802b2579d5233acac'],
+    ['doc-vader', { sha: 'a99b753f87b614c39d9ca09b9132c292cb27daf1', targetPath: 'packages/doc-vader' }],
+    ['linkity', { sha: '4eacae036f935f987bbe4de18cca36034684c989', targetPath: 'packages/linkity' }],
+    ['pi-extensions', { sha: '842f0264043c9b51509d0496c538a5845a0ab8c8', targetPath: 'extensions/pi' }],
+    ['babysitter-dv', { sha: '458c9f66f4f3a4472c131244a8932ecd0ca4d31d', targetPath: 'blueprints/babysitter-dv' }],
+    ['awx-ee-proxmox', { sha: '579aa7dbc2c721be6542afae531abd2075718ef2', targetPath: 'images/awx-ee-proxmox' }],
+    ['templjs', { sha: '64da887f6f26eb18d57d7416e06d3f4a1efbac16', targetPath: 'products/templjs' }],
+    ['templjs-template', { sha: '7d14b72c18925e73ab95a495542d07da45e4fe3a', targetPath: 'legacy/template' }],
+    ['templjs-temple', { sha: '9fdaed9a03599720473ebae802b2579d5233acac', targetPath: 'legacy/temple' }],
   ]);
 
   assert.equal(inventory.sources.length, expectedSources.size);
   for (const source of inventory.sources) {
-    assert.equal(source.defaultSha, expectedSources.get(source.id), source.id);
+    const expected = expectedSources.get(source.id);
+    assert.equal(source.defaultSha, expected.sha, source.id);
+    assert.equal(source.targetPath, expected.targetPath, source.id);
     assert.match(source.defaultBranch, /^\S+$/);
-    assert.match(source.targetPath, /^(?:packages|products|extensions|blueprints|images|legacy)\//);
     assert.ok(Array.isArray(source.exclusions));
+    assert.equal(source.status, ['templjs-template', 'templjs-temple'].includes(source.id)
+      ? 'eligible-for-import'
+      : source.status);
+  }
+  for (const migration of ledger.migrations) {
+    const expected = expectedSources.get(migration.id);
+    assert.equal(migration.targetPath, expected.targetPath, migration.id);
+    assert.equal(migration.source, inventory.sources.find(({ id }) => id === migration.id).source, migration.id);
+  }
+  for (const source of artifactBaseline.sources) {
+    assert.ok(Array.isArray(source.sourceDeclaredCommands), source.id);
+    assert.ok(!('verifiedSourceCommands' in source), source.id);
   }
   assert.deepEqual(new Set(ledger.migrations.map(({ source }) => source)),
     new Set(inventory.sources.map(({ source }) => source)));
@@ -297,6 +327,38 @@ test('migration ledger validator requires Phase-0 evidence before imported', () 
     assert.notEqual(result.status, 0, field);
     assert.match(result.stderr, new RegExp(field));
   }
+});
+
+test('migration ledger validator binds a record id to its authoritative inventory source', () => {
+  const inventory = {
+    ...allowedInventory,
+    sources: [
+      ...allowedInventory.sources,
+      {
+        ...allowedInventory.sources[0],
+        id: 'other-source',
+        source: 'https://github.com/calan-co/other-source',
+        targetPath: 'packages/other',
+      },
+    ],
+  };
+  const result = validateLedger({
+    schemaVersion: 1,
+    migrations: [importedRecord({ id: 'other-source' })],
+  }, inventory);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /source must match inventory record for id/);
+});
+
+test('migration ledger validator binds a record target path to its authoritative inventory record', () => {
+  const result = validateLedger({
+    schemaVersion: 1,
+    migrations: [importedRecord({ targetPath: 'packages/not-example' })],
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /targetPath must match inventory record for id/);
 });
 
 test('migration ledger validator rejects forks outside the inventory allowlist', () => {

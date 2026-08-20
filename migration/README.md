@@ -1,6 +1,6 @@
 # Migration ledger
 
-`inventory.yaml` records each approved original repository's canonical URL, observed default branch and immutable default SHA, target path, current import disposition, and explicit exclusions. [`artifact-baseline.json`](artifact-baseline.json) holds only observed source commands, version facts, and pending or unattested facts tied to those pins. A ledger record's exact source URL must appear in the authoritative inventory allowlist; forks, `calan-co/.github`, and `calan-co/cicd-shared-pipeline` remain excluded by omission.
+`inventory.yaml` records each approved original repository's canonical URL, observed default branch and immutable default SHA, target path, current import disposition, and explicit exclusions. [`artifact-baseline.json`](artifact-baseline.json) holds source-declared commands, version facts, and pending or unattested facts tied to those pins. `sourceDeclaredCommands` is evidence copied from source configuration, not evidence that a command was executed or succeeded. A ledger record's `id`, exact source URL, and target path must match one authoritative inventory record; forks, `calan-co/.github`, and `calan-co/cicd-shared-pipeline` remain excluded by omission.
 
 ## State and evidence gates
 

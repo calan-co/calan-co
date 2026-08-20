@@ -30,7 +30,7 @@
       "defaultBranch": "main",
       "defaultSha": "842f0264043c9b51509d0496c538a5845a0ab8c8",
       "status": "blocked",
-      "targetPath": "products/pi-extensions",
+      "targetPath": "extensions/pi",
       "exclusions": [
         "Release catalog entry omitted: no source-defined Pi distribution target, receipt command, or rollback command exists."
       ]
@@ -73,10 +73,10 @@
       "source": "https://github.com/templjs/template",
       "defaultBranch": "main",
       "defaultSha": "7d14b72c18925e73ab95a495542d07da45e4fe3a",
-      "status": "excluded",
-      "targetPath": "legacy/templjs/template",
+      "status": "eligible-for-import",
+      "targetPath": "legacy/template",
       "exclusions": [
-        "History-only legacy source; do not import as an image or create a release-artifact record."
+        "Queued read-only history import only; prohibit active workspace, image, and release-artifact handling."
       ]
     },
     {
@@ -84,10 +84,10 @@
       "source": "https://github.com/templjs/temple",
       "defaultBranch": "main",
       "defaultSha": "9fdaed9a03599720473ebae802b2579d5233acac",
-      "status": "excluded",
-      "targetPath": "legacy/templjs/temple",
+      "status": "eligible-for-import",
+      "targetPath": "legacy/temple",
       "exclusions": [
-        "Archived history-only legacy source; do not import as an image or create a release-artifact record."
+        "Queued read-only history import only; prohibit active workspace, image, and release-artifact handling."
       ]
     }
   ]

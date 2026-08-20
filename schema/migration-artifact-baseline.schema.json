@@ -13,11 +13,11 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "defaultSha", "verifiedSourceCommands", "observedVersions", "pending", "unattested"],
+        "required": ["id", "defaultSha", "sourceDeclaredCommands", "observedVersions", "pending", "unattested"],
         "properties": {
           "id": { "type": "string", "minLength": 1 },
           "defaultSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-          "verifiedSourceCommands": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "sourceDeclaredCommands": { "type": "array", "items": { "type": "string", "minLength": 1 } },
           "observedVersions": {
             "type": "array",
             "items": {

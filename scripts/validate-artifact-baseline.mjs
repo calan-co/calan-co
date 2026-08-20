@@ -54,7 +54,7 @@ for (const [index, source] of baseline.sources.entries()) {
     fail(`${location} must be an object`);
   }
   const allowedFields = new Set([
-    'id', 'defaultSha', 'verifiedSourceCommands', 'observedVersions', 'pending', 'unattested',
+    'id', 'defaultSha', 'sourceDeclaredCommands', 'observedVersions', 'pending', 'unattested',
   ]);
   for (const field of Object.keys(source)) {
     if (!allowedFields.has(field)) {
@@ -67,7 +67,7 @@ for (const [index, source] of baseline.sources.entries()) {
   if (!shaPattern.test(source.defaultSha)) {
     fail(`${location}.defaultSha must be a lowercase 40-character Git commit SHA`);
   }
-  requireStringArray(source.verifiedSourceCommands, `${location}.verifiedSourceCommands`);
+  requireStringArray(source.sourceDeclaredCommands, `${location}.sourceDeclaredCommands`);
   requireStringArray(source.pending, `${location}.pending`);
   requireStringArray(source.unattested, `${location}.unattested`);
   if (!Array.isArray(source.observedVersions)) {

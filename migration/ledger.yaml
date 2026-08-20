@@ -21,7 +21,7 @@
     {
       "id": "pi-extensions",
       "source": "https://github.com/calan-co/pi-extensions",
-      "targetPath": "products/pi-extensions",
+      "targetPath": "extensions/pi",
       "owner": "@chris-cald",
       "artifacts": ["pi-extensions"],
       "state": "queued"
@@ -63,7 +63,7 @@
     {
       "id": "templjs-template",
       "source": "https://github.com/templjs/template",
-      "targetPath": "legacy/templjs/template",
+      "targetPath": "legacy/template",
       "owner": "@chris-cald",
       "artifacts": ["templjs-template-history"],
       "state": "queued"
@@ -71,7 +71,7 @@
     {
       "id": "templjs-temple",
       "source": "https://github.com/templjs/temple",
-      "targetPath": "legacy/templjs/temple",
+      "targetPath": "legacy/temple",
       "owner": "@chris-cald",
       "artifacts": ["templjs-temple-history"],
       "state": "queued"

@@ -16,6 +16,6 @@ It is not a declaration that all sources can be installed together, nor a permis
 | Pi extensions | pnpm 11-era tooling | Prove test, check, UAT, and Pi load smoke in its own adapter. |
 | Babysitter DV | Node >=20 with npm 10 | Preserve npm-based validation and pilot rehearsal. |
 | AWX EE Proxmox | Ansible Builder/container runtime | Use a container adapter; it is not a pnpm workspace package. |
-| Legacy imports | history-only | Exclude from workspace, catalog, normal CI, and release discovery. |
+| Legacy imports | history-only | Queue a read-only history import; exclude it from active workspace, catalog, normal CI, image, and release discovery. |
 
 The matrix records compatibility constraints, not release targets or ownership assignments. Each artifact's catalog record must carry an independent version source and adapter even where root branch policy is uniform.
