@@ -1,0 +1,100 @@
+{
+  "name": "project-monorepo",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Project monorepo - Description goes here",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/project.git"
+  },
+  "license": "Apache-2.0",
+  "author": "",
+  "workspaces": [
+    "packages/*",
+    "extensions/*"
+  ],
+  "scripts": {
+    "build": "nx run-many -t build",
+    "test": "nx run-many -t test",
+    "test:coverage": "nx run-many -t test --coverage",
+    "lint": "pnpm run lint:local",
+    "lint:local": "pnpm run lint:eslint && pnpm run lint:markdown && pnpm run format:check",
+    "lint:ci": "pnpm run lint:eslint:affected && pnpm run lint:markdown && pnpm run format:check",
+    "lint:staged": "lint-staged",
+    "lint:fix": "pnpm run lint:eslint:fix && pnpm run lint:markdown:fix && pnpm run format",
+    "lint:eslint": "nx run-many -t lint",
+    "lint:eslint:affected": "nx affected -t lint --base=origin/main --parallel=3",
+    "lint:eslint:fix": "pnpm run lint:eslint -- --fix",
+    "lint:eslint:staged:fix": "eslint --fix --resolve-plugins-relative-to .",
+    "lint:markdown": "sh scripts/ci/lint-markdown.sh",
+    "lint:markdown:fix": "sh scripts/ci/lint-markdown.sh --fix",
+    "lint:work-item-frontmatter": "pnpm exec ts-node scripts/ci/lint-work-item-frontmatter.ts",
+    "lint:root": "pnpm run lint:eslint",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,yml,yaml}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md,yml,yaml}\"",
+    "type-check": "tsc --noEmit",
+    "test:affected": "pnpm run test:affected:local",
+    "test:affected:local": "nx affected -t test --base=main --parallel=3",
+    "test:affected:ci": "nx affected -t test --base=origin/main --parallel=3 --coverage",
+    "test:affected:pre-push": "sh -c 'BASE_BRANCH=main; if git rev-parse --verify origin/main >/dev/null 2>&1; then BASE_BRANCH=origin/main; fi; pnpm exec nx affected -t test --base=\"$BASE_BRANCH\"'",
+    "build:affected": "pnpm run build:affected:local",
+    "build:affected:local": "nx affected -t build --base=main --parallel=3",
+    "build:affected:ci": "nx affected -t build --base=origin/main --parallel=3",
+    "hooks:commit-msg": "commitlint --edit",
+    "hooks:pre-commit": "pnpm run lint:staged && (pnpm run test:affected:local || echo \"⚠️  Some tests failed but commit allowed. Run 'pnpm test' for full results.\")",
+    "hooks:pre-push": "pnpm run lint:work-item-frontmatter && pnpm run test:affected:pre-push",
+    "ci:lint": "pnpm run lint:ci",
+    "ci:type-check": "pnpm run type-check",
+    "ci:work-item-frontmatter": "pnpm run lint:work-item-frontmatter",
+    "ci:test": "pnpm run test:affected:ci",
+    "ci:build": "pnpm run build:affected:ci",
+    "clean": "nx reset && rm -rf node_modules packages/*/node_modules extensions/*/node_modules packages/*/dist extensions/*/dist",
+    "graph": "nx graph",
+    "prepare": "husky install"
+  },
+  "devDependencies": {
+    "@changesets/cli": "latest",
+    "@commitlint/cli": "latest",
+    "@commitlint/config-conventional": "latest",
+    "@nx/js": "latest",
+    "@types/node": "latest",
+    "@typescript-eslint/eslint-plugin": "latest",
+    "@typescript-eslint/parser": "latest",
+    "ajv": "latest",
+    "eslint": "latest",
+    "eslint-config-prettier": "latest",
+    "eslint-plugin-prettier": "latest",
+    "husky": "latest",
+    "lint-staged": "latest",
+    "markdownlint-shell": "latest",
+    "nx": "latest",
+    "prettier": "latest",
+    "ts-node": "latest",
+    "typescript": "latest",
+    "yaml": "latest",
+    "ajv-formats": "latest"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,js,jsx}": [
+      "prettier --write",
+      "pnpm run lint:eslint:staged:fix --"
+    ],
+    "*.{json,yml,yaml}": [
+      "prettier --write"
+    ],
+    "backlog/**/*.{md,markdown}": [
+      "prettier --write",
+      "pnpm run lint:work-item-frontmatter --"
+    ],
+    "*.{md,markdown}": [
+      "prettier --write",
+      "pnpm run lint:markdown:fix --"
+    ]
+  },
+  "engines": {
+    "node": "latest",
+    "pnpm": "latest"
+  },
+  "packageManager": "pnpm@8.15.0"
+}

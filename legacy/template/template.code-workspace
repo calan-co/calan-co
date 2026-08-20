@@ -1,0 +1,61 @@
+{
+  "folders": [
+    {
+      "path": "."
+    }
+  ],
+  "settings": {
+    "python.testing.pytestEnabled": true,
+    "python.testing.unittestEnabled": false,
+    "editor.formatOnSave": true,
+    "files.exclude": {
+      "**/__pycache__": true,
+      "**/*.pyc": true,
+      "**/.pytest_cache": true,
+      "**/node_modules": true,
+      "**/dist": true,
+    },
+    "chat.tools.terminal.autoApprove": {
+      "/mkdir\\s+(:?-p\\s+)?/Users/macos/dev/(?!.*\\.\\./).+/": true,
+      "/chmod \\+x (?:(?:/Users/macos/dev/)|(?:\\.?/?(?:[\\w]+)/)+)(?!.*\\.\\./).+/": true,
+      "git add": true,
+      "pnpm": true,
+      "test": true
+    },
+    "chat.agentSkillsLocations": {
+      "./.agents/skills/": true
+    },
+    "github.copilot.chat.agent.autoFix": true,
+    "github.copilot.chat.generateTests.codeLens": true,
+    "github.copilot.chat.githubMcpServer.enabled": true,
+    "github.copilot.chat.codesearch.enabled": true,
+    "github.copilot.chat.copilotMemory.enabled": false,
+    "github.copilot.chat.switchAgent.enabled": true,
+  },
+  "extensions": {
+    "recommendations": [
+      "timonwong.shellcheck",
+      "openai.chatgpt",
+      "dbaeumer.vscode-eslint",
+      "tamasfe.even-better-toml",
+      "GitHub.copilot-chat",
+      "GitHub.vscode-pull-request-github",
+      "ms-vscode.live-server",
+      "yzhang.markdown-all-in-one",
+      "bierner.github-markdown-preview",
+      "bierner.markdown-footnotes",
+      "bierner.markdown-preview-github-styles",
+      "bierner.markdown-mermaid",
+      "bierner.markdown-yaml-preamble",
+      "DavidAnson.vscode-markdownlint",
+      "MermaidChart.vscode-mermaid-chart",
+      "christian-kohler.npm-intellisense",
+      "esbenp.prettier-vscode",
+      "rvest.vs-code-prettier-eslint",
+      "timonwong.shellcheck",
+      "vscodevim.vim",
+      "vitest.explorer",
+      "redhat.vscode-yaml"
+    ],
+  },
+}

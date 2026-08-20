@@ -1,0 +1,6 @@
+packages:
+  - 'packages/*'
+  - 'extensions/*'
+shamefullyHoist: true
+strictPeerDependencies: false
+autoInstallPeers: true
