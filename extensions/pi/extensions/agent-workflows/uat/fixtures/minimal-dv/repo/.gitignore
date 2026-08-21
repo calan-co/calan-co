@@ -1,0 +1,4 @@
+.pi/sandcastle/jobs/
+.pi/sandcastle/results/
+.pi/sandcastle/run-job.mjs
+.pi/sandcastle/scaffold-state.json

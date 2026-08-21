@@ -1,0 +1,942 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://calan.co/pi-extensions/schemas/agent-workflows/config.schema.json",
+  "title": "Agent Workflows Config",
+  "description": "Repo-local Agent Workflows configuration.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "runtimeVersion": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Execution Runtime config version."
+    },
+    "defaultSandbox": {
+      "$ref": "#/$defs/sandbox",
+      "description": "Default sandbox provider for roles and pipelines."
+    },
+    "defaultModel": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Default model reference used when a role or pipeline does not override it. Use 'Agent Default' to defer to the selected agent provider."
+    },
+    "defaultPipeline": {
+      "type": "string",
+      "minLength": 1
+    },
+    "entrypoint": {
+      "type": "string",
+      "minLength": 1
+    },
+    "defaultAgent": {
+      "type": "string",
+      "enum": [
+        "claude-code",
+        "pi",
+        "codex",
+        "cursor",
+        "opencode",
+        "copilot"
+      ]
+    },
+    "maxWorkers": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 5
+    },
+    "maxIterations": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 10
+    },
+    "workSource": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Name of the selected Work Source Registration."
+    },
+    "workSourceSetupCommand": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workSourceCommands": {
+      "type": "object",
+      "description": "Explicit command templates for custom Work Source actions. Templates may use {{ id }}, {{ itemId }}, {{ runId }}, {{ pipeline }}, {{ recordPath }}, {{ cwd }}, {{ args }}, and {{ query }} where applicable.",
+      "additionalProperties": false,
+      "properties": {
+        "ready": {
+          "type": "string",
+          "minLength": 1
+        },
+        "list": {
+          "type": "string",
+          "minLength": 1
+        },
+        "inspect": {
+          "type": "string",
+          "minLength": 1
+        },
+        "validate": {
+          "type": "string",
+          "minLength": 1
+        },
+        "close": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "workSources": {
+      "type": "object",
+      "description": "Named Work Source Registrations. The selected registration is named by workSource; unselected registrations are dormant.",
+      "additionalProperties": {
+        "$ref": "#/$defs/workSource"
+      }
+    },
+    "imageNamePattern": {
+      "type": "string",
+      "minLength": 1
+    },
+    "roles": {
+      "type": "object",
+      "description": "Reusable execution roles consumed by runtime pipelines and Work commands.",
+      "additionalProperties": {
+        "$ref": "#/$defs/role"
+      }
+    },
+    "prompts": {
+      "type": "object",
+      "description": "Reusable task prompts referenced by graph pipeline nodes.",
+      "additionalProperties": {
+        "$ref": "#/$defs/prompt"
+      }
+    },
+    "policies": {
+      "type": "object",
+      "description": "Named reusable runtime policies.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "pipelines": {
+      "type": "object",
+      "description": "Deterministic runtime workflows composed from configured roles.",
+      "additionalProperties": {
+        "$ref": "#/$defs/pipeline"
+      }
+    }
+  },
+  "required": [],
+  "$defs": {
+    "sandbox": {
+      "type": "string",
+      "enum": [
+        "docker",
+        "podman",
+        "vercel",
+        "no-sandbox"
+      ]
+    },
+    "provider": {
+      "type": "string",
+      "enum": [
+        "claude-code",
+        "claude",
+        "pi",
+        "codex",
+        "cursor",
+        "opencode",
+        "copilot"
+      ]
+    },
+    "prompt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "type": "string",
+          "enum": [
+            "markdown"
+          ]
+        },
+        "template": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "template"
+      ]
+    },
+    "workSourceCommand": {
+      "type": "object",
+      "required": [
+        "executable"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "executable": {
+          "type": "string",
+          "minLength": 1
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "workSource": {
+      "type": "object",
+      "required": [
+        "kind"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "disabled": {
+          "type": "boolean"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "package": {
+          "type": "string",
+          "minLength": 1
+        },
+        "export": {
+          "type": "string",
+          "minLength": 1
+        },
+        "commands": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/workSourceCommand"
+          }
+        },
+        "settings": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "role": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "planWork",
+            "runRole",
+            "review",
+            "merge"
+          ]
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sandbox": {
+          "$ref": "#/$defs/sandbox"
+        },
+        "provider": {
+          "$ref": "#/$defs/provider"
+        },
+        "systemPrompt": {
+          "type": "string"
+        },
+        "maxIterations": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "branch": {
+          "type": "string"
+        },
+        "copyToWorktree": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "branchStrategy": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "branch",
+            "merge-to-head"
+          ]
+        },
+        "branch": {
+          "type": "string"
+        },
+        "baseBranch": {
+          "type": "string"
+        }
+      }
+    },
+    "closeFinalizer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "role": {
+          "type": "string",
+          "minLength": 1
+        },
+        "prompt": {
+          "type": "string",
+          "minLength": 1
+        },
+        "promptOverride": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "prompt"
+          ]
+        },
+        {
+          "required": [
+            "promptOverride"
+          ]
+        }
+      ]
+    },
+    "concreteNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "$": {
+          "$ref": "#/$defs/refMeta"
+        },
+        "$ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "anyOf": [
+            {
+              "enum": [
+                "composite",
+                "loop",
+                "agent.pi",
+                "command",
+                "work.close",
+                "git.worktree",
+                "git.merge",
+                "docker.container",
+                "podman.container"
+              ]
+            },
+            {
+              "pattern": "^[a-z][a-z0-9-]*\\.[a-z][a-z0-9_-]*$"
+            }
+          ]
+        },
+        "needs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true,
+          "description": "For git.merge, explicit mergeable input needs when additional needs are ordering gates."
+        },
+        "delete": {
+          "type": "boolean",
+          "description": "For git.merge, remove clean merged source worktrees and branches."
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true,
+          "description": "Unordered semantic capability metadata used by adapters and hooks."
+        },
+        "role": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "promptOverride": {
+          "type": "string"
+        },
+        "finalize": {
+          "$ref": "#/$defs/closeFinalizer"
+        },
+        "each": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "sequential",
+            "parallel"
+          ]
+        },
+        "max": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "node": {
+          "$ref": "#/$defs/concreteNode"
+        },
+        "nodes": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "$ref": "#/$defs/concreteNode"
+          }
+        },
+        "image": {
+          "$ref": "#/$defs/containerImage"
+        },
+        "strategy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1
+        },
+        "when": {
+          "type": "string",
+          "minLength": 1
+        },
+        "with": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "overrides": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "maxIterations": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "For work.close, maximum close attempts; failed attempts before the last may run finalize."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "$"
+                  ]
+                },
+                {
+                  "required": [
+                    "$ref"
+                  ]
+                }
+              ]
+            }
+          },
+          "then": {
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        {
+          "if": {
+            "anyOf": [
+              {
+                "required": [
+                  "$"
+                ]
+              },
+              {
+                "required": [
+                  "$ref"
+                ]
+              }
+            ]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "kind"
+                  ]
+                },
+                {
+                  "required": [
+                    "node"
+                  ]
+                },
+                {
+                  "required": [
+                    "nodes"
+                  ]
+                },
+                {
+                  "required": [
+                    "inputs"
+                  ]
+                },
+                {
+                  "required": [
+                    "role"
+                  ]
+                },
+                {
+                  "required": [
+                    "prompt"
+                  ]
+                },
+                {
+                  "required": [
+                    "promptOverride"
+                  ]
+                },
+                {
+                  "required": [
+                    "finalize"
+                  ]
+                },
+                {
+                  "required": [
+                    "workSource"
+                  ]
+                },
+                {
+                  "required": [
+                    "issueTracker"
+                  ]
+                },
+                {
+                  "required": [
+                    "each"
+                  ]
+                },
+                {
+                  "required": [
+                    "mode"
+                  ]
+                },
+                {
+                  "required": [
+                    "max"
+                  ]
+                },
+                {
+                  "required": [
+                    "image"
+                  ]
+                },
+                {
+                  "required": [
+                    "strategy"
+                  ]
+                },
+                {
+                  "required": [
+                    "when"
+                  ]
+                },
+                {
+                  "required": [
+                    "overrides"
+                  ]
+                },
+                {
+                  "required": [
+                    "maxIterations"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "$"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "$ref"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "finalize"
+            ]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "work.close"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "agent.pi"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "role",
+              "prompt"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "command"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "command"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "loop"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "oneOf": [
+              {
+                "required": [
+                  "node"
+                ],
+                "not": {
+                  "required": [
+                    "nodes"
+                  ]
+                }
+              },
+              {
+                "required": [
+                  "nodes"
+                ],
+                "not": {
+                  "required": [
+                    "node"
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "loop"
+              },
+              "mode": {
+                "const": "parallel"
+              }
+            },
+            "required": [
+              "kind",
+              "mode"
+            ]
+          },
+          "then": {
+            "required": [
+              "each"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "composite",
+                  "git.worktree"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "nodes"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "docker.container",
+                  "podman.container"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "image"
+            ]
+          }
+        }
+      ]
+    },
+    "refMeta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref"
+      ],
+      "properties": {
+        "ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "default": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "containerImage": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dockerfile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "context": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "pipelineStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "$": {
+          "$ref": "#/$defs/refMeta"
+        },
+        "$ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "anyOf": [
+            {
+              "enum": [
+                "runRole",
+                "selectWork",
+                "fanOut",
+                "fanIn",
+                "review",
+                "merge",
+                "postProcess",
+                "gate"
+              ]
+            },
+            {
+              "pattern": "^[a-z][a-z0-9-]*\\.[A-Za-z][A-Za-z0-9_-]*$"
+            }
+          ]
+        },
+        "role": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "promptOverride": {
+          "type": "string"
+        },
+        "with": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "sandbox": {
+          "$ref": "#/$defs/sandbox"
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "maxIterations": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "copyToWorktree": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "role",
+        "prompt"
+      ]
+    },
+    "pipelineNode": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "needs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "role": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "promptOverride": {
+          "type": "string"
+        },
+        "with": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "nodes": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/pipelineNode"
+          }
+        }
+      }
+    },
+    "pipeline": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "composite"
+        },
+        "description": {
+          "type": "string"
+        },
+        "needs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "branchStrategy": {
+          "$ref": "#/$defs/branchStrategy"
+        },
+        "sandbox": {
+          "$ref": "#/$defs/sandbox"
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "copyToWorktree": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "nodes": {
+          "type": "object",
+          "minProperties": 1,
+          "description": "Map-form concrete nodes. Node ids are the map keys.",
+          "additionalProperties": {
+            "$ref": "#/$defs/concreteNode"
+          }
+        }
+      },
+      "required": [
+        "kind",
+        "nodes"
+      ]
+    }
+  }
+}

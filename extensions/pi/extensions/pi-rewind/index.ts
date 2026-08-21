@@ -1,0 +1,403 @@
+/**
+ * Pi Rewind
+ *
+ * Shadow-Git-backed workspace checkpoints for Pi session tree/fork rewind.
+ */
+
+import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
+import { promisify } from "node:util";
+import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+
+const execFileAsync = promisify(execFile);
+
+const EXTENSION_DIR = join(".pi", "pi-rewind");
+const HARD_DENYLIST = [
+	".pi/pi-rewind/",
+	".git/",
+	".hg/",
+	".svn/",
+	".fslckout",
+	".DS_Store",
+];
+const SAFE_DENYLIST = [
+	"node_modules/",
+	"bower_components/",
+	"vendor/bundle/",
+	".venv/",
+	"venv/",
+	"__pycache__/",
+	".pytest_cache/",
+	".mypy_cache/",
+	".ruff_cache/",
+	".turbo/",
+	".next/",
+	".nuxt/",
+	"dist/",
+	"build/",
+	"coverage/",
+	"tmp/",
+	"temp/",
+	"*.log",
+	".env",
+	".env.*",
+	"*.pem",
+	"*.key",
+	"id_rsa",
+	"id_ed25519",
+];
+
+export type RewindMode = "safe" | "full" | "custom";
+
+export interface RewindConfig {
+	mode: RewindMode;
+	customIgnore: string[];
+	autoCheckpoint: boolean;
+}
+
+export interface RewindState {
+	version: 1;
+	sessionFile: string | null;
+	checkpoints: Record<string, string>;
+	labels: Record<string, string>;
+	latestCommit?: string;
+}
+
+interface GitResult {
+	stdout: string;
+	stderr: string;
+	code: number;
+}
+
+interface RuntimeState {
+	ready: boolean;
+	gitDir: string;
+	stateFile: string;
+	state: RewindState;
+	pendingTreeRestore?: { targetId: string; commit: string };
+}
+
+function normalizeMode(value: string | undefined): RewindMode {
+	if (value === "full" || value === "custom" || value === "safe") return value;
+	return "safe";
+}
+
+function splitCustomIgnore(value: string | undefined): string[] {
+	if (!value) return [];
+	return value
+		.split(/\r?\n|:/)
+		.map((line) => line.trim())
+		.filter(Boolean);
+}
+
+export function loadConfigFromEnv(env: NodeJS.ProcessEnv = process.env): RewindConfig {
+	return {
+		mode: normalizeMode(env.PI_REWIND_MODE),
+		customIgnore: splitCustomIgnore(env.PI_REWIND_IGNORE),
+		autoCheckpoint: env.PI_REWIND_DISABLE_AUTO !== "1",
+	};
+}
+
+export function ignorePatternsForConfig(config: RewindConfig): string[] {
+	const patterns = [...HARD_DENYLIST];
+	if (config.mode === "safe") patterns.push(...SAFE_DENYLIST);
+	if (config.mode === "custom") patterns.push(...config.customIgnore);
+	return [...new Set(patterns)];
+}
+
+function safeSessionName(sessionFile: string | undefined): string {
+	if (!sessionFile) return "ephemeral";
+	return basename(sessionFile).replace(/[^a-zA-Z0-9._-]/g, "-");
+}
+
+function emptyState(sessionFile: string | undefined): RewindState {
+	return { version: 1, sessionFile: sessionFile ?? null, checkpoints: {}, labels: {} };
+}
+
+async function runGit(cwd: string, gitDir: string, args: string[], options: { allowFailure?: boolean } = {}): Promise<GitResult> {
+	try {
+		const result = await execFileAsync("git", [`--git-dir=${gitDir}`, `--work-tree=${cwd}`, ...args], {
+			cwd,
+			env: {
+				...process.env,
+				GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME ?? "Pi Rewind",
+				GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL ?? "pi-rewind@local",
+				GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME ?? "Pi Rewind",
+				GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL ?? "pi-rewind@local",
+			},
+			maxBuffer: 10 * 1024 * 1024,
+		});
+		return { stdout: result.stdout, stderr: result.stderr, code: 0 };
+	} catch (error: any) {
+		if (options.allowFailure) {
+			return { stdout: error?.stdout ?? "", stderr: error?.stderr ?? error?.message ?? String(error), code: typeof error?.code === "number" ? error.code : 1 };
+		}
+		throw new Error(error?.stderr?.trim() || error?.stdout?.trim() || error?.message || String(error));
+	}
+}
+
+async function runPlainGit(cwd: string, args: string[]): Promise<GitResult> {
+	try {
+		const result = await execFileAsync("git", args, { cwd, maxBuffer: 10 * 1024 * 1024 });
+		return { stdout: result.stdout, stderr: result.stderr, code: 0 };
+	} catch (error: any) {
+		throw new Error(error?.stderr?.trim() || error?.stdout?.trim() || error?.message || String(error));
+	}
+}
+
+async function loadState(path: string, sessionFile: string | undefined): Promise<RewindState> {
+	try {
+		const parsed = JSON.parse(await readFile(path, "utf8")) as RewindState;
+		if (parsed?.version === 1 && parsed.checkpoints && parsed.labels) return parsed;
+	} catch {
+		// fall through
+	}
+	return emptyState(sessionFile);
+}
+
+async function saveState(runtime: RuntimeState): Promise<void> {
+	await mkdir(dirname(runtime.stateFile), { recursive: true }).catch(() => undefined);
+	await writeFile(runtime.stateFile, `${JSON.stringify(runtime.state, null, "\t")}\n`, "utf8");
+}
+
+async function writeExclude(gitDir: string, config: RewindConfig): Promise<void> {
+	await mkdir(join(gitDir, "info"), { recursive: true });
+	const body = [
+		"# Generated by Pi Rewind. Do not edit; configure with PI_REWIND_MODE/PI_REWIND_IGNORE.",
+		...ignorePatternsForConfig(config),
+		"",
+	].join("\n");
+	await writeFile(join(gitDir, "info", "exclude"), body, "utf8");
+}
+
+async function initRuntime(ctx: ExtensionContext | ExtensionCommandContext, config: RewindConfig): Promise<RuntimeState> {
+	const root = join(ctx.cwd, EXTENSION_DIR);
+	const sessionName = safeSessionName(ctx.sessionManager.getSessionFile?.());
+	const gitDir = join(root, "repos", `${sessionName}.git`);
+	const stateFile = join(root, "sessions", `${sessionName}.json`);
+	await mkdir(gitDir, { recursive: true });
+	await mkdir(join(root, "sessions"), { recursive: true });
+
+	if (!existsSync(join(gitDir, "HEAD"))) {
+		await runPlainGit(ctx.cwd, ["init", "--bare", gitDir]);
+	}
+
+	await writeExclude(gitDir, config);
+	await runGit(ctx.cwd, gitDir, ["config", "core.bare", "false"]);
+	await runGit(ctx.cwd, gitDir, ["config", "core.worktree", ctx.cwd]);
+	await runGit(ctx.cwd, gitDir, ["config", "commit.gpgsign", "false"]);
+
+	return {
+		ready: true,
+		gitDir,
+		stateFile,
+		state: await loadState(stateFile, ctx.sessionManager.getSessionFile?.()),
+	};
+}
+
+async function currentHead(cwd: string, runtime: RuntimeState): Promise<string | undefined> {
+	const result = await runGit(cwd, runtime.gitDir, ["rev-parse", "--verify", "HEAD"], { allowFailure: true });
+	const head = result.stdout.trim();
+	return /^[0-9a-f]{40}$/.test(head) ? head : undefined;
+}
+
+async function hasStagedChanges(cwd: string, runtime: RuntimeState): Promise<boolean> {
+	const result = await runGit(cwd, runtime.gitDir, ["diff", "--cached", "--quiet"], { allowFailure: true });
+	return result.code === 1;
+}
+
+async function isDirty(cwd: string, runtime: RuntimeState): Promise<boolean> {
+	const result = await runGit(cwd, runtime.gitDir, ["status", "--porcelain"], { allowFailure: true });
+	return result.stdout.trim().length > 0;
+}
+
+async function checkpoint(cwd: string, runtime: RuntimeState, entryId: string | null | undefined, label: string): Promise<string | undefined> {
+	await runGit(cwd, runtime.gitDir, ["add", "--all", "."]);
+	if (!(await hasStagedChanges(cwd, runtime))) {
+		const head = await currentHead(cwd, runtime);
+		if (head && entryId) {
+			runtime.state.checkpoints[entryId] = head;
+			runtime.state.labels[entryId] = label;
+			runtime.state.latestCommit = head;
+			await saveState(runtime);
+		}
+		return head;
+	}
+
+	const message = entryId ? `pi rewind checkpoint ${entryId}: ${label}` : `pi rewind checkpoint: ${label}`;
+	await runGit(cwd, runtime.gitDir, ["commit", "-m", message, "--allow-empty"]);
+	const head = await currentHead(cwd, runtime);
+	if (head) {
+		if (entryId) {
+			runtime.state.checkpoints[entryId] = head;
+			runtime.state.labels[entryId] = label;
+		}
+		runtime.state.latestCommit = head;
+		await saveState(runtime);
+	}
+	return head;
+}
+
+async function restore(cwd: string, runtime: RuntimeState, commit: string): Promise<void> {
+	await runGit(cwd, runtime.gitDir, ["reset", "--hard", commit]);
+	runtime.state.latestCommit = commit;
+	await saveState(runtime);
+}
+
+function leafId(ctx: ExtensionContext | ExtensionCommandContext): string | null {
+	return ctx.sessionManager.getLeafId?.() ?? ctx.sessionManager.getLeafEntry?.()?.id ?? null;
+}
+
+async function chooseDirtyAction(ctx: ExtensionContext | ExtensionCommandContext): Promise<"checkpoint" | "discard" | "cancel"> {
+	if (!ctx.hasUI) return "cancel";
+	const choice = await ctx.ui.select("Pi Rewind: current workspace differs from latest checkpoint", [
+		"Checkpoint current workspace, then restore target",
+		"Discard current workspace changes and restore target",
+		"Cancel",
+	]);
+	if (choice?.startsWith("Checkpoint")) return "checkpoint";
+	if (choice?.startsWith("Discard")) return "discard";
+	return "cancel";
+}
+
+async function prepareRestore(
+	ctx: ExtensionContext | ExtensionCommandContext,
+	runtime: RuntimeState,
+	_targetId: string,
+	_commit: string,
+): Promise<"restore" | "skip" | "cancel"> {
+	if (await isDirty(ctx.cwd, runtime)) {
+		const action = await chooseDirtyAction(ctx);
+		if (action === "cancel") return "cancel";
+		if (action === "checkpoint") await checkpoint(ctx.cwd, runtime, leafId(ctx), "pre-restore dirty state");
+	}
+
+	if (!ctx.hasUI) return "skip";
+	const choice = await ctx.ui.select("Pi Rewind: restore workspace checkpoint?", [
+		"Yes, restore files to the selected session point",
+		"No, only move the conversation",
+	]);
+	return choice?.startsWith("Yes") ? "restore" : "skip";
+}
+
+async function statusText(cwd: string, runtime: RuntimeState, config: RewindConfig): Promise<string> {
+	const head = await currentHead(cwd, runtime);
+	const dirty = await isDirty(cwd, runtime);
+	const count = Object.keys(runtime.state.checkpoints).length;
+	return [
+		`Pi Rewind: ${runtime.ready ? "ready" : "not ready"}`,
+		`Mode: ${config.mode}`,
+		`Shadow repo: ${runtime.gitDir}`,
+		`Checkpoints: ${count}`,
+		`HEAD: ${head?.slice(0, 12) ?? "(none)"}`,
+		`Dirty vs shadow HEAD: ${dirty ? "yes" : "no"}`,
+	].join("\n");
+}
+
+export default function (pi: ExtensionAPI) {
+	const config = loadConfigFromEnv();
+	let runtime: RuntimeState | undefined;
+
+	async function ensureRuntime(ctx: ExtensionContext | ExtensionCommandContext): Promise<RuntimeState | undefined> {
+		if (runtime?.ready) return runtime;
+		try {
+			runtime = await initRuntime(ctx, config);
+			return runtime;
+		} catch (error) {
+			ctx.ui.notify(`Pi Rewind disabled: ${error instanceof Error ? error.message : String(error)}`, "warning");
+			return undefined;
+		}
+	}
+
+	pi.on("session_start", async (_event, ctx) => {
+		const rt = await ensureRuntime(ctx);
+		if (!rt || !config.autoCheckpoint) return;
+		await checkpoint(ctx.cwd, rt, leafId(ctx), "session start").catch((error) => {
+			ctx.ui.notify(`Pi Rewind checkpoint failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
+		});
+	});
+
+	pi.on("before_agent_start", async (_event, ctx) => {
+		const rt = await ensureRuntime(ctx);
+		if (!rt || !config.autoCheckpoint) return;
+		await checkpoint(ctx.cwd, rt, leafId(ctx), "before agent turn");
+	});
+
+	pi.on("agent_end", async (_event, ctx) => {
+		const rt = await ensureRuntime(ctx);
+		if (!rt || !config.autoCheckpoint) return;
+		await checkpoint(ctx.cwd, rt, leafId(ctx), "after agent turn");
+	});
+
+	pi.on("session_before_tree", async (event, ctx) => {
+		const rt = await ensureRuntime(ctx);
+		const commit = rt?.state.checkpoints[event.preparation.targetId];
+		if (!rt || !commit) return;
+		const action = await prepareRestore(ctx, rt, event.preparation.targetId, commit);
+		if (action === "cancel") return { cancel: true };
+		if (action === "restore") rt.pendingTreeRestore = { targetId: event.preparation.targetId, commit };
+	});
+
+	pi.on("session_tree", async (event, ctx) => {
+		const rt = await ensureRuntime(ctx);
+		if (!rt?.pendingTreeRestore) return;
+		const pending = rt.pendingTreeRestore;
+		rt.pendingTreeRestore = undefined;
+		if (event.newLeafId !== pending.targetId) return;
+		await restore(ctx.cwd, rt, pending.commit);
+		ctx.ui.notify(`Pi Rewind restored workspace to ${pending.commit.slice(0, 12)}`, "info");
+	});
+
+	pi.on("session_before_fork", async (event, ctx) => {
+		const rt = await ensureRuntime(ctx);
+		const commit = rt?.state.checkpoints[event.entryId];
+		if (!rt || !commit) return;
+		const action = await prepareRestore(ctx, rt, event.entryId, commit);
+		if (action === "cancel") return { cancel: true };
+		if (action !== "restore") return;
+		await restore(ctx.cwd, rt, commit);
+		ctx.ui.notify(`Pi Rewind restored workspace to ${commit.slice(0, 12)}`, "info");
+	});
+
+	pi.registerCommand("rewind", {
+		description: "Manage Pi Rewind shadow-Git checkpoints. Usage: /rewind status|checkpoint|restore <entry-id>",
+		getArgumentCompletions: (prefix: string) => {
+			const items = ["status", "checkpoint", "restore"].filter((value) => value.startsWith(prefix.trim()));
+			return items.map((value) => ({ value, label: value }));
+		},
+		handler: async (args: string, ctx: ExtensionCommandContext) => {
+			const rt = await ensureRuntime(ctx);
+			if (!rt) return;
+			const [subcommand, rest] = args.trim().split(/\s+/, 2);
+			if (!subcommand || subcommand === "status") {
+				ctx.ui.notify(await statusText(ctx.cwd, rt, config), "info");
+				return;
+			}
+			if (subcommand === "checkpoint") {
+				const commit = await checkpoint(ctx.cwd, rt, leafId(ctx), rest || "manual checkpoint");
+				ctx.ui.notify(`Pi Rewind checkpointed ${commit?.slice(0, 12) ?? "no changes"}`, "info");
+				return;
+			}
+			if (subcommand === "restore") {
+				const target = rest?.trim();
+				if (!target) {
+					ctx.ui.notify("Usage: /rewind restore <entry-id>", "warning");
+					return;
+				}
+				const commit = rt.state.checkpoints[target];
+				if (!commit) {
+					ctx.ui.notify(`No Pi Rewind checkpoint for entry ${target}`, "warning");
+					return;
+				}
+				const action = await prepareRestore(ctx, rt, target, commit);
+				if (action !== "restore") return;
+				await restore(ctx.cwd, rt, commit);
+				ctx.ui.notify(`Pi Rewind restored workspace to ${commit.slice(0, 12)}`, "info");
+				return;
+			}
+			ctx.ui.notify("Usage: /rewind status|checkpoint|restore <entry-id>", "warning");
+		},
+	});
+}
