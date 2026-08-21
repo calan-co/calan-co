@@ -24,7 +24,10 @@
       "targetPath": "extensions/pi",
       "owner": "@chris-cald",
       "artifacts": ["pi-extensions"],
-      "state": "queued"
+      "state": "internal-source-imported",
+      "sourceSha": "842f0264043c9b51509d0496c538a5845a0ab8c8",
+      "importEvidence": "git subtree add --prefix=extensions/pi migration-pi-extensions 842f0264043c9b51509d0496c538a5845a0ab8c8 without --squash created merge commit 55c5b998d952c15f3a927d42bcbef0dada64c000.",
+      "integrationEvidence": "User-approved internal/source delivery; completed source integration at extensions/pi without a registry publishing adapter."
     },
     {
       "id": "babysitter-dv",
@@ -32,7 +35,10 @@
       "targetPath": "blueprints/babysitter-dv",
       "owner": "@chris-cald",
       "artifacts": ["babysitter-dv", "babysitter-afk-doc-vader"],
-      "state": "queued"
+      "state": "internal-source-imported",
+      "sourceSha": "458c9f66f4f3a4472c131244a8932ecd0ca4d31d",
+      "importEvidence": "git subtree add --prefix=blueprints/babysitter-dv migration-babysitter-dv 458c9f66f4f3a4472c131244a8932ecd0ca4d31d without --squash created merge commit d999b561276143f202f3df5ddd5caa094c62a799.",
+      "integrationEvidence": "User-approved internal/source delivery; completed source integration at blueprints/babysitter-dv without a registry publishing adapter."
     },
     {
       "id": "awx-ee-proxmox",

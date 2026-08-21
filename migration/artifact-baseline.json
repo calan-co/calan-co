@@ -63,7 +63,7 @@
         { "subject": "@calan-co/pi-extensions", "path": "package.json", "version": "0.1.0" }
       ],
       "pending": [
-        "Choose the Pi distribution target, install/link/copy mechanism, receipt test, and rollback procedure."
+        "Internal/source delivery is approved and source history is integrated at extensions/pi; release, receipt, and rollback evidence remain intentionally unattested."
       ],
       "unattested": [
         "Remote Pi registry, tarball, npm publication, VSIX identity, publication receipt, and rollback command."
@@ -87,8 +87,7 @@
         { "subject": "Babysitter CLI validated environment", "path": "blueprints/babysitter-afk-v6/README.md", "version": "6.0.3" }
       ],
       "pending": [
-        "Decide an internal blueprint delivery target and adapter.",
-        "Provide a declared or provisioned doc-vader dv command for root check parity."
+        "Internal/source delivery is approved and source history is integrated at blueprints/babysitter-dv; a provisioned dv command is still required for the source check command."
       ],
       "unattested": [
         "Babysitter publication, target registry, receipt, and rollback command."
