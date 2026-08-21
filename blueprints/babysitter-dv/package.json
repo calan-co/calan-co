@@ -1,0 +1,17 @@
+{
+  "name": "babysitter-dv",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "npm@10.9.2",
+  "engines": {
+    "node": ">=20"
+  },
+  "description": "Stack-neutral Babysitter delivery blueprint backed by Doc-Vader work items.",
+  "scripts": {
+    "backlog:validate": "dv backlog validate --dir backlog --fail-on error",
+    "test": "node --test test/*.test.mjs",
+    "check": "npm run test && npm run backlog:validate",
+    "pilot:rehearse": "node scripts/pilot-rehearsal.mjs"
+  }
+}

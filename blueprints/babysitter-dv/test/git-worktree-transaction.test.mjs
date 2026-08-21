@@ -1,0 +1,609 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+
+import { createGitWorktreeTransaction } from "../src/git-worktree-transaction.js";
+
+function createHarness({
+  branch = "main",
+  casFails = false,
+  casFailures = casFails ? Infinity : 0,
+  mergeFails = false,
+  mergeOperationalFails = false,
+  integrationProvisionFails = false,
+  cleanupFails = false,
+  cleanupFailsAt,
+  checksPass = true,
+  checksThrow = false,
+  journalFails = false,
+  itemCreationJournalFails = false,
+  publicationIntentJournalFails = false,
+  outcomeJournalFailsAt,
+  casFailureTargetSha = casFailures > 0 ? "cccccccc" : undefined,
+  reviewApproves = true,
+  guardFailsAt,
+} = {}) {
+  const calls = [];
+  const events = [];
+  const timeline = [];
+  const acceptanceCalls = [];
+  const reviewCalls = [];
+  let targetSha = "aaaaaaaa";
+  let remainingCasFailures = casFailures;
+  const git = async ({ args, cwd }) => {
+    calls.push({ args, cwd });
+    timeline.push({ operation: "git", command: args.join(" ") });
+    const command = args.join(" ");
+    if (command.startsWith("worktree add --detach") && integrationProvisionFails) throw new Error("disk unavailable");
+    if (command.startsWith("worktree remove") && (cleanupFails || (cleanupFailsAt === "item-worktree-remove" && args.at(-1).startsWith("/items/")))) throw new Error("cleanup unavailable");
+    if (command.startsWith("branch -D") && cleanupFailsAt === "branch-delete") throw new Error("cleanup unavailable");
+    if (command === "rev-parse --show-toplevel") return "/repo\n";
+    if (command === "symbolic-ref --quiet --short HEAD") {
+      if (!branch) throw new Error("detached HEAD");
+      return `${branch}\n`;
+    }
+    if (command.startsWith("check-ref-format --branch ")) return `${args.at(-1)}\n`;
+    if (command === "rev-parse --verify refs/heads/main") return `${targetSha}\n`;
+    if (command === "rev-parse HEAD") return "bbbbbbbb\n";
+    if (command === "diff --name-only --diff-filter=U") return mergeFails ? "conflicted-file\n" : "";
+    if (command.startsWith("merge ") && (mergeFails || mergeOperationalFails)) {
+      const error = new Error(mergeFails ? "merge conflict" : "merge could not read object");
+      error.exitCode = 1;
+      throw error;
+    }
+    if (command.startsWith("update-ref ") && remainingCasFailures > 0) {
+      remainingCasFailures -= 1;
+      if (casFailureTargetSha) targetSha = casFailureTargetSha;
+      throw new Error("cannot lock ref");
+    }
+    if (command.startsWith("update-ref ")) targetSha = args[2];
+    return "";
+  };
+  const guardCalls = [];
+  const transaction = createGitWorktreeTransaction({
+    git,
+    guard: { before: async (event) => {
+      guardCalls.push(event);
+      if (event.action === guardFailsAt) throw new Error(`evidence unavailable before ${event.action}`);
+    } },
+    journal: { append: async (event) => {
+      if (itemCreationJournalFails && event.type === "item-worktree-created") throw new Error("item creation journal unavailable");
+      if (publicationIntentJournalFails && event.type === "delivery-publication-intent") throw new Error("intent journal unavailable");
+      if (journalFails && event.type === "delivery-published") throw new Error("journal unavailable");
+      if (outcomeJournalFailsAt === event.action && (event.type === "delivery-action-outcome" || event.type === "delivery-cleanup-outcome")) throw new Error("outcome journal unavailable");
+      events.push(event);
+      timeline.push({ operation: "journal", event });
+    } },
+    paths: {
+      item: ({ itemId }) => ({ branch: `items/${itemId}`, worktree: `/items/${itemId}` }),
+      integration: ({ itemId }) => ({ worktree: `/integration/${itemId}` }),
+    },
+    acceptance: { run: async (input) => { acceptanceCalls.push(input); if (checksThrow) throw new Error("root check failed"); return checksPass; } },
+    review: { verify: async (input) => { reviewCalls.push(input); return reviewApproves; } },
+  });
+  return { calls, events, timeline, acceptanceCalls, reviewCalls, guardCalls, transaction };
+}
+
+test("refuses externally callable delivery transactions without an evidence guard", () => {
+  assert.throws(() => createGitWorktreeTransaction({
+    git: async () => "", journal: { append: async () => {} },
+    paths: { item: async () => ({}), integration: async () => ({}) },
+    acceptance: { run: async () => true }, review: { verify: async () => true },
+  }), /evidence guard/i);
+});
+
+test("journals all successful inner integration effects with typed records", async () => {
+  const { events, transaction } = createHarness();
+  const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+  await transaction.deliver({ item });
+  for (const type of ["delivery-integration-worktree-intent", "delivery-integration-strategy-intent", "delivery-root-acceptance-intent", "delivery-publication-intent", "delivery-action-intent", "delivery-action-outcome", "delivery-published"]) {
+    assert.ok(events.some((event) => event.type === type), type);
+  }
+  assert.ok(events.some((event) => event.action === "cas-publication"));
+  assert.ok(events.some((event) => event.transition === "cleanup"));
+});
+
+test("creates an isolated item worktree from the invocation PWD branch and journals its base", async () => {
+  const { calls, events, transaction } = createHarness();
+
+  const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo/packages/app" });
+
+  assert.deepEqual(item, {
+    itemId: "003",
+    repositoryRoot: "/repo",
+    targetBranch: "main",
+    targetBaseSha: "aaaaaaaa",
+    branch: "items/003",
+    worktree: "/items/003",
+  });
+  assert.deepEqual(calls.at(-1), {
+    cwd: "/repo",
+    args: ["worktree", "add", "-b", "items/003", "/items/003", "aaaaaaaa"],
+  });
+  assert.deepEqual(events.at(-1), {
+    type: "item-worktree-created",
+    itemId: "003",
+    targetBranch: "main",
+    targetBaseSha: "aaaaaaaa",
+    branch: "items/003",
+    worktree: "/items/003",
+  });
+});
+
+test("item worktree creation record failure preserves post-effect uncertainty identity", async () => {
+  const { transaction } = createHarness({ itemCreationJournalFails: true });
+  await assert.rejects(transaction.prepareItem({ itemId: "003", cwd: "/repo" }), (error) => error.postEffectRecord === true && error.effect.action === "item-worktree-create");
+});
+
+test("fails closed for detached or unknown explicit target branches", async () => {
+  const detached = createHarness({ branch: "" }).transaction;
+  await assert.rejects(detached.prepareItem({ itemId: "003", cwd: "/repo" }), /detached|target/i);
+
+  const { transaction } = createHarness();
+  await assert.rejects(
+    transaction.prepareItem({ itemId: "003", cwd: "/repo", targetBranch: "missing" }),
+    /target branch|unknown/i,
+  );
+});
+
+test("records durable cleanup outcome after success and failure", async (t) => {
+  await t.test("successful cleanup follows its intent with a success outcome", async () => {
+    const { events, transaction } = createHarness();
+    const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+    await transaction.deliver({ item });
+    const intent = events.findIndex((event) => event.type === "delivery-cleanup-intent" && event.action === "branch-delete");
+    const outcome = events.findIndex((event) => event.type === "delivery-cleanup-outcome" && event.action === "branch-delete" && event.result === "succeeded");
+    assert.ok(intent >= 0 && outcome > intent);
+  });
+  await t.test("cleanup failure appends a failure outcome for reconstruction", async () => {
+    const { events, transaction } = createHarness({ cleanupFails: true });
+    const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+    await transaction.deliver({ item });
+    assert.ok(events.some((event) => event.type === "delivery-cleanup-outcome" && event.action === "integration-worktree-remove" && event.result === "failed"));
+  });
+});
+
+test("cleanup reconstructs partial destructive effects in order", async (t) => {
+  for (const [name, cleanupFailsAt, succeeded, failed] of [
+    ["item removal fails after integration removal", "item-worktree-remove", "integration-worktree-remove", "item-worktree-remove"],
+    ["branch deletion fails after both worktree removals", "branch-delete", "item-worktree-remove", "branch-delete"],
+  ]) {
+    await t.test(name, async () => {
+      const { events, transaction } = createHarness({ cleanupFailsAt });
+      const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+      const result = await transaction.deliver({ item });
+      assert.equal(result.status, "published-but-cleanup-failed");
+      const success = events.findIndex((event) => event.type === "delivery-cleanup-outcome" && event.action === succeeded && event.result === "succeeded");
+      const failure = events.findIndex((event) => event.type === "delivery-cleanup-outcome" && event.action === failed && event.result === "failed");
+      assert.ok(success >= 0 && failure > success);
+    });
+  }
+});
+
+test("successful candidate effects append outcomes after each completed effect", async () => {
+  const { events, transaction } = createHarness();
+  const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+  await transaction.deliver({ item });
+  for (const action of ["integration-worktree-create", "merge", "root-acceptance", "candidate-sha"]) {
+    assert.ok(events.some((event) => event.type === "delivery-action-outcome" && event.action === action && event.result === "succeeded"), action);
+  }
+});
+
+test("runs merge-commit integration checks in a temporary worktree and only then CAS-publishes", async () => {
+  const { calls, events, acceptanceCalls, transaction } = createHarness();
+  const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+
+  const result = await transaction.deliver({ item });
+
+  assert.deepEqual(result, { status: "delivered", targetBranch: "main", publishedSha: "bbbbbbbb" });
+  assert.ok(calls.some(({ args }) => args.join(" ") === "merge --no-ff --no-edit items/003"));
+  assert.ok(calls.some(({ args }) => args.join(" ") === "update-ref refs/heads/main bbbbbbbb aaaaaaaa"));
+  assert.deepEqual(acceptanceCalls, [{
+    candidate: "integration",
+    repositoryRoot: "/repo",
+    worktree: "/integration/003",
+    item,
+    strategy: "merge-commit",
+  }]);
+  assert.deepEqual(calls.slice(-3).map(({ args }) => args), [
+    ["worktree", "remove", "--force", "/integration/003"],
+    ["worktree", "remove", "--force", "/items/003"],
+    ["branch", "-D", "items/003"],
+  ]);
+  assert.ok(events.some((event) => event.type === "delivery-published"));
+  assert.equal(events.at(-1).type, "delivery-cleanup-outcome");
+});
+
+test("preserves item and integration worktrees with recovery evidence after conflict, failed checks, or stale CAS", async () => {
+  for (const [name, options, status] of [
+    ["conflict", { mergeFails: true }, "conflict"],
+    ["failed checks", { checksPass: false }, "failed"],
+    ["stale CAS", { casFails: true }, "stale"],
+  ]) {
+    const { calls, events, transaction } = createHarness(options);
+    const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+    const result = await transaction.deliver({ item });
+
+    assert.equal(result.status, status, name);
+    assert.equal(calls.some(({ args }) => args[0] === "worktree" && args[1] === "remove"), false, name);
+    assert.equal(events.at(-1).type, `delivery-${status}`, name);
+  }
+});
+
+test("preserves worktrees when the injected root-check adapter throws", async () => {
+  const { calls, events, transaction } = createHarness({ checksThrow: true });
+  const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+  const result = await transaction.deliver({ item });
+  assert.equal(result.status, "failed");
+  assert.equal(calls.some(({ args }) => args[0] === "worktree" && args[1] === "remove"), false);
+  assert.equal(events.at(-1).type, "delivery-failed");
+});
+
+test("uses explicit target overrides and supports squash and rebase strategies", async () => {
+  for (const strategy of ["squash", "rebase"]) {
+    const { calls, transaction } = createHarness();
+    const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo", targetBranch: "main" });
+    await transaction.deliver({ item, strategy });
+    const commands = calls.map(({ args }) => args.join(" "));
+    assert.ok(commands.includes(strategy === "squash" ? "merge --squash items/003" : "rebase main"), strategy);
+  }
+});
+
+test("returns an explicit stale recovery contract rather than publishing a stale candidate", async () => {
+  const { calls, transaction } = createHarness({ casFails: true });
+  const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+
+  const result = await transaction.deliver({ item });
+
+  assert.equal(result.status, "stale");
+  assert.equal(result.recovery.action, "refreshStale");
+  assert.deepEqual(result.recovery.required, ["refresh-at-current-target", "root-acceptance", "independent-review", "explicit-retry"]);
+  assert.equal(calls.filter(({ args }) => args[0] === "update-ref").length, 1);
+  assert.equal(typeof transaction.refreshStale, "function");
+  assert.equal(typeof transaction.retryStale, "function");
+});
+
+test("treats a CAS failure without target movement as a recoverable publication failure", async () => {
+  const { calls, events, transaction } = createHarness({ casFails: true, casFailureTargetSha: "aaaaaaaa" });
+  const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+
+  const result = await transaction.deliver({ item });
+
+  assert.equal(result.status, "publication-failed");
+  assert.equal(result.recovery.action, "retryPublication");
+  assert.equal(calls.filter(({ args }) => args.join(" ") === "rev-parse --verify refs/heads/main").length, 2);
+  assert.equal(calls.some(({ args }) => args[0] === "worktree" && args[1] === "remove"), false);
+  assert.equal(events.at(-1).type, "delivery-publication-failed");
+});
+
+test("refreshes stale candidates through root acceptance and gates retry on verified fresh independent review", async () => {
+  const { acceptanceCalls, reviewCalls, transaction } = createHarness({ casFailures: 1 });
+  const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+  const stale = await transaction.deliver({ item });
+
+  const refreshed = await transaction.refreshStale({ stale });
+
+  assert.equal(refreshed.status, "refreshed");
+  assert.equal(acceptanceCalls.length, 2);
+  await assert.rejects(transaction.retryStale({ refreshed }), /independent review/);
+  const result = await transaction.retryStale({
+    refreshed,
+    independentReview: {
+      approved: true,
+      fresh: true,
+      candidateSha: refreshed.candidateSha,
+      reviewer: { identity: "reviewer", context: "independent-review-context" },
+      implementer: { identity: "implementer", context: "implementation-context" },
+    },
+  });
+  assert.equal(result.status, "delivered");
+  assert.equal(reviewCalls.length, 1);
+  assert.equal(reviewCalls[0].candidate.candidateSha, refreshed.candidateSha);
+});
+
+test("requires review evidence to be structured, independent, fresh, and accepted by the injected verifier", async () => {
+  const { transaction } = createHarness({ casFailures: 1, reviewApproves: false });
+  const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+  const stale = await transaction.deliver({ item });
+  const refreshed = await transaction.refreshStale({ stale });
+  const evidence = {
+    approved: true,
+    fresh: true,
+    candidateSha: refreshed.candidateSha,
+    reviewer: { identity: "reviewer", context: "independent-review-context" },
+    implementer: { identity: "implementer", context: "implementation-context" },
+  };
+
+  await assert.rejects(transaction.retryStale({ refreshed, independentReview: { approved: true, candidateSha: refreshed.candidateSha } }), /independent review/);
+  await assert.rejects(transaction.retryStale({ refreshed, independentReview: { ...evidence, reviewer: evidence.implementer } }), /independent review/);
+  await assert.rejects(transaction.retryStale({ refreshed, independentReview: evidence }), /independent review/);
+});
+
+test("writes durable publication intent before CAS and aborts before CAS when intent journaling fails", async () => {
+  const failedIntent = createHarness({ publicationIntentJournalFails: true });
+  const failedItem = await failedIntent.transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+
+  const failedResult = await failedIntent.transaction.deliver({ item: failedItem });
+
+  assert.equal(failedResult.status, "publication-failed");
+  assert.equal(failedResult.recovery.action, "retryPublication");
+  assert.equal(failedIntent.calls.some(({ args }) => args[0] === "update-ref"), false);
+  assert.equal(failedIntent.calls.some(({ args }) => args[0] === "worktree" && args[1] === "remove"), false);
+
+  const successfulIntent = createHarness();
+  const item = await successfulIntent.transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+  await successfulIntent.transaction.deliver({ item });
+  const intent = successfulIntent.events.find((event) => event.type === "delivery-publication-intent");
+  assert.deepEqual(intent, {
+    type: "delivery-publication-intent",
+    itemId: "003",
+    repositoryRoot: "/repo",
+    targetBranch: "main",
+    expectedBaseSha: "aaaaaaaa",
+    candidateSha: "bbbbbbbb",
+    itemWorktree: "/items/003",
+    integrationWorktree: "/integration/003",
+    strategy: "merge-commit",
+  });
+  assert.ok(successfulIntent.timeline.findIndex(({ operation, event }) => operation === "journal" && event === intent) < successfulIntent.timeline.findIndex(({ operation, command }) => operation === "git" && command.startsWith("update-ref ")));
+});
+
+test("never misreports post-effect journal failure as an action failure", async (t) => {
+  await t.test("CAS outcome persistence failure reports already-published uncertainty, not stale", async () => {
+    const { calls, transaction } = createHarness({ outcomeJournalFailsAt: "cas-publication" });
+    const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+    const result = await transaction.deliver({ item });
+    assert.equal(result.status, "published-but-cas-recording-uncertain");
+    assert.equal(result.recovery.sideEffectMayHaveSucceeded, true);
+    assert.equal(calls.some(({ args }) => args[0] === "worktree" && args[1] === "remove"), false);
+  });
+  await t.test("candidate creation outcome persistence failure preserves effect identity without retry", async () => {
+    const { calls, transaction } = createHarness({ outcomeJournalFailsAt: "integration-worktree-create" });
+    const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+    const result = await transaction.deliver({ item });
+    assert.equal(result.status, "integration-effect-recording-uncertain");
+    assert.equal(result.recovery.sideEffectMayHaveSucceeded, true);
+    assert.equal(result.recovery.effect.action, "integration-worktree-create");
+    assert.equal(calls.filter(({ args }) => args.join(" ").startsWith("worktree add --detach")).length, 1);
+  });
+  await t.test("merge and root acceptance outcome persistence failures preserve uncertainty", async () => {
+    for (const action of ["merge", "root-acceptance"]) {
+      const { calls, transaction } = createHarness({ outcomeJournalFailsAt: action });
+      const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+      const result = await transaction.deliver({ item });
+      assert.equal(result.status, "integration-effect-recording-uncertain", action);
+      assert.equal(result.recovery.effect.action, action);
+      assert.equal(calls.some(({ args }) => args[0] === "update-ref"), false, action);
+    }
+  });
+  await t.test("cleanup outcome persistence failure preserves recovery identity without retry", async () => {
+    const { calls, transaction } = createHarness({ outcomeJournalFailsAt: "item-worktree-remove" });
+    const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+    const result = await transaction.deliver({ item });
+    assert.equal(result.status, "published-but-cleanup-recording-uncertain");
+    assert.equal(result.recovery.sideEffectMayHaveSucceeded, true);
+    assert.equal(result.recovery.effect.action, "item-worktree-remove");
+    assert.equal(calls.filter(({ args }) => args[0] === "worktree" && args[1] === "remove").length, 2);
+  });
+});
+
+test("fails closed before CAS publication or cleanup when action evidence guard fails", async (t) => {
+  await t.test("CAS guard leaves target and worktrees untouched", async () => {
+    const { calls, guardCalls, transaction } = createHarness({ guardFailsAt: "cas-publication" });
+    const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+    const result = await transaction.deliver({ item });
+    assert.equal(result.status, "publication-failed");
+    assert.equal(calls.some(({ args }) => args[0] === "update-ref"), false);
+    assert.equal(calls.some(({ args }) => args[0] === "worktree" && args[1] === "remove"), false);
+    assert.ok(guardCalls.some((event) => event.action === "cas-publication" && event.category === "integration"));
+  });
+  await t.test("cleanup guard leaves published target and both worktrees for recovery", async () => {
+    const { calls, guardCalls, transaction } = createHarness({ guardFailsAt: "integration-worktree-remove" });
+    const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+    const result = await transaction.deliver({ item });
+    assert.equal(result.status, "published-but-cleanup-failed");
+    assert.equal(calls.some(({ args }) => args[0] === "update-ref"), true);
+    assert.equal(calls.some(({ args }) => args[0] === "worktree" && args[1] === "remove"), false);
+    assert.ok(guardCalls.some((event) => event.action === "integration-worktree-remove" && event.category === "integration"));
+  });
+});
+
+test("uses durable publication intent and preserves worktrees when post-CAS publication journaling fails", async () => {
+  const { calls, events, transaction } = createHarness({ journalFails: true });
+  const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+
+  const result = await transaction.deliver({ item });
+
+  assert.equal(result.status, "published-but-recording-failed");
+  assert.equal(result.recovery.targetAlreadyPublished, true);
+  assert.equal(result.recovery.cleanupRequired, true);
+  assert.equal(result.recovery.publicationIntent.type, "delivery-publication-intent");
+  assert.equal(calls.some(({ args }) => args[0] === "worktree" && args[1] === "remove"), false);
+  assert.ok(events.some((event) => event.type === "delivery-publication-intent"));
+  assert.equal(events.some((event) => event.type === "delivery-published"), false);
+});
+
+test("turns post-publication cleanup failures into inspectable recovery states", async () => {
+  const { calls, events, transaction } = createHarness({ cleanupFails: true });
+  const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+
+  const result = await transaction.deliver({ item });
+
+  assert.equal(result.status, "published-but-cleanup-failed");
+  assert.equal(result.recovery.targetAlreadyPublished, true);
+  assert.equal(result.recovery.cleanupRequired, true);
+  assert.equal(result.recovery.itemWorktree, item.worktree);
+  assert.equal(calls.some(({ args }) => args[0] === "update-ref"), true);
+  assert.ok(events.some((event) => event.type === "delivery-published-but-cleanup-failed"));
+});
+
+test("reports worktree provisioning failures separately from integration conflicts", async () => {
+  const provisioned = createHarness({ integrationProvisionFails: true });
+  const item = await provisioned.transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+  const provisionResult = await provisioned.transaction.deliver({ item });
+  assert.equal(provisionResult.status, "failed");
+  assert.equal(provisioned.events.at(-1).phase, "provisioning");
+
+  const conflicting = createHarness({ mergeFails: true });
+  const conflictItem = await conflicting.transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+  const conflictResult = await conflicting.transaction.deliver({ item: conflictItem });
+  assert.equal(conflictResult.status, "conflict");
+  assert.equal(conflicting.events.at(-1).phase, "integration");
+});
+
+test("treats an integration command error without unmerged paths as an operational failure", async () => {
+  const { events, transaction } = createHarness({ mergeOperationalFails: true });
+  const item = await transaction.prepareItem({ itemId: "003", cwd: "/repo" });
+
+  const result = await transaction.deliver({ item });
+
+  assert.equal(result.status, "failed");
+  assert.equal(events.at(-1).type, "delivery-failed");
+  assert.equal(events.at(-1).phase, "integration");
+});
+
+function gitIn(cwd, args) {
+  return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+}
+
+function temporaryRepository() {
+  const root = mkdtempSync(join(tmpdir(), "git-worktree-transaction-"));
+  gitIn(root, ["init", "--initial-branch=main"]);
+  gitIn(root, ["config", "user.email", "test@example.invalid"]);
+  gitIn(root, ["config", "user.name", "Transaction Test"]);
+  writeFileSync(join(root, "README.md"), "base\n");
+  gitIn(root, ["add", "README.md"]);
+  gitIn(root, ["commit", "-m", "base"]);
+  return root;
+}
+
+function realTransaction(root, { acceptance = async () => true, beforeUpdateRef, review = { verify: async () => true }, guard } = {}) {
+  const events = [];
+  const git = async ({ args, cwd }) => {
+    if (args[0] === "update-ref" && beforeUpdateRef) await beforeUpdateRef();
+    try {
+      return gitIn(cwd, args);
+    } catch (cause) {
+      const error = new Error(cause.stderr?.toString() || cause.message);
+      error.exitCode = cause.status;
+      throw error;
+    }
+  };
+  const transaction = createGitWorktreeTransaction({
+    git,
+    guard: guard ?? { before: async () => {} },
+    journal: { append: async (event) => events.push(event) },
+    paths: {
+      item: ({ itemId }) => ({ branch: `items/${itemId}`, worktree: join(root, `.item-${itemId}`) }),
+      integration: ({ itemId, attempt = 0 }) => ({ worktree: join(root, `.integration-${itemId}-${attempt}`) }),
+    },
+    acceptance: { run: acceptance },
+    review,
+  });
+  return { events, transaction };
+}
+
+function commitItemChange(item) {
+  writeFileSync(join(item.worktree, "item.txt"), "item\n");
+  gitIn(item.worktree, ["add", "item.txt"]);
+  gitIn(item.worktree, ["commit", "-m", "item change"]);
+}
+
+test("real Git root-check failure leaves target unchanged and retains both worktrees", async () => {
+  const root = temporaryRepository();
+  try {
+    const { transaction } = realTransaction(root, { acceptance: async () => false });
+    const item = await transaction.prepareItem({ itemId: "003", cwd: root });
+    commitItemChange(item);
+    const before = gitIn(root, ["rev-parse", "main"]);
+
+    const result = await transaction.deliver({ item });
+
+    assert.equal(result.status, "failed");
+    assert.equal(gitIn(root, ["rev-parse", "main"]), before);
+    assert.equal(existsSync(item.worktree), true);
+    assert.equal(existsSync(join(root, ".integration-003-0")), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("real Git evidence guard fails closed before CAS and cleanup", async (t) => {
+  await t.test("CAS verification failure retains unchanged target and worktrees", async () => {
+    const root = temporaryRepository();
+    try {
+      const { transaction } = realTransaction(root, { guard: { before: async ({ action }) => { if (action === "cas-publication") throw new Error("evidence unavailable"); } } });
+      const item = await transaction.prepareItem({ itemId: "003", cwd: root });
+      commitItemChange(item);
+      const before = gitIn(root, ["rev-parse", "main"]);
+      const result = await transaction.deliver({ item });
+      assert.equal(result.status, "publication-failed");
+      assert.equal(gitIn(root, ["rev-parse", "main"]), before);
+      assert.equal(existsSync(item.worktree), true);
+      assert.equal(existsSync(join(root, ".integration-003-0")), true);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+  await t.test("cleanup verification failure retains both worktrees after publication", async () => {
+    const root = temporaryRepository();
+    try {
+      const { transaction } = realTransaction(root, { guard: { before: async ({ action }) => { if (action === "integration-worktree-remove") throw new Error("evidence unavailable"); } } });
+      const item = await transaction.prepareItem({ itemId: "003", cwd: root });
+      commitItemChange(item);
+      const result = await transaction.deliver({ item });
+      assert.equal(result.status, "published-but-cleanup-failed");
+      assert.equal(existsSync(item.worktree), true);
+      assert.equal(existsSync(join(root, ".integration-003-0")), true);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+test("real Git CAS race retains competing target and both recovery worktrees", async () => {
+  const root = temporaryRepository();
+  let raced = false;
+  try {
+    const { transaction } = realTransaction(root, {
+      beforeUpdateRef: async () => {
+        if (raced) return;
+        raced = true;
+        writeFileSync(join(root, "race.txt"), "competing\n");
+        gitIn(root, ["add", "race.txt"]);
+        gitIn(root, ["commit", "-m", "competing target advance"]);
+      },
+    });
+    const item = await transaction.prepareItem({ itemId: "003", cwd: root });
+    commitItemChange(item);
+
+    const result = await transaction.deliver({ item });
+
+    assert.equal(result.status, "stale");
+    assert.equal(gitIn(root, ["rev-parse", "main"]), gitIn(root, ["rev-parse", "HEAD"]));
+    assert.match(gitIn(root, ["log", "-1", "--format=%s", "main"]), /competing target advance/);
+    assert.equal(existsSync(item.worktree), true);
+    assert.equal(existsSync(join(root, ".integration-003-0")), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("real Git executes and publishes merge-commit, squash, and rebase candidates", async () => {
+  for (const strategy of ["merge-commit", "squash", "rebase"]) {
+    const root = temporaryRepository();
+    try {
+      const { transaction } = realTransaction(root);
+      const item = await transaction.prepareItem({ itemId: "003", cwd: root });
+      commitItemChange(item);
+
+      const result = await transaction.deliver({ item, strategy });
+
+      assert.equal(result.status, "delivered", strategy);
+      assert.match(gitIn(root, ["show", "main:item.txt"]), /item/, strategy);
+      if (strategy === "merge-commit") assert.equal(gitIn(root, ["rev-list", "--parents", "-n", "1", "main"]).split(" ").length, 3, strategy);
+      if (strategy === "squash") assert.match(gitIn(root, ["log", "-1", "--format=%s", "main"]), /Integrate 003/, strategy);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
