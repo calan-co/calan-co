@@ -8,6 +8,7 @@ const catalogPath = resolve(process.cwd(), process.argv[4] ?? 'release-artifacts
 const states = new Set([
   'queued',
   'history-imported',
+  'internal-source-imported',
   'imported',
   'parity-verified',
   'staging-released',
@@ -25,7 +26,7 @@ const phaseZeroStates = new Set([
 const inventorySchema = '../schema/migration-inventory.schema.json';
 const githubRepositoryUrl = /^https:\/\/github\.com\/[^/?#]+\/[^/?#]+$/;
 const gitCommitSha = /^[0-9a-f]{40}$/;
-const inventoryStatuses = new Set(['eligible-for-import', 'history-imported', 'blocked', 'excluded']);
+const inventoryStatuses = new Set(['eligible-for-import', 'history-imported', 'internal-source-imported', 'blocked', 'excluded']);
 const catalogRequiredFields = [
   'id',
   'path',
@@ -198,9 +199,9 @@ for (const [index, record] of ledger.migrations.entries()) {
     fail(`${location} must be an object`);
   }
   rejectUnknownFields(record, new Set([
-    'id', 'source', 'targetPath', 'owner', 'artifacts', 'state', 'sourceFreezeDate',
-    'historyImportEvidence', 'testCommand', 'adapterEvidence', 'parityEvidence', 'stagingReceipt',
-    'rollbackTarget', 'archiveEvidence',
+    'id', 'source', 'targetPath', 'owner', 'artifacts', 'state', 'sourceSha', 'importEvidence',
+    'integrationEvidence', 'sourceFreezeDate', 'historyImportEvidence', 'testCommand', 'adapterEvidence',
+    'parityEvidence', 'stagingReceipt', 'rollbackTarget', 'archiveEvidence',
   ]), location);
   for (const field of ['id', 'source', 'targetPath', 'owner', 'state']) {
     requireString(record, field, location);
@@ -241,6 +242,26 @@ for (const [index, record] of ledger.migrations.entries()) {
     ]) {
       if (field in record) {
         fail(`${location}.${field} must not be recorded while state is queued`);
+      }
+    }
+  }
+
+  if (record.state === 'internal-source-imported') {
+    requireString(record, 'sourceSha', location);
+    if (!gitCommitSha.test(record.sourceSha)) {
+      fail(`${location}.sourceSha must be a lowercase 40-character Git commit SHA`);
+    }
+    if (record.sourceSha !== inventoryRecord.defaultSha) {
+      fail(`${location}.sourceSha must match inventory defaultSha for id: ${record.id}`);
+    }
+    requireString(record, 'importEvidence', location);
+    requireString(record, 'integrationEvidence', location);
+    for (const field of [
+      'sourceFreezeDate', 'historyImportEvidence', 'testCommand', 'adapterEvidence', 'parityEvidence',
+      'stagingReceipt', 'rollbackTarget', 'archiveEvidence',
+    ]) {
+      if (field in record) {
+        fail(`${location}.${field} must not be recorded while state is internal-source-imported`);
       }
     }
   }
