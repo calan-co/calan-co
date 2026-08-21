@@ -1,0 +1,320 @@
+# Agent Workflows config.
+# Runtime config for Work execution.
+
+runtimeVersion: 1
+defaultSandbox: no-sandbox
+defaultModel: Agent Default
+defaultPipeline: parallel-planner-with-review
+entrypoint: work-process-waves
+defaultAgent: pi
+maxWorkers: 1
+maxIterations: 10
+workSource: custom
+workSourceSetupCommand: dv sandcastle init
+workSourceCommands:
+  ready: "node .sandcastle/dv4sandcastle.mjs list {{ args }}"
+  list: node .sandcastle/dv4sandcastle.mjs list
+  inspect: "node .sandcastle/dv4sandcastle.mjs view {{ itemId }}"
+  validate: "node .sandcastle/dv4sandcastle.mjs validate {{ itemId }}"
+  close: "node .sandcastle/close.mjs {{ itemId }}"
+imageNamePattern: "sandcastle:<repo-dir-name>"
+
+roles:
+  planner:
+    description: planner role
+    kind: planWork
+    systemPrompt: |
+      You are the Agent Workflows planner role. Analyze dependencies, select safe Work, and produce deterministic plans.
+  worker:
+    description: worker role
+    systemPrompt: |
+      You are the Agent Workflows worker role. Pick one open Work Item, complete it, validate it, commit repository changes meaningfully when present, and report results.
+  implementer:
+    description: implementer role
+    systemPrompt: |
+      You are the Agent Workflows implementer role. Implement the selected Work Item on an isolated branch, validate your work, and leave durable changes in a meaningful git commit when the repository changed.
+  reviewer:
+    description: reviewer role
+    kind: review
+    systemPrompt: |
+      You are the Agent Workflows reviewer role. Review branch diffs for correctness, regressions, and missing tests.
+  merger:
+    description: merger role
+    kind: merge
+    systemPrompt: |
+      You are the Agent Workflows reasoning-based merger role. Diagnose merge conflicts, resolve them conservatively, preserve accepted intent from all branches, run focused validation when practical, and commit the merge resolution. Do not make unrelated changes.
+
+prompts:
+  blank:
+    format: markdown
+    template: |
+      $INPUT
+  simple-loop:
+    format: markdown
+    template: |
+      Pick the next open Work Item from the configured Work Source, implement it, validate the result, and close or clearly report the outcome.
+
+      Before finishing, create a meaningful git commit for your changes when the repository changed. Prefer the repository's existing commit style. If git hooks or commitlint reject the commit, read the full error output, revise the commit message or staged changes accordingly, and retry. Do not bypass hooks with --no-verify. If you cannot produce a valid commit after focused retries, leave changes as-is and report the exact failure output. The commit message should summarize the user-visible or architectural change, not merely say that changes were captured.
+
+      User input:
+      $INPUT
+  plan-work:
+    format: markdown
+    template: |
+      Inspect the configured Work Source and repository state. Produce a dependency-aware implementation plan with independently executable Work Items.
+
+      User input:
+      $INPUT
+  implement-work:
+    format: markdown
+    template: |
+      Implement the selected Work Item on the assigned branch. Keep changes focused, run relevant tests, and end with a concise result summary.
+
+      Before finishing, create a meaningful git commit for your changes when the repository changed. Prefer the repository's existing commit style. If git hooks or commitlint reject the commit, read the full error output, revise the commit message or staged changes accordingly, and retry. Do not bypass hooks with --no-verify. If you cannot produce a valid commit after focused retries, leave changes as-is and report the exact failure output. The commit message should summarize the user-visible or architectural change, not merely say that changes were captured.
+
+      Work Item:
+      $INPUT
+  review-work:
+    format: markdown
+    template: |
+      Review the completed branch or worktree for correctness, regressions, test quality, and merge blockers. Return actionable findings and an accept/reject recommendation.
+
+      Start the final answer with exactly one of these machine-readable verdict lines:
+      - Review result: **Accept**
+      - Review result: **Reject**
+
+      Review target:
+      $INPUT
+  merge-work:
+    format: markdown
+    template: |
+      Merge accepted completed branches into the target branch. Resolve conflicts only when safe, run validation, and summarize merged commits.
+
+      Merge context:
+      $INPUT
+  archive-terminal-work:
+    format: markdown
+    template: |
+      Archive or summarize terminal-state Work Items without reopening completed implementation work.
+
+      Items:
+      $INPUT
+  finalize-work-close:
+    format: markdown
+    template: |
+      Prepare the selected Work Item for closure only if the Work Source reports missing close prerequisites. Use implementation results, validation output, and available artifacts to populate provider-required completion metadata. After updating close metadata, run the Work Source close validation or dry-run command when available. If that reports additional blockers, fix those blockers too before finishing; do not stop after only addressing the first reported error. Keep changes narrowly scoped to close preparation and do not broaden implementation scope.
+
+      If your close-preparation edits change repository files, create a meaningful git commit before finishing. Prefer the repository's existing commit style. If git hooks or commitlint reject the commit, read the full error output, revise the commit message or staged changes accordingly, and retry. Do not bypass hooks with --no-verify. If the Work Source close command later mutates repository files again, report that risk explicitly because the current MVP close flow may still require a post-close capture.
+
+      Original user input:
+      $INPUT
+
+pipelines:
+  blank:
+    description: Run a single worker with caller-provided input.
+    kind: composite
+    branchStrategy:
+      type: merge-to-head
+    copyToWorktree: [node_modules]
+    nodes:
+      workspace:
+        kind: git.worktree
+        nodes:
+          run:
+            kind: agent.pi
+            prompt: blank
+            role: worker
+            capabilities: [runRole, agent.pi]
+        capabilities: [worktree, git.worktree]
+
+  simple-loop:
+    description: Worker picks and closes one open Work Item at a time.
+    kind: composite
+    branchStrategy:
+      type: merge-to-head
+    copyToWorktree: [node_modules]
+    nodes:
+      work:
+        kind: loop
+        mode: sequential
+        each: $.executionContexts
+        node:
+          kind: git.worktree
+          nodes:
+            run:
+              kind: agent.pi
+              prompt: simple-loop
+              role: worker
+              capabilities: [runRole, agent.pi]
+            close:
+              kind: work.close
+              needs: [run]
+              when: needs.run.accepted == true
+              capabilities: [work.close]
+              finalize:
+                role: worker
+                prompt: finalize-work-close
+              maxIterations: 3
+          capabilities: [worktree, git.worktree]
+        capabilities: [loop]
+      merge:
+        kind: git.merge
+        needs: [work]
+        strategy: accepted-only
+        inputs: [work]
+        when: "needs.work.mergeableResults.exists(r, has(r.children.close.closed) && r.children.close.closed == true)"
+        capabilities: [merge, git.merge]
+
+  sequential-reviewer:
+    description: "Implement one Work Item, then review the resulting branch."
+    kind: composite
+    branchStrategy:
+      type: branch
+      branch: sandcastle/sequential-reviewer
+    copyToWorktree: [node_modules]
+    nodes:
+      workspace:
+        kind: git.worktree
+        nodes:
+          implement:
+            kind: agent.pi
+            prompt: implement-work
+            role: implementer
+            capabilities: [runRole, agent.pi]
+          review:
+            kind: agent.pi
+            prompt: review-work
+            role: reviewer
+            needs: [implement]
+            capabilities: [runRole, agent.pi]
+          close:
+            kind: work.close
+            needs: [review]
+            when: needs.review.accepted == true
+            capabilities: [work.close]
+            finalize:
+              role: implementer
+              prompt: finalize-work-close
+            maxIterations: 3
+        capabilities: [worktree, git.worktree]
+
+  parallel-planner:
+    description: "Plan unblocked work, fan out implementation, then merge accepted branches."
+    kind: composite
+    branchStrategy:
+      type: branch
+      branch: sandcastle/parallel-planner
+    copyToWorktree: [node_modules]
+    nodes:
+      implement:
+        kind: loop
+        mode: parallel
+        each: $.executionContexts
+        node:
+          kind: git.worktree
+          nodes:
+            implement:
+              kind: agent.pi
+              prompt: implement-work
+              role: implementer
+              capabilities: [runRole, agent.pi]
+            close:
+              kind: work.close
+              needs: [implement]
+              when: needs.implement.accepted == true
+              capabilities: [work.close]
+              finalize:
+                role: implementer
+                prompt: finalize-work-close
+              maxIterations: 3
+          capabilities: [worktree, git.worktree]
+        capabilities: [loop]
+      merge:
+        kind: git.merge
+        needs: [implement]
+        strategy: accepted-only
+        overrides:
+          maxIterations: 1
+        when: "needs.implement.mergeableResults.exists(r, has(r.children.close.closed) && r.children.close.closed == true)"
+        capabilities: [merge, git.merge]
+
+  parallel-planner-with-review:
+    description: "Plan unblocked work, fan out implementation, review completed branches, then merge accepted branches."
+    kind: composite
+    branchStrategy:
+      type: branch
+      branch: sandcastle/parallel-planner-with-review
+    copyToWorktree: [node_modules]
+    nodes:
+      implement:
+        kind: loop
+        mode: parallel
+        each: $.executionContexts
+        node:
+          kind: git.worktree
+          nodes:
+            implement:
+              kind: agent.pi
+              prompt: implement-work
+              role: implementer
+              capabilities: [runRole, agent.pi]
+            review:
+              kind: agent.pi
+              prompt: review-work
+              role: reviewer
+              needs: [implement]
+              maxIterations: 3
+              capabilities: [runRole, agent.pi]
+            close:
+              kind: work.close
+              needs: [review]
+              when: needs.review.accepted == true
+              capabilities: [work.close]
+              finalize:
+                role: implementer
+                prompt: finalize-work-close
+              maxIterations: 3
+          capabilities: [worktree, git.worktree]
+        capabilities: [loop]
+      merge:
+        kind: git.merge
+        needs: [implement]
+        strategy: accepted-only
+        overrides:
+          maxIterations: 1
+        inputs: [implement]
+        when: "needs.implement.mergeableResults.exists(r, has(r.children.close.closed) && r.children.close.closed == true)"
+        capabilities: [merge, git.merge]
+
+  work-process-waves:
+    description: Repeat the selected Work wave pipeline until no eligible Work remains or the loop max is reached.
+    kind: composite
+    branchStrategy:
+      type: branch
+      branch: sandcastle/work-process-waves
+    copyToWorktree: [node_modules]
+    nodes:
+      waves:
+        kind: loop
+        mode: sequential
+        max: 10
+        node:
+          "$ref": $.defaultPipeline
+        capabilities: [loop]
+
+  archive:
+    description: Archive or summarize terminal-state Work.
+    kind: composite
+    branchStrategy:
+      type: merge-to-head
+    copyToWorktree: [node_modules]
+    nodes:
+      workspace:
+        kind: git.worktree
+        nodes:
+          archive:
+            kind: agent.pi
+            prompt: archive-terminal-work
+            role: reviewer
+            capabilities: [runRole, agent.pi]
+        capabilities: [worktree, git.worktree]

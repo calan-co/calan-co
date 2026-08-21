@@ -1,0 +1,10 @@
+packages:
+  - extensions/*
+
+allowBuilds:
+  '@google/genai': false
+  esbuild: true
+  protobufjs: false
+
+confirmModulesPurge: false
+blockExoticSubdeps: false

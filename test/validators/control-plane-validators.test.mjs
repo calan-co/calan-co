@@ -263,6 +263,24 @@ test('Phase-0 baseline records all authoritative sources without claiming later 
       continue;
     }
 
+    if (['pi-extensions', 'babysitter-dv'].includes(migration.id)) {
+      assert.equal(migration.state, 'internal-source-imported', `${migration.id}.ledger.state`);
+      assert.equal(inventory.sources.find(({ id }) => id === migration.id).status,
+        'internal-source-imported', `${migration.id}.inventory.status`);
+      assert.equal(migration.sourceSha,
+        inventory.sources.find(({ id }) => id === migration.id).defaultSha, `${migration.id}.sourceSha`);
+      for (const requiredEvidenceField of ['importEvidence', 'integrationEvidence']) {
+        assert.match(migration[requiredEvidenceField], /\S/, `${migration.id}.${requiredEvidenceField}`);
+      }
+      for (const prohibitedReleaseField of [
+        'sourceFreezeDate', 'historyImportEvidence', 'testCommand', 'adapterEvidence', 'parityEvidence',
+        'stagingReceipt', 'rollbackTarget', 'archiveEvidence',
+      ]) {
+        assert.ok(!(prohibitedReleaseField in migration), `${migration.id}.${prohibitedReleaseField}`);
+      }
+      continue;
+    }
+
     assert.equal(migration.state, 'queued');
     for (const unavailableLaterStateField of [
       'sourceFreezeDate', 'historyImportEvidence', 'testCommand', 'adapterEvidence', 'parityEvidence',
@@ -346,6 +364,87 @@ test('migration ledger validator requires history-only evidence and rejects acti
   }, legacyInventory);
   assert.notEqual(activeEvidence.status, 0);
   assert.match(activeEvidence.stderr, /testCommand.*history-imported/i);
+});
+
+test('internal source imports preserve the pinned source tree and record only pre-cutover evidence', () => {
+  const inventory = JSON.parse(readFileSync(join(repositoryRoot, 'migration', 'inventory.yaml'), 'utf8'));
+  const ledger = JSON.parse(readFileSync(join(repositoryRoot, 'migration', 'ledger.yaml'), 'utf8'));
+  const internalImports = [
+    ['pi-extensions', 'extensions/pi', 'backlog/MIG-001.3-pi-extensions.md'],
+    ['babysitter-dv', 'blueprints/babysitter-dv', 'backlog/MIG-001.4-babysitter-dv.md'],
+  ];
+
+  for (const [id, targetPath, backlogFile] of internalImports) {
+    const inventoryRecord = inventory.sources.find((source) => source.id === id);
+    const ledgerRecord = ledger.migrations.find((migration) => migration.id === id);
+    const backlog = readFileSync(join(repositoryRoot, backlogFile), 'utf8');
+    const sourceTree = spawnSync('git', ['rev-parse', `${inventoryRecord.defaultSha}^{tree}`], {
+      cwd: repositoryRoot,
+      encoding: 'utf8',
+    });
+    const targetTree = spawnSync('git', ['rev-parse', `HEAD:${targetPath}`], {
+      cwd: repositoryRoot,
+      encoding: 'utf8',
+    });
+    const parentTopology = spawnSync('git', ['log', '--all', '--format=%H %P'], {
+      cwd: repositoryRoot,
+      encoding: 'utf8',
+    });
+
+    assert.equal(inventoryRecord.status, 'internal-source-imported', `${id}.inventory.status`);
+    assert.equal(ledgerRecord.state, 'internal-source-imported', `${id}.ledger.state`);
+    assert.equal(ledgerRecord.sourceSha, inventoryRecord.defaultSha, `${id}.sourceSha`);
+    assert.match(ledgerRecord.importEvidence, new RegExp(inventoryRecord.defaultSha));
+    assert.match(ledgerRecord.importEvidence, /without --squash/);
+    assert.match(ledgerRecord.integrationEvidence, /internal\/source delivery/);
+    assert.equal(sourceTree.status, 0, sourceTree.stderr);
+    assert.equal(targetTree.status, 0, targetTree.stderr);
+    assert.equal(targetTree.stdout.trim(), sourceTree.stdout.trim(), `${id} subtree tree`);
+    assert.ok(parentTopology.stdout.split('\n').some((line) =>
+      line.split(' ').slice(1).includes(inventoryRecord.defaultSha)), `${id} source parent`);
+    assert.match(backlog, /^- \*\*Lifecycle:\*\* internal-source-imported$/m);
+    assert.match(backlog, /User-approved decision: internal\/source delivery/);
+  }
+});
+
+test('migration ledger validator accepts an internal source import without release evidence', () => {
+  const result = validateLedger({
+    schemaVersion: 1,
+    migrations: [{
+      id: 'example-source',
+      source: 'https://github.com/calan-co/example-source',
+      targetPath: 'packages/example',
+      owner: 'migration-owner',
+      artifacts: ['example-package'],
+      state: 'internal-source-imported',
+      sourceSha: '0123456789abcdef0123456789abcdef01234567',
+      importEvidence: 'git subtree add --prefix=packages/example example-source 0123456789abcdef0123456789abcdef01234567 without --squash',
+      integrationEvidence: 'User-approved internal/source delivery; source integration completed.',
+    }],
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('migration ledger validator rejects release evidence on internal source imports', () => {
+  const result = validateLedger({
+    schemaVersion: 1,
+    migrations: [{
+      id: 'example-source',
+      source: 'https://github.com/calan-co/example-source',
+      targetPath: 'packages/example',
+      owner: 'migration-owner',
+      artifacts: ['example-package'],
+      state: 'internal-source-imported',
+      sourceSha: '0123456789abcdef0123456789abcdef01234567',
+      importEvidence: 'git subtree add --prefix=packages/example example-source 0123456789abcdef0123456789abcdef01234567 without --squash',
+      integrationEvidence: 'User-approved internal/source delivery; source integration completed.',
+      rollbackTarget: 'do-not-claim',
+    }],
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /rollbackTarget.*internal-source-imported/i);
 });
 
 test('migration ledger validator accepts the empty bootstrap ledger', () => {

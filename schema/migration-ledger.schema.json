@@ -20,7 +20,10 @@
           "targetPath": { "type": "string", "minLength": 1 },
           "owner": { "type": "string", "minLength": 1 },
           "artifacts": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
-          "state": { "enum": ["queued", "history-imported", "imported", "parity-verified", "staging-released", "cut-over", "archived", "blocked"] },
+          "state": { "enum": ["queued", "history-imported", "internal-source-imported", "imported", "parity-verified", "staging-released", "cut-over", "archived", "blocked"] },
+          "sourceSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+          "importEvidence": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "integrationEvidence": { "type": "string", "minLength": 1, "pattern": "\\S" },
           "sourceFreezeDate": { "type": "string", "format": "date" },
           "historyImportEvidence": { "type": "string", "minLength": 1, "pattern": "\\S" },
           "testCommand": { "type": "string", "minLength": 1, "pattern": "\\S" },
@@ -59,6 +62,29 @@
                   { "required": ["adapterEvidence"] },
                   { "required": ["parityEvidence"] },
                   { "required": ["stagingReceipt"] },
+                  { "required": ["archiveEvidence"] }
+                ]
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "state": { "const": "internal-source-imported" }
+              },
+              "required": ["state"]
+            },
+            "then": {
+              "required": ["sourceSha", "importEvidence", "integrationEvidence"],
+              "not": {
+                "anyOf": [
+                  { "required": ["sourceFreezeDate"] },
+                  { "required": ["historyImportEvidence"] },
+                  { "required": ["testCommand"] },
+                  { "required": ["adapterEvidence"] },
+                  { "required": ["parityEvidence"] },
+                  { "required": ["stagingReceipt"] },
+                  { "required": ["rollbackTarget"] },
                   { "required": ["archiveEvidence"] }
                 ]
               }

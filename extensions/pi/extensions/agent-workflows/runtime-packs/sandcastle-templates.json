@@ -1,0 +1,592 @@
+{
+  "runtimeVersion": 1,
+  "metadata": {
+    "id": "agent-workflows.sandcastle-templates",
+    "label": "Sandcastle template equivalents",
+    "description": "Pi-native deterministic runtime pack ported from the bundled Sandcastle template concepts.",
+    "inspiredBy": [
+      "sandcastle@0.12.0 templates/blank",
+      "sandcastle@0.12.0 templates/simple-loop",
+      "sandcastle@0.12.0 templates/sequential-reviewer",
+      "sandcastle@0.12.0 templates/parallel-planner",
+      "sandcastle@0.12.0 templates/parallel-planner-with-review"
+    ]
+  },
+  "defaults": {
+    "agentProvider": "claude-code",
+    "sandboxProvider": "docker",
+    "model": "Agent Default",
+    "maxWorkers": 5,
+    "entrypoint": "work-process-waves",
+    "imagePolicy": "repo-default",
+    "branchPolicy": "branch-per-run",
+    "completionPolicy": "promise-complete",
+    "workSource": "github-issues",
+    "maxIterations": 10
+  },
+  "providers": {
+    "agentProviders": {
+      "claude-code": {
+        "adapter": "sandcastle",
+        "defaultModel": "Agent Default",
+        "capabilities": [
+          "streaming",
+          "tools"
+        ]
+      },
+      "pi": {
+        "adapter": "sandcastle",
+        "defaultModel": "Agent Default",
+        "capabilities": [
+          "streaming",
+          "tools"
+        ]
+      },
+      "codex": {
+        "adapter": "sandcastle",
+        "defaultModel": "Agent Default",
+        "capabilities": [
+          "streaming",
+          "tools"
+        ]
+      },
+      "cursor": {
+        "adapter": "sandcastle",
+        "defaultModel": "Agent Default",
+        "capabilities": [
+          "streaming",
+          "tools"
+        ]
+      },
+      "opencode": {
+        "adapter": "sandcastle",
+        "defaultModel": "Agent Default",
+        "capabilities": [
+          "streaming",
+          "tools"
+        ]
+      },
+      "copilot": {
+        "adapter": "sandcastle",
+        "defaultModel": "Agent Default",
+        "capabilities": [
+          "streaming",
+          "tools"
+        ]
+      }
+    },
+    "sandboxProviders": {
+      "docker": {
+        "adapter": "sandcastle",
+        "imagePolicy": "repo-default"
+      },
+      "podman": {
+        "adapter": "sandcastle",
+        "imagePolicy": "repo-default"
+      },
+      "vercel": {
+        "adapter": "sandcastle"
+      },
+      "no-sandbox": {
+        "adapter": "sandcastle"
+      }
+    }
+  },
+  "roles": {
+    "planner": {
+      "role": "planner",
+      "kind": "planWork",
+      "provider": "default",
+      "model": "default",
+      "sandbox": "default",
+      "systemPrompt": "You are the Agent Workflows planner role. Analyze dependencies, select safe Work, and produce deterministic plans."
+    },
+    "worker": {
+      "role": "worker",
+      "provider": "default",
+      "model": "default",
+      "sandbox": "default",
+      "systemPrompt": "You are the Agent Workflows worker role. Pick one open Work Item, complete it, validate it, commit repository changes meaningfully when present, and report results."
+    },
+    "implementer": {
+      "role": "implementer",
+      "provider": "default",
+      "model": "default",
+      "sandbox": "default",
+      "systemPrompt": "You are the Agent Workflows implementer role. Implement the selected Work Item on an isolated branch, validate your work, and leave durable changes in a meaningful git commit when the repository changed."
+    },
+    "reviewer": {
+      "role": "reviewer",
+      "provider": "default",
+      "model": "default",
+      "sandbox": "default",
+      "systemPrompt": "You are the Agent Workflows reviewer role. Review branch diffs for correctness, regressions, and missing tests.",
+      "kind": "review"
+    },
+    "merger": {
+      "role": "merger",
+      "provider": "default",
+      "model": "default",
+      "sandbox": "default",
+      "systemPrompt": "You are the Agent Workflows reasoning-based merger role. Diagnose merge conflicts, resolve them conservatively, preserve accepted intent from all branches, run focused validation when practical, and commit the merge resolution. Do not make unrelated changes.",
+      "kind": "merge"
+    }
+  },
+  "prompts": {
+    "blank": {
+      "format": "markdown",
+      "template": "$INPUT"
+    },
+    "simple-loop": {
+      "format": "markdown",
+      "template": "Pick the next open Work Item from the configured Work Source, implement it, validate the result, and close or clearly report the outcome.\n\nBefore finishing, create a meaningful git commit for your changes when the repository changed. Prefer the repository's existing commit style. If git hooks or commitlint reject the commit, read the full error output, revise the commit message or staged changes accordingly, and retry. Do not bypass hooks with --no-verify. If you cannot produce a valid commit after focused retries, leave changes as-is and report the exact failure output. The commit message should summarize the user-visible or architectural change, not merely say that changes were captured.\n\nUser input:\n$INPUT"
+    },
+    "plan-work": {
+      "format": "markdown",
+      "template": "Inspect the configured Work Source and repository state. Produce a dependency-aware implementation plan with independently executable Work Items.\n\nUser input:\n$INPUT"
+    },
+    "implement-work": {
+      "format": "markdown",
+      "template": "Implement the selected Work Item on the assigned branch. Keep changes focused, run relevant tests, and end with a concise result summary.\n\nBefore finishing, create a meaningful git commit for your changes when the repository changed. Prefer the repository's existing commit style. If git hooks or commitlint reject the commit, read the full error output, revise the commit message or staged changes accordingly, and retry. Do not bypass hooks with --no-verify. If you cannot produce a valid commit after focused retries, leave changes as-is and report the exact failure output. The commit message should summarize the user-visible or architectural change, not merely say that changes were captured.\n\nWork Item:\n$INPUT"
+    },
+    "review-work": {
+      "format": "markdown",
+      "template": "Review the completed branch or worktree for correctness, regressions, test quality, and merge blockers. Return actionable findings and an accept/reject recommendation.\n\nReview target:\n$INPUT"
+    },
+    "merge-work": {
+      "format": "markdown",
+      "template": "Merge accepted completed branches into the target branch. Resolve conflicts only when safe, run validation, and summarize merged commits.\n\nMerge context:\n$INPUT"
+    },
+    "archive-terminal-work": {
+      "format": "markdown",
+      "template": "Archive or summarize terminal-state Work Items without reopening completed implementation work.\n\nItems:\n$INPUT"
+    },
+    "finalize-work-close": {
+      "format": "markdown",
+      "template": "Prepare the selected Work Item for closure only if the Work Source reports missing close prerequisites. Use implementation results, validation output, and available artifacts to populate provider-required completion metadata. After updating close metadata, run the Work Source close validation or dry-run command when available. If that reports additional blockers, fix those blockers too before finishing; do not stop after only addressing the first reported error. Keep changes narrowly scoped to close preparation and do not broaden implementation scope.\n\nWhen editing markdown Work Item frontmatter, prefer provider-portable terminal metadata: set a numeric actual value, add at least one simple scalar links.evidence entry (for example, a validation command/result string), and mark completed task and acceptance checkboxes as checked when the implementation and validation satisfy them. Avoid nested evidence objects unless the existing Work Source format already uses them.\n\nIf your close-preparation edits change repository files, create a meaningful git commit before finishing. Prefer the repository's existing commit style. If git hooks or commitlint reject the commit, read the full error output, revise the commit message or staged changes accordingly, and retry. Do not bypass hooks with --no-verify. If the Work Source close command later mutates repository files again, report that risk explicitly because the current MVP close flow may still require a post-close capture.\n\nOriginal user input:\n$INPUT"
+    }
+  },
+  "policies": {
+    "branch": {
+      "merge-to-head": {
+        "type": "merge-to-head"
+      },
+      "branch-per-run": {
+        "type": "branch",
+        "pattern": "sandcastle/{{ pipeline.id }}/{{ run.id }}"
+      }
+    },
+    "image": {
+      "repo-default": {
+        "providerFrom": "defaults.sandboxProvider",
+        "namePattern": "sandcastle:<repo-dir-name>",
+        "build": "if-missing-or-stale"
+      }
+    },
+    "completion": {
+      "promise-complete": {
+        "promise": "COMPLETE"
+      }
+    }
+  },
+  "adapters": {
+    "sandcastle": {
+      "kind": "sandcastle",
+      "module": "@ai-hero/sandcastle",
+      "capabilities": [
+        "runRole",
+        "buildImage",
+        "worktree"
+      ]
+    }
+  },
+  "pipelines": {
+    "blank": {
+      "description": "Run a single worker with caller-provided input.",
+      "defaults": {
+        "branchPolicy": "merge-to-head"
+      },
+      "kind": "composite",
+      "nodes": {
+        "workspace": {
+          "kind": "git.worktree",
+          "nodes": {
+            "run": {
+              "kind": "agent.pi",
+              "prompt": "blank",
+              "role": "worker",
+              "capabilities": [
+                "runRole",
+                "agent.pi"
+              ]
+            }
+          },
+          "capabilities": [
+            "worktree",
+            "git.worktree"
+          ]
+        }
+      }
+    },
+    "simple-loop": {
+      "description": "Worker picks and closes one open Work Item at a time.",
+      "defaults": {
+        "branchPolicy": "merge-to-head"
+      },
+      "kind": "composite",
+      "nodes": {
+        "workspace": {
+          "kind": "git.worktree",
+          "nodes": {
+            "run": {
+              "kind": "agent.pi",
+              "prompt": "simple-loop",
+              "role": "worker",
+              "capabilities": [
+                "runRole",
+                "agent.pi"
+              ]
+            },
+            "close": {
+              "kind": "work.close",
+              "needs": [
+                "run"
+              ],
+              "when": "needs.run.accepted == true",
+              "capabilities": [
+                "work.close"
+              ],
+              "finalize": {
+                "role": "worker",
+                "prompt": "finalize-work-close"
+              },
+              "maxIterations": 3
+            }
+          },
+          "capabilities": [
+            "worktree",
+            "git.worktree"
+          ]
+        }
+      }
+    },
+    "sequential-reviewer": {
+      "description": "Implement one Work Item, then review the resulting branch.",
+      "defaults": {
+        "branchPolicy": "branch-per-run"
+      },
+      "kind": "composite",
+      "nodes": {
+        "workspace": {
+          "kind": "git.worktree",
+          "nodes": {
+            "implement": {
+              "kind": "agent.pi",
+              "prompt": "implement-work",
+              "role": "implementer",
+              "capabilities": [
+                "runRole",
+                "agent.pi"
+              ]
+            },
+            "review": {
+              "kind": "agent.pi",
+              "prompt": "review-work",
+              "role": "reviewer",
+              "needs": [
+                "implement"
+              ],
+              "capabilities": [
+                "runRole",
+                "agent.pi"
+              ]
+            },
+            "close": {
+              "kind": "work.close",
+              "needs": [
+                "review"
+              ],
+              "when": "needs.review.accepted == true",
+              "capabilities": [
+                "work.close"
+              ],
+              "finalize": {
+                "role": "implementer",
+                "prompt": "finalize-work-close"
+              },
+              "maxIterations": 3
+            }
+          },
+          "capabilities": [
+            "worktree",
+            "git.worktree"
+          ]
+        }
+      }
+    },
+    "parallel-planner": {
+      "description": "Plan unblocked work, fan out implementation, then merge accepted branches.",
+      "defaults": {
+        "branchPolicy": "branch-per-run"
+      },
+      "kind": "composite",
+      "nodes": {
+        "implement": {
+          "kind": "loop",
+          "mode": "parallel",
+          "each": "$.executionContexts",
+          "node": {
+            "kind": "git.worktree",
+            "nodes": {
+              "implement": {
+                "kind": "agent.pi",
+                "prompt": "implement-work",
+                "role": "implementer",
+                "capabilities": [
+                  "runRole",
+                  "agent.pi"
+                ]
+              },
+              "close": {
+                "kind": "work.close",
+                "needs": [
+                  "implement"
+                ],
+                "when": "needs.implement.accepted == true",
+                "capabilities": [
+                  "work.close"
+                ],
+                "finalize": {
+                  "role": "implementer",
+                  "prompt": "finalize-work-close"
+                },
+                "maxIterations": 3
+              }
+            },
+            "capabilities": [
+              "worktree",
+              "git.worktree"
+            ]
+          },
+          "capabilities": [
+            "loop"
+          ]
+        },
+        "merge": {
+          "kind": "git.merge",
+          "delete": true,
+          "needs": [
+            "implement"
+          ],
+          "strategy": "accepted-only",
+          "overrides": {
+            "maxIterations": 1
+          },
+          "when": "needs.implement.mergeableResults.exists(r, has(r.children.close.closed) && r.children.close.closed == true)",
+          "capabilities": [
+            "merge",
+            "git.merge"
+          ]
+        }
+      }
+    },
+    "parallel-planner-with-review": {
+      "description": "Plan unblocked work, fan out implementation, review completed branches, then merge accepted branches.",
+      "defaults": {
+        "branchPolicy": "branch-per-run"
+      },
+      "kind": "composite",
+      "nodes": {
+        "implement": {
+          "kind": "loop",
+          "mode": "parallel",
+          "each": "$.executionContexts",
+          "node": {
+            "kind": "git.worktree",
+            "nodes": {
+              "implement": {
+                "kind": "agent.pi",
+                "prompt": "implement-work",
+                "role": "implementer",
+                "capabilities": [
+                  "runRole",
+                  "agent.pi"
+                ]
+              },
+              "review": {
+                "kind": "agent.pi",
+                "prompt": "review-work",
+                "role": "reviewer",
+                "needs": [
+                  "implement"
+                ],
+                "capabilities": [
+                  "runRole",
+                  "agent.pi"
+                ]
+              },
+              "close": {
+                "kind": "work.close",
+                "needs": [
+                  "review"
+                ],
+                "when": "needs.review.accepted == true",
+                "capabilities": [
+                  "work.close"
+                ],
+                "finalize": {
+                  "role": "implementer",
+                  "prompt": "finalize-work-close"
+                },
+                "maxIterations": 3
+              }
+            },
+            "capabilities": [
+              "worktree",
+              "git.worktree"
+            ]
+          },
+          "capabilities": [
+            "loop"
+          ]
+        },
+        "merge": {
+          "kind": "git.merge",
+          "delete": true,
+          "needs": [
+            "implement"
+          ],
+          "strategy": "accepted-only",
+          "overrides": {
+            "maxIterations": 1
+          },
+          "inputs": [
+            "implement"
+          ],
+          "when": "needs.implement.mergeableResults.exists(r, has(r.children.close.closed) && r.children.close.closed == true)",
+          "capabilities": [
+            "merge",
+            "git.merge"
+          ]
+        }
+      }
+    },
+    "work-process-waves": {
+      "description": "Repeat the selected Work wave pipeline until no eligible Work remains or the loop max is reached.",
+      "defaults": {
+        "branchPolicy": "branch-per-run"
+      },
+      "kind": "composite",
+      "nodes": {
+        "waves": {
+          "kind": "loop",
+          "mode": "sequential",
+          "max": 10,
+          "node": {
+            "$ref": "$.defaultPipeline"
+          },
+          "capabilities": [
+            "loop"
+          ]
+        }
+      }
+    },
+    "archive": {
+      "description": "Archive or summarize terminal-state Work.",
+      "defaults": {
+        "branchPolicy": "merge-to-head"
+      },
+      "kind": "composite",
+      "nodes": {
+        "workspace": {
+          "kind": "git.worktree",
+          "nodes": {
+            "archive": {
+              "kind": "agent.pi",
+              "prompt": "archive-terminal-work",
+              "role": "reviewer",
+              "capabilities": [
+                "runRole",
+                "agent.pi"
+              ]
+            }
+          },
+          "capabilities": [
+            "worktree",
+            "git.worktree"
+          ]
+        }
+      }
+    }
+  },
+  "workSources": {
+    "github-issues": {
+      "kind": "github-issues",
+      "capabilities": ["work.ready", "work.list", "work.inspect", "work.close"],
+      "commands": {
+        "ready": {
+          "executable": "gh",
+          "args": ["issue", "list", "--state", "open", "--json", "number,title,state,body,url,labels"]
+        },
+        "list": {
+          "executable": "gh",
+          "args": ["issue", "list", "--state", "open", "--json", "number,title,state,body,url,labels"]
+        },
+        "inspect": {
+          "executable": "gh",
+          "args": ["issue", "view", "{{ id }}", "--json", "number,title,state,body,url,labels,comments"]
+        },
+        "close": {
+          "executable": "gh",
+          "args": ["issue", "close", "{{ id }}"]
+        }
+      }
+    },
+    "beads": {
+      "kind": "beads",
+      "capabilities": ["work.ready", "work.list", "work.inspect", "work.close"],
+      "commands": {
+        "ready": {
+          "executable": "bd",
+          "args": ["list", "--status", "open", "--json"]
+        },
+        "list": {
+          "executable": "bd",
+          "args": ["list", "--status", "open", "--json"]
+        },
+        "inspect": {
+          "executable": "bd",
+          "args": ["show", "{{ id }}", "--json"]
+        },
+        "close": {
+          "executable": "bd",
+          "args": ["close", "{{ id }}"]
+        }
+      }
+    },
+    "custom": {
+      "kind": "custom-json-command",
+      "disabled": true,
+      "capabilities": [],
+      "commands": {}
+    },
+    "doc-vader": {
+      "kind": "doc-vader",
+      "capabilities": ["work.ready", "work.validate", "work.close"],
+      "commands": {
+        "ready": {
+          "executable": "dv",
+          "args": ["work", "ready", "{{ args }}"]
+        },
+        "validate": {
+          "executable": "node",
+          "args": [".sandcastle/dv4sandcastle.mjs", "validate", "{{ id }}"]
+        },
+        "close": {
+          "executable": "node",
+          "args": [".sandcastle/dv4sandcastle.mjs", "close", "{{ id }}"]
+        }
+      }
+    }
+  }
+}

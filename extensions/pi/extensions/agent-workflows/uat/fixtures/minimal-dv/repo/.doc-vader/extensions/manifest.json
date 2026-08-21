@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "doc-vader/extensions/v1",
+  "extensions": [
+    {
+      "name": "@calan-co/dv-sandcastle-issue-tracker",
+      "packageName": "@calan-co/dv-sandcastle-issue-tracker",
+      "packageSpecifier": "/Users/macos/dev/tiab/doc-vader/extensions/dv-sandcastle-issue-tracker",
+      "entrypoint": "./index.mjs",
+      "enabled": true,
+      "installedAt": "2026-07-13T05:32:14.579Z"
+    }
+  ]
+}

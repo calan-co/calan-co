@@ -29,10 +29,10 @@
       "source": "https://github.com/calan-co/pi-extensions",
       "defaultBranch": "main",
       "defaultSha": "842f0264043c9b51509d0496c538a5845a0ab8c8",
-      "status": "blocked",
+      "status": "internal-source-imported",
       "targetPath": "extensions/pi",
       "exclusions": [
-        "Release catalog entry omitted: no source-defined Pi distribution target, receipt command, or rollback command exists."
+        "User-approved internal/source delivery: source history is integrated at extensions/pi; no registry publishing adapter, release, receipt, or rollback claim is made."
       ]
     },
     {
@@ -40,10 +40,10 @@
       "source": "https://github.com/calan-co/babysitter-dv",
       "defaultBranch": "main",
       "defaultSha": "458c9f66f4f3a4472c131244a8932ecd0ca4d31d",
-      "status": "eligible-for-import",
+      "status": "internal-source-imported",
       "targetPath": "blueprints/babysitter-dv",
       "exclusions": [
-        "Root package is private and no publishable Babysitter blueprint target, adapter, receipt, or rollback command is evidenced."
+        "User-approved internal/source delivery: source history is integrated at blueprints/babysitter-dv; no registry publishing adapter, release, receipt, or rollback claim is made."
       ]
     },
     {
