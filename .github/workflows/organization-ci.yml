@@ -20,7 +20,7 @@ jobs:
       cache-dependency-path: pnpm-lock.yaml
       working-directory: .
       fetch-depth: 0
-      install-command: ":"
+      install-command: mkdir -p "$(pnpm store path)"
       enable-lint: true
       enable-typecheck: false
       enable-tests: true
