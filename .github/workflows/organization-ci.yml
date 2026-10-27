@@ -19,10 +19,11 @@ jobs:
       package-manager: pnpm
       cache-dependency-path: pnpm-lock.yaml
       working-directory: .
-      install-command: pnpm install --frozen-lockfile
+      fetch-depth: 0
+      install-command: ":"
       enable-lint: true
       enable-typecheck: false
       enable-tests: true
       enable-build: false
-      lint-command: pnpm run validate
-      test-command: pnpm run test:control-plane
+      lint-command: node scripts/validate-release-artifacts.mjs && node scripts/validate-artifact-baseline.mjs && node scripts/validate-migration-ledger.mjs
+      test-command: node --test test/validators/*.test.mjs
